@@ -47,52 +47,71 @@ import SCons
 
 from gem5_scons import Transform
 
-Import('*')
+Import("*")
 
-if not env['CONF']['RUBY']:
+if not env["CONF"]["RUBY"]:
     Return()
 
-DebugFlag('ProtocolTrace')
-DebugFlag('RubyCache')
-DebugFlag('RubyCacheTrace')
-DebugFlag('RubyDma')
-DebugFlag('RubyGenerated')
-DebugFlag('RubyNetwork')
-DebugFlag('RubyPort')
-DebugFlag('RubyPrefetcher')
-DebugFlag('RubyQueue')
-DebugFlag('RubySequencer')
-DebugFlag('RubySlicc')
-DebugFlag('RubySystem')
-DebugFlag('RubyTester')
-DebugFlag('RubyStats')
-DebugFlag('RubyResourceStalls')
-DebugFlag('RubyProtocol')
-DebugFlag('RubyHitMiss')
+DebugFlag("IndirectLoad")
+DebugFlag("ProtocolTrace")
+DebugFlag("RubyCache")
+DebugFlag("RubyCacheTrace")
+DebugFlag("RubyDma")
+DebugFlag("RubyGenerated")
+DebugFlag("RubyNetwork")
+DebugFlag("RubyPort")
+DebugFlag("RubyPrefetcher")
+DebugFlag("RubyQueue")
+DebugFlag("RubySequencer")
+DebugFlag("RubySlicc")
+DebugFlag("RubySystem")
+DebugFlag("RubyTester")
+DebugFlag("RubyStats")
+DebugFlag("RubyResourceStalls")
+DebugFlag("RubyProtocol")
+DebugFlag("RubyHitMiss")
 
-CompoundFlag('Ruby', [ 'RubyQueue', 'RubyNetwork', 'RubyTester',
-    'RubyGenerated', 'RubySlicc', 'RubySystem', 'RubyCache',
-    'RubyDma', 'RubyPort', 'RubySequencer', 'RubyCacheTrace',
-    'RubyPrefetcher', 'RubyProtocol', 'RubyHitMiss'])
+CompoundFlag(
+    "Ruby",
+    [
+        "RubyQueue",
+        "RubyNetwork",
+        "RubyTester",
+        "RubyGenerated",
+        "RubySlicc",
+        "RubySystem",
+        "RubyCache",
+        "RubyDma",
+        "RubyPort",
+        "RubySequencer",
+        "RubyCacheTrace",
+        "RubyPrefetcher",
+        "RubyProtocol",
+        "RubyHitMiss",
+    ],
+)
 
 #
 # Link includes
 #
-generated_dir = Dir('protocol')
+generated_dir = Dir("protocol")
+
 
 def MakeIncludeAction(target, source, env):
-    with open(str(target[0]), 'w') as f:
+    with open(str(target[0]), "w") as f:
         for s in source:
             print('#include "%s"' % str(s.abspath), file=f)
+
 
 def MakeInclude(source):
     target = generated_dir.File(basename(source))
     include_action = MakeAction(MakeIncludeAction, Transform("MAKE INC", 1))
     env.Command(target, source, include_action)
 
-MakeInclude('slicc_interface/AbstractCacheEntry.hh')
-MakeInclude('slicc_interface/Message.hh')
-MakeInclude('slicc_interface/RubyRequest.hh')
+
+MakeInclude("slicc_interface/AbstractCacheEntry.hh")
+MakeInclude("slicc_interface/Message.hh")
+MakeInclude("slicc_interface/RubyRequest.hh")
 
 # External types
 MakeInclude('common/Address.hh')
