@@ -104,3 +104,7 @@ class StridedGeneratorCore(AbstractGeneratorCore):
     def start_traffic(self) -> None:
         self._set_traffic()
         self.generator.start(self._traffic)
+
+    @overrides(AbstractGeneratorCore)
+    def enable_indirect_mode(self):
+        self.generator.enableIndirectMode()
