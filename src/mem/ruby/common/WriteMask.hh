@@ -79,8 +79,7 @@ class WriteMask
     {}
 
     int getBlockSize() const { return mSize; }
-    void
-    setBlockSize(int size)
+    void setBlockSize(int size)
     {
         // This should only be used once if the default ctor was used. Probably
         // by src/mem/ruby/protocol/RubySlicc_MemControl.sm.
@@ -89,6 +88,20 @@ class WriteMask
         mSize = size;
         clear();
     }
+
+    WriteMask& operator=(const WriteMask& source) {
+        if (this != &source) {
+            mSize = source.mSize;
+            mMask = source.mMask;
+            mAtomic = source.mAtomic;
+            mAtomicOp.clear();
+            for (const auto& pair : source.mAtomicOp) {
+                mAtomicOp.push_back(std::make_pair(pair.first, pair.second->clone()));
+            }
+        }
+        return *this;
+    }
+
 
     void
     clear()

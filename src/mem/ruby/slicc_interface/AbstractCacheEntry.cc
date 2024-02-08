@@ -41,6 +41,7 @@
 #include "mem/ruby/slicc_interface/AbstractCacheEntry.hh"
 
 #include "base/trace.hh"
+#include "debug/IndirectLoad.hh"
 #include "debug/RubyCache.hh"
 
 namespace gem5
@@ -124,6 +125,18 @@ bool
 AbstractCacheEntry::getInHtmWriteSet() const
 {
     return m_htmInWriteSet;
+}
+
+void
+AbstractCacheEntry::setUsefulness(size_t byte_offset, size_t range)
+{
+    DPRINTF(IndirectLoad,
+        "%s: Setting usefulness for line-addr: "
+        "0x%lx with byte_offset: %d, range: %d.\n",
+        __func__, m_Address, byte_offset, range);
+    usefulness.setMask(byte_offset, range, true);
+    DPRINTF(IndirectLoad, "%s: Usefulness for line-addr: 0x%lx is: %s.\n",
+            __func__, m_Address, usefulness);
 }
 
 } // namespace ruby

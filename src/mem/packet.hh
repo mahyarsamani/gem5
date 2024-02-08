@@ -1570,8 +1570,8 @@ class AccessTypeIdentifier: public Extension<Packet, AccessTypeIdentifier>
         return std::make_unique<AccessTypeIdentifier>(isFloatingPoint, isAtomic);
     }
 
-    bool setFloating();
-    bool setAtomic();
+    void setFloating() { isFloatingPoint = true; }
+    void setAtomic() { isAtomic = true; }
 
     bool isFloatingPointAccess() { return isFloatingPoint; }
     bool isAtomicAccess() { return isAtomic; }
@@ -1582,6 +1582,48 @@ class AccessTypeIdentifier: public Extension<Packet, AccessTypeIdentifier>
             isFloatingPoint ? "true" : "false", isAtomic ? "true" : "false");
     }
 
+};
+
+class IndirectLoadInfo: public Extension<Packet, IndirectLoadInfo>
+{
+  private:
+    enum LoadDataType {
+        INT = 2,
+        FLOAT = 3
+    };
+
+    std::string strLoadDataType(LoadDataType type)
+    {
+        if (type == LoadDataType::INT) {
+            return "INT";
+        }
+        if (type == LoadDataType::FLOAT) {
+            return "FLOAT";
+        }
+    }
+
+    Addr baseAddr;
+    LoadDataType type;
+
+  public:
+    IndirectLoadInfo(): baseAddr(0), type(LoadDataType::INT) {}
+    IndirectLoadInfo(Addr base_addr, LoadDataType type):
+        baseAddr(base_addr), type(type)
+    {}
+
+    std::unique_ptr<ExtensionBase> clone() const override
+    {
+        return std::make_unique<IndirectLoadInfo>(baseAddr, type);
+    }
+
+    Addr getBaseAddr() { return baseAddr; }
+    LoadDataType getDataType() { return type; }
+
+    std::string print()
+    {
+        return csprintf("IndLdInf: (base_addr: 0x%lx, type: %s).\n",
+                            baseAddr, strLoadDataType(type));
+    }
 };
 
 } // namespace gem5
