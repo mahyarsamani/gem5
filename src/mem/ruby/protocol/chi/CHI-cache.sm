@@ -178,7 +178,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   // Use prefetcher
   bool use_prefetcher, default="False";
 
-  bool read_is_useful, default="False";
+  bool is_closest, default="False";
 
   // Message Queues
 
@@ -586,7 +586,6 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     RequestorID requestor,  desc="First requestor to fill this block";
     bool isFloatingPoint, default="false", desc="Whether the entry holds floating point data.";
     bool isAtomic, default="false", desc="Whether the entry holds atomic data.";
-    WriteMask usefulness, desc="A mask showing whether each byte has been used by the processor";
   }
 
   // Directory entry

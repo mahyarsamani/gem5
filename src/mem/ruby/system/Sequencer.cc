@@ -603,6 +603,12 @@ Sequencer::readCallback(Addr address, DataBlock& data,
         hitCallback(&seq_req, data, true, mach, externalHit,
                     initialRequestTime, forwardRequestTime,
                     firstResponseTime, !ruby_request);
+        size_t byte_offset = seq_req.pkt->getAddr() - address;
+        size_t range = seq_req.pkt->getSize();
+        DPRINTF(IndirectLoad, "%s: Servicing a read response for addr: 0x%lx "
+                                "with byte_offset: %d, and range: %d.\n",
+                                __func__, address, byte_offset, range);
+        m_dataCache_ptr->setUsefulBits(address, byte_offset, range);
         ruby_request = false;
         seq_req_list.pop_front();
     }

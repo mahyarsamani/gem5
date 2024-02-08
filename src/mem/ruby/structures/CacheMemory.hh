@@ -50,6 +50,7 @@
 #include "mem/cache/replacement_policies/base.hh"
 #include "mem/cache/replacement_policies/replaceable_entry.hh"
 #include "mem/ruby/common/DataBlock.hh"
+#include "mem/ruby/common/WriteMask.hh"
 #include "mem/ruby/protocol/CacheRequestType.hh"
 #include "mem/ruby/protocol/CacheResourceType.hh"
 #include "mem/ruby/protocol/RubyRequest.hh"
@@ -160,6 +161,9 @@ class CacheMemory : public SimObject
     int getNumBlocks() const { return m_cache_num_sets * m_cache_assoc; }
     Addr getAddressAtIdx(int idx) const;
 
+    // TODO: Implement this
+    void setUsefulBits(Addr line_addr, size_t byte_offset, size_t range);
+
   private:
     // convert a Address to its location in the cache
     int64_t addressToCacheSet(Addr address) const;
@@ -213,42 +217,49 @@ class CacheMemory : public SimObject
      */
     bool m_use_occupancy;
 
-    private:
-      struct CacheMemoryStats : public statistics::Group
-      {
-          CacheMemoryStats(statistics::Group *parent);
+  private:
+    struct CacheMemoryStats : public statistics::Group
+    {
+        CacheMemoryStats(statistics::Group *parent);
 
-          statistics::Scalar numDataArrayReads;
-          statistics::Scalar numDataArrayWrites;
-          statistics::Scalar numTagArrayReads;
-          statistics::Scalar numTagArrayWrites;
+        statistics::Scalar numDataArrayReads;
+        statistics::Scalar numDataArrayWrites;
+        statistics::Scalar numTagArrayReads;
+        statistics::Scalar numTagArrayWrites;
 
-          statistics::Scalar numTagArrayStalls;
-          statistics::Scalar numDataArrayStalls;
+        statistics::Scalar numTagArrayStalls;
+        statistics::Scalar numDataArrayStalls;
 
-          statistics::Scalar numAtomicALUOperations;
-          statistics::Scalar numAtomicALUArrayStalls;
+        statistics::Scalar numAtomicALUOperations;
+        statistics::Scalar numAtomicALUArrayStalls;
 
-          // hardware transactional memory
-          statistics::Histogram htmTransCommitReadSet;
-          statistics::Histogram htmTransCommitWriteSet;
-          statistics::Histogram htmTransAbortReadSet;
-          statistics::Histogram htmTransAbortWriteSet;
+        // hardware transactional memory
+        statistics::Histogram htmTransCommitReadSet;
+        statistics::Histogram htmTransCommitWriteSet;
+        statistics::Histogram htmTransAbortReadSet;
+        statistics::Histogram htmTransAbortWriteSet;
 
-          statistics::Scalar m_demand_hits;
-          statistics::Scalar m_demand_misses;
-          statistics::Formula m_demand_accesses;
+        statistics::Scalar m_demand_hits;
+        statistics::Scalar m_demand_misses;
+        statistics::Formula m_demand_accesses;
 
-          statistics::Scalar m_prefetch_hits;
-          statistics::Scalar m_prefetch_misses;
-          statistics::Formula m_prefetch_accesses;
+        statistics::Scalar m_prefetch_hits;
+        statistics::Scalar m_prefetch_misses;
+        statistics::Formula m_prefetch_accesses;
 
-          statistics::Vector m_accessModeType;
-      } cacheMemoryStats;
+        statistics::Vector m_accessModeType;
+
+        statistics::Histogram usefulBytes;
+    } cacheMemoryStats;
+
+    std::unordered_map<int64_t, WriteMask> pendingWriteMasks;
 
     public:
+      void resetStats() override;
       // These function increment the number of demand hits/misses by one
       // each time they are called
+      // TODO: Implement this function.
+      void profileUsefulBits(Addr line_address);
       void profileDemandHit();
       void profileDemandMiss();
       void profilePrefetchHit();

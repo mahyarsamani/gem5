@@ -161,6 +161,9 @@ action(AllocateTBE_SeqRequest, desc="") {
         } else {
           out_msg.type := CHIRequestType:Store;
         }
+      } else if (in_msg.Type == RubyRequestType:LDIND) {
+        out_msg.type := CHIRequestType:Load;
+        // TODO: Add information to distinguish this as an indirect
       } else if (in_msg.Type == RubyRequestType:ATOMIC_RETURN) {
         out_msg.type := CHIRequestType:AtomicLoad;
       } else if (in_msg.Type == RubyRequestType:ATOMIC_NO_RETURN){
@@ -391,6 +394,8 @@ action(RestoreFromHazard, desc="") {
 action(Initiate_Replacement, desc="") {
   assert(is_invalid(tbe));
   State initial := getState(tbe, cache_entry, address);
+  cache.profileUsefulBits(address);
+  DPRINTF(IndirectLoad, "Initiate_Replacement action, address: 0x%lx.\n", address);
   if (unify_repl_TBEs) {
     peek(replTriggerInPort, ReplacementMsg) {
       set_tbe(allocateReplacementTBEOnSlot(address, in_msg.slot));
@@ -3587,6 +3592,7 @@ action(ProcessNextState_ClearPending, desc="") {
 
 action(Callback_LoadHit, desc="") {
   assert(is_valid(tbe));
+  DPRINTF(IndirectLoad, "Callback_LoadHit action for addr 0x%lx.\n", tbe.accAddr);
   assert(tbe.reqType == CHIRequestType:Load);
   if (tbe.is_local_pf == false) {
     assert(tbe.dataValid);
@@ -3644,6 +3650,7 @@ action(Callback_ExpressPrefetchHit, desc="") {
 // NOTE: should create a separate trigger for this callback ?
 action(Callback_Miss, desc="") {
   assert(is_valid(tbe));
+  DPRINTF(IndirectLoad, "Callback_Miss action for addr 0x%lx.\n", tbe.accAddr);
   if (tbe.dataValid && tbe.is_local_pf) {
     assert(use_prefetcher);
     pfProxy.completePrefetch(tbe.addr);

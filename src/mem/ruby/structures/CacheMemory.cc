@@ -45,6 +45,7 @@
 #include "base/intmath.hh"
 #include "base/logging.hh"
 #include "debug/HtmMem.hh"
+#include "debug/IndirectLoad.hh"
 #include "debug/RubyCache.hh"
 #include "debug/RubyCacheTrace.hh"
 #include "debug/RubyResourceStalls.hh"
@@ -312,7 +313,13 @@ CacheMemory::allocate(Addr address, AbstractCacheEntry *entry)
             // Call reset function here to set initial value for different
             // replacement policies.
             m_replacementPolicy_ptr->reset(entry->replacementData);
-
+            if (pendingWriteMasks.find(address) != pendingWriteMasks.end()) {
+                entry->copyUsefulness(pendingWriteMasks[address]);
+                pendingWriteMasks.erase(address);
+            }
+            DPRINTF(IndirectLoad, "%s: Allocated an entry for addr: 0x%lx "
+                                    "with the following usefulness: %s.\n",
+                                __func__, address, entry->getUsefulness());
             return entry;
         }
     }
@@ -559,7 +566,8 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
       ADD_STAT(m_prefetch_misses, "Number of cache prefetch misses"),
       ADD_STAT(m_prefetch_accesses, "Number of cache prefetch accesses",
                m_prefetch_hits + m_prefetch_misses),
-      ADD_STAT(m_accessModeType, "")
+      ADD_STAT(m_accessModeType, ""),
+      ADD_STAT(usefulBytes, "Number of useful bytes per block.")
 {
     numDataArrayReads
         .flags(statistics::nozero);
@@ -618,12 +626,31 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
         .init(RubyRequestType_NUM)
         .flags(statistics::pdf | statistics::total);
 
+    usefulBytes
+        .init(RubySystem::getBlockSizeBytes())
+        .flags(statistics::nozero | statistics::nonan);
+
     for (int i = 0; i < RubyAccessMode_NUM; i++) {
         m_accessModeType
             .subname(i, RubyAccessMode_to_string(RubyAccessMode(i)))
             .flags(statistics::nozero)
             ;
     }
+}
+
+void
+CacheMemory::resetStats()
+{
+    statistics::Group::resetStats();
+    DPRINTF(IndirectLoad, "%s: Resetting all the useful bits.\n", __func__);
+    for (auto& set: m_cache) {
+        for (auto& entry: set) {
+            if (entry != nullptr) {
+                entry->resetUsefulness();
+            }
+        }
+    }
+    pendingWriteMasks.clear();
 }
 
 // assumption: SLICC generated files will only call this function
@@ -780,6 +807,29 @@ CacheMemory::htmCommitTransaction()
     cacheMemoryStats.htmTransCommitWriteSet.sample(htmWriteSetSize);
     DPRINTF(HtmMem, "htmCommitTransaction: read set=%u write set=%u\n",
         htmReadSetSize, htmWriteSetSize);
+}
+
+void
+CacheMemory::setUsefulBits(Addr line_addr, size_t byte_offset, size_t range)
+{
+    AbstractCacheEntry* entry = lookup(line_addr);
+    if (entry != nullptr) {
+        assert(pendingWriteMasks.find(line_addr) == pendingWriteMasks.end());
+        entry->setUsefulness(byte_offset, range);
+    } else {
+        pendingWriteMasks[line_addr].setMask(byte_offset, range, true);
+    }
+}
+
+void
+CacheMemory::profileUsefulBits(Addr line_addr)
+{
+    AbstractCacheEntry* entry = lookup(line_addr);
+    assert(entry != nullptr);
+    cacheMemoryStats.usefulBytes.sample(entry->getUsefulness().count());
+    DPRINTF(IndirectLoad, "%s: Sampling usefulness for line-addr: 0x%lx with "
+        "count: %d.\n", __func__, line_addr, entry->getUsefulness().count());
+    entry->resetUsefulness();
 }
 
 void
