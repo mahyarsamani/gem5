@@ -341,6 +341,7 @@ in_port(reqRdyPort, CHIRequestMsg, reqRdy, rank=3,
           if (is_invalid(dir_entry) ||
               (dir_entry.sharers.isElement(in_msg.requestor) == false)) {
             trigger(Event:Evict_Stale, in_msg.addr, cache_entry, tbe);
+            DPRINTF(IndirectLoad, "Triggering Evict_Stale event from line 343 in CHI-cache-ports.sm.\n");
           }
         } else if (in_msg.type == CHIRequestType:CleanUnique) {
           if (is_invalid(dir_entry) ||

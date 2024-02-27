@@ -616,6 +616,20 @@ Sequencer::readCallback(Addr address, DataBlock& data,
         if (processReadCallback(seq_req, data, ruby_request, externalHit, mach,
                                 initialRequestTime, forwardRequestTime,
                                 firstResponseTime)) {
+        if (seq_req.m_type == RubyRequestType_LDIND) {
+            seq_req.m_type = RubyRequestType_LD;
+        }
+        if (ruby_request) {
+            assert((seq_req.m_type == RubyRequestType_LD) ||
+                   (seq_req.m_type == RubyRequestType_Load_Linked) ||
+                   (seq_req.m_type == RubyRequestType_IFETCH));
+        }
+        if ((seq_req.m_type != RubyRequestType_LD) &&
+            (seq_req.m_type != RubyRequestType_Load_Linked) &&
+            (seq_req.m_type != RubyRequestType_IFETCH) &&
+            (seq_req.m_type != RubyRequestType_REPLACEMENT)) {
+            // Write request: reissue request to the cache hierarchy
+            issueRequest(seq_req.pkt, seq_req.m_second_type);
             break;
         }
         if (ruby_request) {
