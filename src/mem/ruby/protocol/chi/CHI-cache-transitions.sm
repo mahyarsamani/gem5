@@ -1789,3 +1789,11 @@ transition(DvmExtOp_Finished, Final, I) {
   Pop_TriggerQueue;
   Finalize_DeallocateDvmSnoop;
 }
+
+// transition(I, LoadIndex) {
+//   Initiate_Request;
+//   Initiate_LoadIndexMiss;
+//   Profile_Miss;
+//   Pop_ReqRdyQueue;
+//   processNextState;
+// }

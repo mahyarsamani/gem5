@@ -576,6 +576,8 @@ TBE _allocateReplacementTBE(Addr addr, int storSlot), return_by_pointer="yes" {
   tbe.use_DMT := false;
   tbe.use_DCT := false;
 
+  tbe.usefulness := cache.getUsefulBits(addr);
+
   return tbe;
 }
 
@@ -795,6 +797,12 @@ bool needCacheEntry(CHIRequestType req_type,
   // - if entry already valid
   // - if using DMT; the request is a Read*; and dir entry is invalid
   // oterwise follow config params
+  // if (is_valid(cache_entry) ||
+  //     (enable_DMT && is_invalid(dir_entry) &&
+  //      ((req_type == CHIRequestType:ReadShared) ||
+  //       (req_type == CHIRequestType:ReadUnique) ||
+  //       (req_type == CHIRequestType:ReadOnce))) ||
+  //       req_type == CHIRequestType:LoadIndex) {
   if (is_valid(cache_entry) ||
       (enable_DMT && is_invalid(dir_entry) &&
        ((req_type == CHIRequestType:ReadShared) ||
@@ -1298,6 +1306,8 @@ Event reqToEvent(CHIRequestType type, bool is_prefetch) {
     } else {
       return Event:AtomicNoReturn;
     }
+  // } else if (type == CHIRequestType:LoadIndex) {
+  //  return Event:LoadIndex;
   } else {
     error("Invalid CHIRequestType");
   }

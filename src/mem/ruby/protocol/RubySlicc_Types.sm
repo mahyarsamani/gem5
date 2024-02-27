@@ -233,6 +233,8 @@ structure (CacheMemory, external = "yes") {
   int getNumBlocks();
   Addr getAddressAtIdx(int);
 
+  WriteMask getUsefulBits(Addr);
+
   void profileUsefulBits(Addr);
   void profileDemandHit();
   void profileDemandMiss();

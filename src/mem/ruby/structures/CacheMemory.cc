@@ -821,6 +821,15 @@ CacheMemory::setUsefulBits(Addr line_addr, size_t byte_offset, size_t range)
     }
 }
 
+WriteMask
+CacheMemory::getUsefulBits(Addr line_addr)
+{
+    AbstractCacheEntry* entry = lookup(line_addr);
+    assert(entry != nullptr);
+
+    return entry->getUsefulness();
+}
+
 void
 CacheMemory::profileUsefulBits(Addr line_addr)
 {

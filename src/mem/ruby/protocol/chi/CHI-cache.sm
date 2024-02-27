@@ -342,6 +342,9 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     SnpStalled, desc="", in_trans="yes"; // A snoop stall triggered from the inport
     StashOnceShared,             desc="", in_trans="yes"; // Just discarding the hint
     StashOnceUnique,             desc="", in_trans="yes"; // Just discarding the hint
+    // Event to read the indexer array
+    // MYSTUFF
+    // LoadIndex,                 desc="", in_trans="yes";
 
     // DVM sequencer requests
     DvmTlbi_Initiate, desc="", out_trans="yes", in_trans="yes"; // triggered when a CPU core wants to send a TLBI
@@ -564,7 +567,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     // This is triggered once a transaction doesn't have
     // any queued action and is not expecting responses/data. The transaction
-    // is finalized and the next stable state is stored in the cache/directory
+    // is finalized and the next stable state is stored in the cache/
     // See the processNextState and makeFinalState functions
     Final, desc="";
 
@@ -770,6 +773,8 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     bool is_floating_point;
     bool is_atomic;
+    // MYSTUFF
+    WriteMask usefulness, desc="Usefulness bits for the respective cache line";
   }
 
   // TBE table definition

@@ -581,6 +581,9 @@ Sequencer::readCallback(Addr address, DataBlock& data,
     bool ruby_request = true;
     while (!seq_req_list.empty()) {
         SequencerRequest &seq_req = seq_req_list.front();
+        if (seq_req.m_type == RubyRequestType_LDIND) {
+            seq_req.m_type = RubyRequestType_LD;
+        }
         if (ruby_request) {
             assert((seq_req.m_type == RubyRequestType_LD) ||
                    (seq_req.m_type == RubyRequestType_Load_Linked) ||

@@ -97,6 +97,9 @@ enumeration(CHIRequestType, desc="") {
   DvmOpNonSync;
   DvmOpSync;
 
+
+  // LoadIndex;
+
   null;
 }
 
@@ -123,6 +126,8 @@ structure(CHIRequestMsg, desc="", interface="Message") {
   bool usesTxnId,       desc="True if using a Transaction ID", default="false";
   Addr txnId,           desc="Transaction ID", default="0";
   bool ns,              desc="Secure State of the transaction. NS=NonSecure", default="true";
+
+  WriteMask usefulness,     desc="Mask denoting bytes that were useful";
 
   MessageSizeType MessageSize, default="MessageSizeType_Control";
 

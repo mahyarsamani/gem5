@@ -164,6 +164,8 @@ class CacheMemory : public SimObject
     // TODO: Implement this
     void setUsefulBits(Addr line_addr, size_t byte_offset, size_t range);
 
+    WriteMask getUsefulBits(Addr line_addr);
+
   private:
     // convert a Address to its location in the cache
     int64_t addressToCacheSet(Addr address) const;

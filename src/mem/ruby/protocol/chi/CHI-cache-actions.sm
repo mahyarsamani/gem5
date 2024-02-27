@@ -48,6 +48,7 @@ action(AllocateTBE_Request, desc="") {
     // Move request to rdy queue
     peek(reqInPort, CHIRequestMsg) {
       enqueue(reqRdyOutPort, CHIRequestMsg, allocation_latency) {
+        DPRINTF(IndirectLoad, "Received a message with type %s.\n", in_msg.type);
         assert(in_msg.addr == address);
         assert(in_msg.is_local_pf == false);
         out_msg := in_msg;
@@ -162,8 +163,8 @@ action(AllocateTBE_SeqRequest, desc="") {
           out_msg.type := CHIRequestType:Store;
         }
       } else if (in_msg.Type == RubyRequestType:LDIND) {
+      //  out_msg.type := CHIRequestType:LoadIndex;
         out_msg.type := CHIRequestType:Load;
-        // TODO: Add information to distinguish this as an indirect
       } else if (in_msg.Type == RubyRequestType:ATOMIC_RETURN) {
         out_msg.type := CHIRequestType:AtomicLoad;
       } else if (in_msg.Type == RubyRequestType:ATOMIC_NO_RETURN){
@@ -1676,6 +1677,7 @@ action(Send_Evict, desc="") {
     prepareRequest(tbe, CHIRequestType:Evict, out_msg);
     out_msg.Destination.add(mapAddressToDownstreamMachine(tbe.addr));
     allowRequestRetry(tbe, out_msg);
+    out_msg.usefulness := tbe.usefulness;
   }
   tbe.expected_req_resp.addExpectedRespType(CHIResponseType:Comp_I);
   tbe.expected_req_resp.setExpectedCount(1);
