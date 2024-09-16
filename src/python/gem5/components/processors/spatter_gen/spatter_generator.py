@@ -31,6 +31,7 @@ from typing import (
 )
 
 from m5.objects import (
+    SpatterAccessMode,
     SpatterProcessingMode,
     SrcClockDomain,
     VoltageDomain,
@@ -145,3 +146,7 @@ class SpatterGenerator(AbstractGenerator):
                 reset_stats()
                 self._proceed_past_sync_point()
             yield not (sync_points_observed < sync_points_expected)
+
+    def set_access_mode(self, access_mode: SpatterAccessMode) -> None:
+        for core in self.cores:
+            core.set_access_mode(access_mode)

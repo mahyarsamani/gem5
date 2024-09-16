@@ -36,6 +36,7 @@
 #include "base/statistics.hh"
 #include "base/stats/group.hh"
 #include "cpu/testers/spatter_gen/utility_structs.hh"
+#include "enums/SpatterAccessMode.hh"
 #include "enums/SpatterKernelType.hh"
 #include "enums/SpatterProcessingMode.hh"
 #include "mem/packet.hh"
@@ -78,6 +79,7 @@ namespace gem5
 class SpatterGen: public ClockedObject
 {
   private:
+    typedef enums::SpatterAccessMode SpatterAccessMode;
     typedef enums::SpatterKernelType SpatterKernelType;
     typedef enums::SpatterProcessingMode SpatterProcessingMode;
 
@@ -179,7 +181,8 @@ class SpatterGen: public ClockedObject
     bool ultAccessOk(int int_regs, int fp_regs, Tick when) const;
 
     // param related members (not necessarily one-to-one with params)
-    SpatterProcessingMode mode;
+    SpatterAccessMode accessMode;
+    SpatterProcessingMode processingMode;
     SpatterGenPort port;
     // size of the register files,
     // for every memory instruction we need to allocate one register.
@@ -245,6 +248,8 @@ class SpatterGen: public ClockedObject
     );
 
     void proceedPastSyncPoint();
+
+    void setAccessMode(SpatterAccessMode mode) { accessMode = mode; }
 };
 
 } // namespace gem5

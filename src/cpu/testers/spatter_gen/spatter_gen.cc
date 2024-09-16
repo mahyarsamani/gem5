@@ -49,7 +49,7 @@ SpatterGen::SpatterGen(const Params& params):
     requestorId(params.system->getRequestorId(this)),
     numPendingMemRequests(0),
     stats(this),
-    mode(params.processing_mode),
+    processingMode(params.processing_mode),
     port(this, name() + ".port"),
     intRegFileSize(params.int_regfile_size), intRegUsed(0),
     fpRegFileSize(params.fp_regfile_size), fpRegUsed(0),
@@ -230,7 +230,7 @@ SpatterGen::addKernel(
 void
 SpatterGen::proceedPastSyncPoint()
 {
-    assert(mode == SpatterProcessingMode::synchronous);
+    assert(processingMode == SpatterProcessingMode::synchronous);
     assert(state == SpatterGenState::WAITING);
     state = SpatterGenState::RUNNING;
     scheduleNextGenEvent(nextCycle());
@@ -249,10 +249,10 @@ SpatterGen::checkForSimExit()
     if (!can_do_init && !can_do_mid && !can_do_ult && no_pending && no_queued)
     {
         assert((
-                (mode == SpatterProcessingMode::synchronous) &&
+                (processingMode == SpatterProcessingMode::synchronous) &&
                 (state == SpatterGenState::DRAINING)
                 ) ||
-                mode == SpatterProcessingMode::asynchronous
+                processingMode == SpatterProcessingMode::asynchronous
             );
         state = SpatterGenState::WAITING;
         exitSimLoop(
@@ -267,9 +267,9 @@ bool
 SpatterGen::initAccessOk(int int_regs, int fp_regs, Tick when) const
 {
     bool have_int_reg = int_regs > 0;
-    // for mode == SpatterProcessingMode::asynchronous state will always be
-    // SpatterGenState::RUNNING. we don't have to do checks for mode.
-    // for mode == SpatterProcessingMode::synchronous, if state is
+    // for processingMode == SpatterProcessingMode::asynchronous state will always be
+    // SpatterGenState::RUNNING. we don't have to do checks for processingMode.
+    // for processingMode == SpatterProcessingMode::synchronous, if state is
     // SpatterGenState::DRAINING or SpatterGenState::WAITING
     // we can't initiate any new indirect accesses.
     bool have_kernel = !kernels.empty() && (state == SpatterGenState::RUNNING);
@@ -342,99 +342,136 @@ SpatterGen::processNextGenEvent()
             nextGenEvent.sleep();
             break;
         }
-        // Now we know that AGU[i] is available and there is room
-        // in the requestBuffer to put the packet.
-        if (ultAccessOk(int_regs_now, fp_regs_now, curTick())) {
-            // occupy one fp register
-            fp_regs_now--;
-            fp_used_now++;
-            // make AGU busy for the next requestGenLatency cycles.
-            generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
+        if (accessMode == SpatterAccessMode::normal) {
+            // Now we know that AGU[i] is available and there is room
+            // in the requestBuffer to put the packet.
+            if (ultAccessOk(int_regs_now, fp_regs_now, curTick())) {
+                // occupy one fp register
+                fp_regs_now--;
+                fp_used_now++;
+                // make AGU busy for the next requestGenLatency cycles.
+                generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
 
-            // create a new packet to access
-            SpatterAccess* spatter_access = receiveBuffer.front();
-            PacketPtr pkt = spatter_access->nextPacket();
-            pkt->pushSenderState(spatter_access);
+                // create a new packet to access
+                SpatterAccess* spatter_access = receiveBuffer.front();
+                PacketPtr pkt = spatter_access->nextPacketAsNormal();
+                pkt->pushSenderState(spatter_access);
 
-            // push to requestBuffer
-            requestBuffer.push(pkt, curTick());
-            DPRINTF(
-                SpatterGen,
-                "%s: Pushed pkt: %s to requestBuffer.\n",
-                __func__, pkt->print()
-            );
-
-            // now deallocate resources for reading the index
-            int_used_now--;
-            receiveBuffer.pop();
-        } else if (interAccessOk(int_regs_now, fp_regs_now, curTick())) {
-            // occupy one int register
-            int_regs_now--;
-            int_used_now++;
-            // make AGU busy for the next requestGenLatency cycles.
-            generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
-
-            // create a new packet to access
-            SpatterAccess* spatter_access = receiveBuffer.front();
-            PacketPtr pkt = spatter_access->nextPacket();
-            pkt->pushSenderState(spatter_access);
-
-            // push to requestBuffer
-            requestBuffer.push(pkt, curTick());
-            DPRINTF(
-                SpatterGen,
-                "%s: Pushed pkt: %s to requestBuffer.\n",
-                __func__, pkt->print()
-            );
-
-            // now deallocate resources for reading the index
-            int_used_now--;
-            receiveBuffer.pop();
-        } else if (initAccessOk(int_regs_now, fp_regs_now, curTick())) {
-            // occupy one int register
-            int_regs_now--;
-            int_used_now++;
-            generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
-
-            SpatterKernel& front = kernels.front();
-            SpatterAccess* spatter_access = front.nextSpatterAccess();
-            PacketPtr pkt = spatter_access->nextPacket();
-            pkt->pushSenderState(spatter_access);
-
-            requestBuffer.push(pkt, curTick());
-            DPRINTF(
-                SpatterGen,
-                "%s: Pushed pkt: %s to requestBuffer.\n",
-                __func__, pkt->print()
-            );
-
-            if (front.done()) {
+                // push to requestBuffer
+                requestBuffer.push(pkt, curTick());
                 DPRINTF(
-                    SpatterKernel,
-                    "%s: Done with kernel %d type: %s.\n",
-                    __func__, front.id(),
-                    SpatterKernelTypeStrings[front.type()]
+                    SpatterGen,
+                    "%s: Pushed pkt: %s to requestBuffer.\n",
+                    __func__, pkt->print()
                 );
-                kernels.pop();
-                // If we're processing synchronously we now have to stop
-                // making intial accesses and wait everyone to receive
-                // all expected responses.
-                if (mode == SpatterProcessingMode::synchronous) {
-                    state = SpatterGenState::DRAINING;
+
+                // now deallocate resources for reading the index
+                int_used_now--;
+                receiveBuffer.pop();
+            } else if (interAccessOk(int_regs_now, fp_regs_now, curTick())) {
+                // occupy one int register
+                int_regs_now--;
+                int_used_now++;
+                // make AGU busy for the next requestGenLatency cycles.
+                generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
+
+                // create a new packet to access
+                SpatterAccess* spatter_access = receiveBuffer.front();
+                PacketPtr pkt = spatter_access->nextPacketAsNormal();
+                pkt->pushSenderState(spatter_access);
+
+                // push to requestBuffer
+                requestBuffer.push(pkt, curTick());
+                DPRINTF(
+                    SpatterGen,
+                    "%s: Pushed pkt: %s to requestBuffer.\n",
+                    __func__, pkt->print()
+                );
+
+                // now deallocate resources for reading the index
+                int_used_now--;
+                receiveBuffer.pop();
+            } else if (initAccessOk(int_regs_now, fp_regs_now, curTick())) {
+                // occupy one int register
+                int_regs_now--;
+                int_used_now++;
+                generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
+
+                SpatterKernel& front = kernels.front();
+                SpatterAccess* spatter_access = front.nextSpatterAccess();
+                PacketPtr pkt = spatter_access->nextPacketAsNormal();
+                pkt->pushSenderState(spatter_access);
+
+                requestBuffer.push(pkt, curTick());
+                DPRINTF(
+                    SpatterGen,
+                    "%s: Pushed pkt: %s to requestBuffer.\n",
+                    __func__, pkt->print()
+                );
+
+                if (front.done()) {
+                    DPRINTF(
+                        SpatterKernel,
+                        "%s: Done with kernel %d type: %s.\n",
+                        __func__, front.id(),
+                        SpatterKernelTypeStrings[front.type()]
+                    );
+                    kernels.pop();
+                    // If we're processing synchronously we now have to stop
+                    // making intial accesses and wait everyone to receive
+                    // all expected responses.
+                    if (processingMode == SpatterProcessingMode::synchronous) {
+                        state = SpatterGenState::DRAINING;
+                    }
                 }
+            } else {
+                DPRINTF(
+                    SpatterGen,
+                    "%s: Nothing more could be done this cycle.\n", __func__
+                    );
+                DPRINTF(SpatterGen, "%s: Here is h/w status report: "
+                    "{KERNELS_REMAIN: %d, INDEXES_REMAIN: %d, INT_REG_USED: %d, "
+                    "FP_REG_USED: %d, REQ_BUFF_SIZE: %d}.\n",
+                    __func__, kernels.size(), receiveBuffer.size(),
+                    intRegUsed, fpRegUsed, requestBuffer.size());
+                break;
+            }
+        } else if (accessMode == SpatterAccessMode::indirect) {
+            // We're in SpatterAccessMode::indirect mode.
+            // every access is ultimate access.
+            if (ultAccessOk(int_regs_now, fp_regs_now, curTick())) {
+                // occupy one fp register
+                fp_regs_now--;
+                fp_used_now++;
+                // make AGU busy for the next requestGenLatency cycles.
+                generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
+
+                // create a new packet to access
+                SpatterAccess* spatter_access = receiveBuffer.front();
+                PacketPtr pkt = spatter_access->nextPacketAsInd();
+                pkt->pushSenderState(spatter_access);
+
+                // push to requestBuffer
+                requestBuffer.push(pkt, curTick());
+                DPRINTF(
+                    SpatterGen,
+                    "%s: Pushed pkt: %s to requestBuffer.\n",
+                    __func__, pkt->print()
+                );
+            } else {
+                DPRINTF(
+                    SpatterGen,
+                    "%s: Nothing more could be done this cycle.\n", __func__
+                    );
+                DPRINTF(SpatterGen, "%s: Here is h/w status report: "
+                    "{KERNELS_REMAIN: %d, INDEXES_REMAIN: %d, INT_REG_USED: %d, "
+                    "FP_REG_USED: %d, REQ_BUFF_SIZE: %d}.\n",
+                    __func__, kernels.size(), receiveBuffer.size(),
+                    intRegUsed, fpRegUsed, requestBuffer.size());
+                break;
             }
         } else {
-            //
-            DPRINTF(
-                SpatterGen,
-                "%s: Nothing more could be done this cycle.\n", __func__
-                );
-            DPRINTF(SpatterGen, "%s: Here is h/w status report: "
-                "{KERNELS_REMAIN: %d, INDEXES_REMAIN: %d, INT_REG_USED: %d, "
-                "FP_REG_USED: %d, REQ_BUFF_SIZE: %d}.\n",
-                __func__, kernels.size(), receiveBuffer.size(),
-                intRegUsed, fpRegUsed, requestBuffer.size());
-            break;
+            panic("Unknown access mode.");
         }
     }
 

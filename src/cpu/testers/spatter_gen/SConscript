@@ -29,7 +29,7 @@ Import("*")
 SimObject(
     "SpatterGen.py",
     sim_objects=["SpatterGen"],
-    enums=["SpatterKernelType", "SpatterProcessingMode"],
+    enums=["SpatterKernelType", "SpatterProcessingMode", "SpatterAccessMode"],
 )
 
 Source("spatter_gen.cc")

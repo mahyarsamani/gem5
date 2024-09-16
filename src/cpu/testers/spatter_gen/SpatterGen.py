@@ -39,6 +39,10 @@ class SpatterProcessingMode(Enum):
     vals = ["synchronous", "asynchronous"]
 
 
+class SpatterAccessMode(Enum):
+    vals = ["normal", "indirect"]
+
+
 class SpatterGen(ClockedObject):
     type = "SpatterGen"
     cxx_header = "cpu/testers/spatter_gen/spatter_gen.hh"
@@ -68,6 +72,7 @@ class SpatterGen(ClockedObject):
     cxx_exports = [
         PyBindMethod("addKernel"),
         PyBindMethod("proceedPastSyncPoint"),
+        PyBindMethod("setAccessMode"),
     ]
 
 

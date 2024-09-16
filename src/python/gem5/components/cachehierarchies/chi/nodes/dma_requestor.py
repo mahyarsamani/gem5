@@ -76,3 +76,5 @@ class DMARequestor(AbstractNode):
         self.number_of_DVM_TBEs = 1  # should not receive any dvm
         self.number_of_DVM_snoop_TBEs = 1  # should not receive any dvm
         self.unify_repl_TBEs = False
+
+        self.is_closest = False
