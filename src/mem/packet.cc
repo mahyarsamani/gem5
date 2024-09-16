@@ -75,6 +75,10 @@ MemCmd::commandInfo[] =
     /* ReadRespWithInvalidate */
     { {IsRead, IsResponse, HasData, IsInvalidate},
             InvalidCmd, "ReadRespWithInvalidate" },
+    /* IndReadReq */
+    { {IsRead, IsRequest, NeedsResponse}, IndReadResp, "IndReadReq" },
+    /* IndReadResp */
+    { {IsRead, IsResponse, HasData}, InvalidCmd, "IndReadResp" },
     /* WriteReq */
     { {IsWrite, NeedsWritable, IsRequest, NeedsResponse, HasData},
             WriteResp, "WriteReq" },
@@ -99,6 +103,11 @@ MemCmd::commandInfo[] =
     /* WriteClean - This allows a cache to write a dirty block to a memory
        below without evicting its copy. */
     { {IsWrite, IsRequest, HasData, FromCache}, InvalidCmd, "WriteClean" },
+    /* IndWriteReq */
+    { {IsWrite, NeedsWritable, IsRequest, NeedsResponse, HasData},
+            IndWriteResp, "IndWriteReq" },
+    /* IndWriteResp */
+    { {IsWrite, IsResponse}, InvalidCmd, "IndWriteResp" },
     /* CleanEvict */
     { {IsRequest, IsEviction, FromCache}, InvalidCmd, "CleanEvict" },
     /* SoftPFReq */
