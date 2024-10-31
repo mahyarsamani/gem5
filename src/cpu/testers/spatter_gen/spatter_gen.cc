@@ -281,6 +281,7 @@ SpatterGen::interAccessOk(int int_regs, int fp_regs, Tick when) const
 {
     bool have_int_reg = int_regs > 0;
     bool have_index = receiveBuffer.hasReady(when);
+    // FIXME: This does not mean that we don't have any intermediate indices
     bool mid_idx = have_index && (receiveBuffer.front()->tripsLeft() > 1);
     return mid_idx && have_int_reg;
 }
@@ -292,6 +293,14 @@ SpatterGen::ultAccessOk(int int_regs, int fp_regs, Tick when) const
     bool have_index = receiveBuffer.hasReady(when);
     bool val_idx = have_index && (receiveBuffer.front()->tripsLeft() == 1);
     return val_idx && have_fp_reg;
+}
+
+bool
+SpatterGen::indirAccessOk(int int_regs, int fp_regs, Tick when) const
+{
+    bool have_fp_reg = fp_regs > 0;
+    bool have_kernel = !kernels.empty() && (state == SpatterGenState::RUNNING);
+    return have_fp_reg;
 }
 
 void
@@ -439,25 +448,39 @@ SpatterGen::processNextGenEvent()
         } else if (accessMode == SpatterAccessMode::indirect) {
             // We're in SpatterAccessMode::indirect mode.
             // every access is ultimate access.
-            if (ultAccessOk(int_regs_now, fp_regs_now, curTick())) {
+            if (indirAccessOk(int_regs_now, fp_regs_now, curTick())) {
                 // occupy one fp register
                 fp_regs_now--;
                 fp_used_now++;
-                // make AGU busy for the next requestGenLatency cycles.
                 generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
 
-                // create a new packet to access
-                SpatterAccess* spatter_access = receiveBuffer.front();
+                SpatterKernel& front = kernels.front();
+                SpatterAccess* spatter_access = front.nextSpatterAccess();
                 PacketPtr pkt = spatter_access->nextPacketAsInd();
                 pkt->pushSenderState(spatter_access);
 
-                // push to requestBuffer
                 requestBuffer.push(pkt, curTick());
                 DPRINTF(
                     SpatterGen,
                     "%s: Pushed pkt: %s to requestBuffer.\n",
                     __func__, pkt->print()
                 );
+
+                if (front.done()) {
+                    DPRINTF(
+                        SpatterKernel,
+                        "%s: Done with kernel %d type: %s.\n",
+                        __func__, front.id(),
+                        SpatterKernelTypeStrings[front.type()]
+                    );
+                    kernels.pop();
+                    // If we're processing synchronously we now have to stop
+                    // making intial accesses and wait everyone to receive
+                    // all expected responses.
+                    if (processingMode == SpatterProcessingMode::synchronous) {
+                        state = SpatterGenState::DRAINING;
+                    }
+                }
             } else {
                 DPRINTF(
                     SpatterGen,

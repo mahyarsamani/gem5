@@ -142,7 +142,7 @@ struct SpatterAccess : public Packet::SenderState
         std::tie(addr, size) = nextAccessPair();
         MemCmd cmd;
         cmd = _kernelType == SpatterKernelType::gather ? \
-            MemCmd::IndReadReq : MemCmd::IndWriteReq;
+            MemCmd::ReadIndReq : MemCmd::WriteIndReq;
         return createPacket(addr, size, cmd);
     }
 
