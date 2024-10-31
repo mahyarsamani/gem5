@@ -196,6 +196,9 @@ structure(RubyRequest, desc="...", interface="Message", external="yes") {
 
 structure(AbstractCacheEntry, primitive="yes", external = "yes") {
   void changePermission(AccessPermission);
+  WriteMask getReadUsefulness();
+  WriteMask getWriteUsefulness();
+  void reduceUsefulness(WriteMask, WriteMask);
 }
 
 structure (DirectoryMemory, external = "yes") {
@@ -233,7 +236,8 @@ structure (CacheMemory, external = "yes") {
   int getNumBlocks();
   Addr getAddressAtIdx(int);
 
-  WriteMask getUsefulBits(Addr);
+  WriteMask getReadUsefulBits(Addr);
+  WriteMask getWriteUsefulBits(Addr);
 
   void profileUsefulBits(Addr);
   void profileDemandHit();

@@ -194,6 +194,7 @@ enumeration(RubyRequestType, desc="...", default="RubyRequestType_NULL") {
   TLBI_EXT_SYNC,      desc="TLB Invalidation Sync operation - External Sync has been requested";
   TLBI_EXT_SYNC_COMP, desc="TLB Invalidation Sync operation - External Sync has been completed";
   LDIND,             desc="Indirect Load";
+  STIND,            desc="Indirect Store";
 }
 
 bool isWriteRequest(RubyRequestType type);

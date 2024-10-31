@@ -773,8 +773,9 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     bool is_floating_point;
     bool is_atomic;
-    // MYSTUFF
-    WriteMask usefulness, desc="Usefulness bits for the respective cache line";
+    // MYSTUFF:
+    WriteMask read_usefulness, desc="Read usefulness bits for the respective cache line";
+    WriteMask write_usefulness, desc="Write usefulness bits for the respective cache line";
   }
 
   // TBE table definition

@@ -576,7 +576,8 @@ TBE _allocateReplacementTBE(Addr addr, int storSlot), return_by_pointer="yes" {
   tbe.use_DMT := false;
   tbe.use_DCT := false;
 
-  tbe.usefulness := cache.getUsefulBits(addr);
+  tbe.read_usefulness := cache.getReadUsefulBits(addr);
+  tbe.write_usefulness := cache.getWriteUsefulBits(addr);
 
   return tbe;
 }

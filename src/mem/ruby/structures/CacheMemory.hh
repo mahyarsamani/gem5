@@ -46,7 +46,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "base/addr_range_map.hh"
 #include "base/statistics.hh"
+#include "enums/UsefulDataType.hh"
 #include "mem/cache/replacement_policies/base.hh"
 #include "mem/cache/replacement_policies/replaceable_entry.hh"
 #include "mem/ruby/common/DataBlock.hh"
@@ -65,6 +67,7 @@
 namespace gem5
 {
 
+typedef enums::UsefulDataType UsefulDataType;
 namespace ruby
 {
 
@@ -162,9 +165,11 @@ class CacheMemory : public SimObject
     Addr getAddressAtIdx(int idx) const;
 
     // TODO: Implement this
-    void setUsefulBits(Addr line_addr, size_t byte_offset, size_t range);
+    void setReadUsefulBits(Addr line_addr, size_t byte_offset, size_t range);
+    void setWriteUsefulBits(Addr line_addr, size_t bytes_offset, size_t range);
 
-    WriteMask getUsefulBits(Addr line_addr);
+    WriteMask getReadUsefulBits(Addr line_addr);
+    WriteMask getWriteUsefulBits(Addr line_addr);
 
   private:
     // convert a Address to its location in the cache
@@ -180,6 +185,9 @@ class CacheMemory : public SimObject
     CacheMemory& operator=(const CacheMemory& obj);
 
   private:
+    // typedef enums::DataType DataType;
+
+    AddrRangeMap<UsefulDataType> rangeTypeMap;
     // Data Members (m_prefix)
     bool m_is_instruction_only_cache;
 
@@ -251,10 +259,15 @@ class CacheMemory : public SimObject
 
         statistics::Vector m_accessModeType;
 
-        statistics::Histogram usefulBytes;
+        statistics::Histogram intReadUsefulBytes;
+        statistics::Histogram intWriteUsefulBytes;
+
+        statistics::Histogram floatReadUsefulBytes;
+        statistics::Histogram floatWriteUsefulBytes;
     } cacheMemoryStats;
 
-    std::unordered_map<int64_t, WriteMask> pendingWriteMasks;
+    std::unordered_map<int64_t, WriteMask> pendingReadUsefulness;
+    std::unordered_map<int64_t, WriteMask> pendingWriteUsefulness;
 
     public:
       void resetStats() override;
@@ -266,6 +279,8 @@ class CacheMemory : public SimObject
       void profileDemandMiss();
       void profilePrefetchHit();
       void profilePrefetchMiss();
+
+      void registerRange(const AddrRange& range, const UsefulDataType data_type);
 };
 
 std::ostream& operator<<(std::ostream& out, const CacheMemory& obj);

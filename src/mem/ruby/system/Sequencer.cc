@@ -542,6 +542,12 @@ Sequencer::writeCallback(Addr address, DataBlock& data,
             hitCallback(&seq_req, data, success, mach, externalHit,
                         initialRequestTime, forwardRequestTime,
                         firstResponseTime, !ruby_request);
+            size_t byte_offset = seq_req.pkt->getAddr() - address;
+            size_t range = seq_req.pkt->getSize();
+            DPRINTF(IndirectLoad, "%s: Servicing a read response for addr: 0x%lx "
+                                "with byte_offset: %d, and range: %d.\n",
+                                __func__, address, byte_offset, range);
+            m_dataCache_ptr->setWriteUsefulBits(address, byte_offset, range);
             ruby_request = false;
         } else {
             // handle read request
@@ -611,7 +617,7 @@ Sequencer::readCallback(Addr address, DataBlock& data,
         DPRINTF(IndirectLoad, "%s: Servicing a read response for addr: 0x%lx "
                                 "with byte_offset: %d, and range: %d.\n",
                                 __func__, address, byte_offset, range);
-        m_dataCache_ptr->setUsefulBits(address, byte_offset, range);
+        m_dataCache_ptr->setReadUsefulBits(address, byte_offset, range);
         ruby_request = false;
         seq_req_list.pop_front();
     }
@@ -1006,8 +1012,12 @@ Sequencer::makeRequest(PacketPtr pkt)
         if (pkt->isWrite()) {
             //
             // Note: M5 packets do not differentiate ST from RMW_Write
-            //
-            primary_type = secondary_type = RubyRequestType_ST;
+            //{
+            if (pkt->isIndirect()) {
+                primary_type = secondary_type = RubyRequestType_STIND;
+            } else {
+                primary_type = secondary_type = RubyRequestType_ST;
+            }
         } else if (pkt->isRead()) {
             // hardware transactional memory commands
             if (pkt->req->isHTMCmd()) {

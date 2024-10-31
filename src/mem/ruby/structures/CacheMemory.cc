@@ -313,13 +313,20 @@ CacheMemory::allocate(Addr address, AbstractCacheEntry *entry)
             // Call reset function here to set initial value for different
             // replacement policies.
             m_replacementPolicy_ptr->reset(entry->replacementData);
-            if (pendingWriteMasks.find(address) != pendingWriteMasks.end()) {
-                entry->copyUsefulness(pendingWriteMasks[address]);
-                pendingWriteMasks.erase(address);
+            if (pendingReadUsefulness.find(address) != pendingReadUsefulness.end()) {
+                entry->copyReadUsefulness(pendingReadUsefulness[address]);
+                pendingReadUsefulness.erase(address);
+            }
+            if (pendingWriteUsefulness.find(address) != pendingWriteUsefulness.end()) {
+                entry->copyWriteUsefulness(pendingWriteUsefulness[address]);
+                pendingWriteUsefulness.erase(address);
             }
             DPRINTF(IndirectLoad, "%s: Allocated an entry for addr: 0x%lx "
-                                    "with the following usefulness: %s.\n",
-                                __func__, address, entry->getUsefulness());
+                                    "with the following read usefulness: %s.\n",
+                                __func__, address, entry->getReadUsefulness());
+            DPRINTF(IndirectLoad, "%s: Allocated an entry for addr: 0x%lx "
+                                    "with the following write usefulness: %s.\n",
+                                __func__, address, entry->getWriteUsefulness());
             return entry;
         }
     }
@@ -567,7 +574,10 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
       ADD_STAT(m_prefetch_accesses, "Number of cache prefetch accesses",
                m_prefetch_hits + m_prefetch_misses),
       ADD_STAT(m_accessModeType, ""),
-      ADD_STAT(usefulBytes, "Number of useful bytes per block.")
+      ADD_STAT(intReadUsefulBytes, "Number of useful bytes per block for read for integers."),
+      ADD_STAT(intWriteUsefulBytes, "Number of useful bytes per block for write for integers."),
+      ADD_STAT(floatReadUsefulBytes, "Number of useful bytes per block for read for floats."),
+      ADD_STAT(floatWriteUsefulBytes, "Number of useful bytes per block for write for floats.")
 {
     numDataArrayReads
         .flags(statistics::nozero);
@@ -626,7 +636,19 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
         .init(RubyRequestType_NUM)
         .flags(statistics::pdf | statistics::total);
 
-    usefulBytes
+    intReadUsefulBytes
+        .init(RubySystem::getBlockSizeBytes())
+        .flags(statistics::nozero | statistics::nonan);
+
+    intWriteUsefulBytes
+        .init(RubySystem::getBlockSizeBytes())
+        .flags(statistics::nozero | statistics::nonan);
+
+    floatReadUsefulBytes
+        .init(RubySystem::getBlockSizeBytes())
+        .flags(statistics::nozero | statistics::nonan);
+
+    floatWriteUsefulBytes
         .init(RubySystem::getBlockSizeBytes())
         .flags(statistics::nozero | statistics::nonan);
 
@@ -650,7 +672,8 @@ CacheMemory::resetStats()
             }
         }
     }
-    pendingWriteMasks.clear();
+    pendingReadUsefulness.clear();
+    pendingWriteUsefulness.clear();
 }
 
 // assumption: SLICC generated files will only call this function
@@ -810,24 +833,45 @@ CacheMemory::htmCommitTransaction()
 }
 
 void
-CacheMemory::setUsefulBits(Addr line_addr, size_t byte_offset, size_t range)
+CacheMemory::setReadUsefulBits(Addr line_addr, size_t byte_offset, size_t range)
 {
     AbstractCacheEntry* entry = lookup(line_addr);
     if (entry != nullptr) {
-        assert(pendingWriteMasks.find(line_addr) == pendingWriteMasks.end());
-        entry->setUsefulness(byte_offset, range);
+        assert(pendingReadUsefulness.find(line_addr) == pendingReadUsefulness.end());
+        entry->setReadUsefulness(byte_offset, range);
     } else {
-        pendingWriteMasks[line_addr].setMask(byte_offset, range, true);
+        pendingReadUsefulness[line_addr].setMask(byte_offset, range, true);
+    }
+}
+
+void
+CacheMemory::setWriteUsefulBits(Addr line_addr, size_t byte_offset, size_t range)
+{
+    AbstractCacheEntry* entry = lookup(line_addr);
+    if (entry != nullptr) {
+        assert(pendingWriteUsefulness.find(line_addr) == pendingWriteUsefulness.end());
+        entry->setWriteUsefulness(byte_offset, range);
+    } else {
+        pendingWriteUsefulness[line_addr].setMask(byte_offset, range, true);
     }
 }
 
 WriteMask
-CacheMemory::getUsefulBits(Addr line_addr)
+CacheMemory::getReadUsefulBits(Addr line_addr)
 {
     AbstractCacheEntry* entry = lookup(line_addr);
     assert(entry != nullptr);
 
-    return entry->getUsefulness();
+    return entry->getReadUsefulness();
+}
+
+WriteMask
+CacheMemory::getWriteUsefulBits(Addr line_addr)
+{
+    AbstractCacheEntry* entry = lookup(line_addr);
+    assert(entry != nullptr);
+
+    return entry->getWriteUsefulness();
 }
 
 void
@@ -835,10 +879,31 @@ CacheMemory::profileUsefulBits(Addr line_addr)
 {
     AbstractCacheEntry* entry = lookup(line_addr);
     assert(entry != nullptr);
-    cacheMemoryStats.usefulBytes.sample(entry->getUsefulness().count());
-    DPRINTF(IndirectLoad, "%s: Sampling usefulness for line-addr: 0x%lx with "
-        "count: %d.\n", __func__, line_addr, entry->getUsefulness().count());
+    auto range_type_entry = rangeTypeMap.contains(line_addr);
+    if (range_type_entry != rangeTypeMap.end()) {
+        if (range_type_entry->second == UsefulDataType::Integer) {
+            cacheMemoryStats.intReadUsefulBytes.sample(entry->getReadUsefulness().count());
+            cacheMemoryStats.intWriteUsefulBytes.sample(entry->getWriteUsefulness().count());
+            DPRINTF(IndirectLoad, "%s: Sampling int read usefulness for line-addr: 0x%lx with "
+                "count: %d.\n", __func__, line_addr, entry->getReadUsefulness().count());
+            DPRINTF(IndirectLoad, "%s: Sampling int write usefulness for line-addr: 0x%lx with "
+                "count: %d.\n", __func__, line_addr, entry->getWriteUsefulness().count());
+        } else {
+            cacheMemoryStats.floatReadUsefulBytes.sample(entry->getReadUsefulness().count());
+            cacheMemoryStats.floatWriteUsefulBytes.sample(entry->getWriteUsefulness().count());
+            DPRINTF(IndirectLoad, "%s: Sampling float read usefulness for line-addr: 0x%lx with "
+                "count: %d.\n", __func__, line_addr, entry->getReadUsefulness().count());
+            DPRINTF(IndirectLoad, "%s: Sampling float write usefulness for line-addr: 0x%lx with "
+                "count: %d.\n", __func__, line_addr, entry->getWriteUsefulness().count());
+        }
+    }
     entry->resetUsefulness();
+}
+
+void
+CacheMemory::registerRange(const AddrRange& range, const UsefulDataType data_type)
+{
+    rangeTypeMap.insert(range, data_type);
 }
 
 void
