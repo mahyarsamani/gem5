@@ -28,6 +28,11 @@ from m5.objects.ReplacementPolicies import *
 from m5.params import *
 from m5.proxy import *
 from m5.SimObject import SimObject
+from m5.util.pybind import PyBindMethod
+
+
+class UsefulDataType(Enum):
+    vals = ["Integer", "FloatingPoint"]
 
 
 class RubyCache(SimObject):
@@ -54,3 +59,6 @@ class RubyCache(SimObject):
     dataAccessLatency = Param.Cycles(1, "cycles for a data array access")
     tagAccessLatency = Param.Cycles(1, "cycles for a tag array access")
     resourceStalls = Param.Bool(False, "stall if there is a resource failure")
+    ruby_system = Param.RubySystem(Parent.any, "")
+
+    cxx_exports = [PyBindMethod("registerRange")]

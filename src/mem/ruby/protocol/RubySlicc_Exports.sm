@@ -197,6 +197,7 @@ enumeration(RubyRequestType, desc="...", default="RubyRequestType_NULL") {
   TLBI_EXT_SYNC_COMP, desc="TLB Invalidation Sync operation - External Sync has been completed";
   hasNoAddr,        desc="Request for timing purposes in VIPERSequencer hitCallback and processReadCallback but reads no address";
   LDIND,             desc="Indirect Load";
+  STIND,            desc="Indirect Store";
 }
 
 bool isWriteRequest(RubyRequestType type);

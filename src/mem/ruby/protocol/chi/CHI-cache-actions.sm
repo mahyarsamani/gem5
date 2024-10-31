@@ -163,8 +163,8 @@ action(AllocateTBE_SeqRequest, desc="") {
           out_msg.type := CHIRequestType:Store;
         }
       } else if (in_msg.Type == RubyRequestType:LDIND) {
-      //  out_msg.type := CHIRequestType:LoadIndex;
-        out_msg.type := CHIRequestType:Load;
+        out_msg.type := CHIRequestType:LoadIndex;
+        // out_msg.type := CHIRequestType:Load;
       } else if (in_msg.Type == RubyRequestType:ATOMIC_RETURN) {
         out_msg.type := CHIRequestType:AtomicLoad;
       } else if (in_msg.Type == RubyRequestType:ATOMIC_NO_RETURN){
@@ -258,10 +258,18 @@ action(AllocateTBE_PfRequest, desc="Allocate TBE for prefetch request") {
 action(Initiate_Request, desc="") {
   State initial := getState(tbe, cache_entry, address);
   bool was_retried := false;
+  WriteMask read_usefulness;
+  WriteMask write_usefulness;
   peek(reqRdyPort, CHIRequestMsg) {
     set_tbe(allocateRequestTBE(address, in_msg));
     // only a msg that was already retried doesn't allow a retry
     was_retried := in_msg.allowRetry == false;
+    if (in_msg.type == CHIRequestType:WriteBackFull) {
+        read_usefulness := in_msg.read_usefulness;
+        write_usefulness := in_msg.write_usefulness;
+        DPRINTF(IndirectLoad, "Got %s read usefulness from message.\n", read_usefulness);
+        DPRINTF(IndirectLoad, "Got %s write usefulness from message.\n", write_usefulness);
+    }
   }
   DirEntry dir_entry := getDirEntry(address);
   copyCacheAndDir(cache_entry, dir_entry, tbe, initial);
@@ -275,6 +283,9 @@ action(Initiate_Request, desc="") {
   bool dealloc_entry := needDeallocCacheEntry(tbe.reqType);
   assert((alloc_entry && dealloc_entry) == false);
 
+  if (is_valid(cache_entry)) {
+    cache_entry.reduceUsefulness(read_usefulness, write_usefulness);
+  }
   // always drops any data when not caching it or when this transaction
   // requires deallocation
   tbe.dataToBeInvalid := dealloc_entry ||
@@ -394,6 +405,8 @@ action(RestoreFromHazard, desc="") {
 
 action(Initiate_Replacement, desc="") {
   assert(is_invalid(tbe));
+  WriteMask read_usefulness := cache_entry.getReadUsefulness();
+  WriteMask write_usefulness := cache_entry.getWriteUsefulness();
   State initial := getState(tbe, cache_entry, address);
   cache.profileUsefulBits(address);
   DPRINTF(IndirectLoad, "Initiate_Replacement action, address: 0x%lx.\n", address);
@@ -406,6 +419,9 @@ action(Initiate_Replacement, desc="") {
     set_tbe(allocateReplacementTBE(address));
     DPRINTF(RubySlicc, "Allocated replacement TBE on new slot %d\n", tbe.storSlot);
   }
+  tbe.read_usefulness := read_usefulness;
+  tbe.write_usefulness := write_usefulness;
+
   copyCacheAndDir(cache_entry, getDirEntry(address), tbe, initial);
 
   // UD_RU line needs to be written back because the upstream may be in UC state.
@@ -1677,7 +1693,6 @@ action(Send_Evict, desc="") {
     prepareRequest(tbe, CHIRequestType:Evict, out_msg);
     out_msg.Destination.add(mapAddressToDownstreamMachine(tbe.addr));
     allowRequestRetry(tbe, out_msg);
-    out_msg.usefulness := tbe.usefulness;
   }
   tbe.expected_req_resp.addExpectedRespType(CHIResponseType:Comp_I);
   tbe.expected_req_resp.setExpectedCount(1);
@@ -1703,7 +1718,6 @@ action(Send_WriteBackOrWriteEvict, desc="") {
 
   assert(tbe.dataUnique || tbe.dataDirty);
   assert(tbe.dir_sharers.isEmpty());
-
   enqueue(reqOutPort, CHIRequestMsg, request_latency) {
     if (tbe.dataDirty) {
       prepareRequest(tbe, CHIRequestType:WriteBackFull, out_msg);
@@ -1711,6 +1725,11 @@ action(Send_WriteBackOrWriteEvict, desc="") {
       prepareRequest(tbe, CHIRequestType:WriteEvictFull, out_msg);
     }
     out_msg.Destination.add(mapAddressToDownstreamMachine(tbe.addr));
+    // TODO: assign out_msg.usefulness here.
+    out_msg.read_usefulness := tbe.read_usefulness;
+    out_msg.write_usefulness := tbe.write_usefulness;
+    DPRINTF(IndirectLoad, "Sending read usefulness mask %s with message.\n", out_msg.read_usefulness);
+    DPRINTF(IndirectLoad, "Sending write usefulness mask %s with message.\n", out_msg.write_usefulness);
     allowRequestRetry(tbe, out_msg);
   }
   clearExpectedReqResp(tbe);
