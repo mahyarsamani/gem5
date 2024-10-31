@@ -87,16 +87,12 @@ class MemCmd
         ReadReq,
         ReadResp,
         ReadRespWithInvalidate,
-        IndReadReq,
-        IndReadResp,
         WriteReq,
         WriteResp,
         WriteCompleteResp,
         WritebackDirty,
         WritebackClean,
         WriteClean,            // writes dirty data below without evicting
-        IndWriteReq,
-        IndWriteResp,
         CleanEvict,
         SoftPFReq,
         SoftPFExReq,
@@ -155,6 +151,8 @@ class MemCmd
         TlbiExtSync,
         ReadIndReq,
         ReadIndResp,
+        WriteIndReq,
+        WriteIndResp,
         NUM_MEM_CMDS
     };
 
