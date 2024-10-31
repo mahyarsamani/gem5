@@ -191,7 +191,7 @@ class SpatterKernel:
         return (
             f"SpatterKernel(id={self._id}, delta={self._delta}, "
             f"count={self._count}, type={self._type}, "
-            f"trace[:8]={self._trace[:8]}"
+            f"trace[:8]={self._trace[:8]})"
         )
 
 
@@ -323,6 +323,21 @@ def partition_trace(original_trace, num_partitions, interleave_size):
             lower_bound:upper_bound
         ]
     return partitions
+
+
+# TODO: implement this
+# def chunk_trace(original_trace, num_chunks):
+#     if len(original_trace) < num_chunks:
+#         raise ValueError(
+#             "Trace (`original_trace`) is too small for the given"
+#             "number of chunks.")
+#     def _lower_bound(index, chunk_size):
+#         return index * chunk_size
+#     def _upper_bound(index, chunk_size, max_size):
+#         return min((i+1 * chunk_size), max_size)
+
+#     chunk_size = ceil(len(original_trace) / num_chunks)
+#     chunks = [[_lower_bound(i, chunk_size): min((i+1*chunk_size))] for _ in range(num_chunks)]
 
 
 def prepare_kernels(

@@ -124,6 +124,11 @@ class SpatterGenerator(AbstractGenerator):
         self._num_kernels += 1
 
     @overrides(AbstractGenerator)
+    def _post_instantiate(self) -> None:
+        self.set_access_mode(SpatterAccessMode("normal").getValue())
+        self.start_traffic()
+
+    @overrides(AbstractGenerator)
     def start_traffic(self) -> None:
         for core in self.cores:
             core.start_traffic()
@@ -148,5 +153,6 @@ class SpatterGenerator(AbstractGenerator):
             yield not (sync_points_observed < sync_points_expected)
 
     def set_access_mode(self, access_mode: SpatterAccessMode) -> None:
+        self._access_mode = access_mode
         for core in self.cores:
             core.set_access_mode(access_mode)

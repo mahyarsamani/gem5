@@ -70,10 +70,6 @@ class SpatterGeneratorCore(AbstractGeneratorCore):
         self._kernels.append(kernel)
 
     def start_traffic(self) -> None:
-        print("mahyar")
-        for stuff in self._kernels[0].cxx_call_args():
-            print(stuff)
-        exit()
         for kernel in self._kernels:
             self.generator.addKernel(*kernel.cxx_call_args())
 
