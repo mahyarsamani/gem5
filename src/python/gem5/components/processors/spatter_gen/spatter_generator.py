@@ -50,13 +50,14 @@ class SpatterGenerator(AbstractGenerator):
     def __init__(
         self,
         num_cores: int = 1,
-        processing_mode: Union[SpatterProcessingMode, str] = "synchronous",
         int_regfile_size: int = 384,
         fp_regfile_size: int = 224,
         request_gen_latency: int = 2,
         request_gen_rate: int = 4,
         request_buffer_entries: int = 32,
         send_rate: int = 2,
+        access_mode: Union[SpatterAccessMode, str] = "normal",
+        processing_mode: Union[SpatterProcessingMode, str] = "synchronous",
         clk_freq: Optional[str] = None,
     ) -> None:
         super().__init__(
@@ -80,6 +81,9 @@ class SpatterGenerator(AbstractGenerator):
             for generator in self.cores:
                 generator.clk_domain = clock_domain
 
+        if not isinstance(access_mode, SpatterAccessMode):
+            access_mode = SpatterAccessMode(access_mode)
+        self._access_mode = access_mode.getValue()
         self._num_kernels = 0
         self._sync = processing_mode == "synchronous"
 
@@ -125,19 +129,24 @@ class SpatterGenerator(AbstractGenerator):
 
     @overrides(AbstractGenerator)
     def _post_instantiate(self) -> None:
-        self.set_access_mode(SpatterAccessMode("normal").getValue())
         self.start_traffic()
 
-    @overrides(AbstractGenerator)
-    def start_traffic(self) -> None:
+    def _set_access_mode_for_cores(self) -> None:
         for core in self.cores:
-            core.start_traffic()
+            core.set_access_mode(self._access_mode)
 
     def _proceed_past_sync_point(self) -> None:
         if not self._sync:
             return
+        self._set_access_mode_for_cores()
         for core in self.cores:
             core.generator.proceedPastSyncPoint()
+
+    @overrides(AbstractGenerator)
+    def start_traffic(self) -> None:
+        self._set_access_mode_for_cores()
+        for core in self.cores:
+            core.start_traffic()
 
     def handle_spatter_exit(self):
         spatter_exits_observed = 0
@@ -154,5 +163,3 @@ class SpatterGenerator(AbstractGenerator):
 
     def set_access_mode(self, access_mode: SpatterAccessMode) -> None:
         self._access_mode = access_mode
-        for core in self.cores:
-            core.set_access_mode(access_mode)
