@@ -178,8 +178,6 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   // Use prefetcher
   bool use_prefetcher, default="False";
 
-  bool is_closest, default="False";
-
   // Message Queues
 
   // Interface to the network
@@ -224,6 +222,8 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   // updated only on true demand requests.
   bool upstream_prefetch_trains_prefetcher := "False";
 
+  bool alloc_for_ind_index;
+  bool alloc_for_ind_value;
 {
 
   ////////////////////////////////////////////////////////////////////////////
