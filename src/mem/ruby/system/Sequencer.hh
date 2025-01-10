@@ -245,6 +245,8 @@ class Sequencer : public RubyPort
                                         RubyRequestType secondary_type);
 
   private:
+    bool is_inst;
+
     int m_max_outstanding_requests;
 
     int m_num_pending_invs;
