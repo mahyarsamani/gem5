@@ -58,6 +58,8 @@ class RubyPort(ClockedObject):
     )
     slave = DeprecatedParam(in_ports, "`slave` is now called `in_ports`")
 
+    is_inst = Param.Bool("Is this an instruction port?")
+
     interrupt_out_port = VectorRequestPort(
         "Port to connect to x86 interrupt "
         "controller to send the CPU requests from outside."

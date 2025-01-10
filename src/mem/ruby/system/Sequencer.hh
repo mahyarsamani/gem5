@@ -257,6 +257,8 @@ class Sequencer : public RubyPort
     RubySystem *m_ruby_system;
 
   private:
+    bool is_inst;
+
     int m_max_outstanding_requests;
 
     int m_num_pending_invs;
