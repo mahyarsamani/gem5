@@ -259,6 +259,9 @@ class CacheMemory : public SimObject
 
         statistics::Vector m_accessModeType;
 
+        statistics::Histogram readUsefulBytes;
+        statistics::Histogram writeUsefulBytes;
+
         statistics::Histogram intReadUsefulBytes;
         statistics::Histogram intWriteUsefulBytes;
 

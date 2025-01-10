@@ -574,6 +574,8 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
       ADD_STAT(m_prefetch_accesses, "Number of cache prefetch accesses",
                m_prefetch_hits + m_prefetch_misses),
       ADD_STAT(m_accessModeType, ""),
+      ADD_STAT(readUsefulBytes, "Number of useful bytes per block for read."),
+        ADD_STAT(writeUsefulBytes, "Number of useful bytes per block for write."),
       ADD_STAT(intReadUsefulBytes, "Number of useful bytes per block for read for integers."),
       ADD_STAT(intWriteUsefulBytes, "Number of useful bytes per block for write for integers."),
       ADD_STAT(floatReadUsefulBytes, "Number of useful bytes per block for read for floats."),
@@ -635,6 +637,14 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
     m_accessModeType
         .init(RubyRequestType_NUM)
         .flags(statistics::pdf | statistics::total);
+
+    readUsefulBytes
+        .init(RubySystem::getBlockSizeBytes())
+        .flags(statistics::nozero | statistics::nonan);
+
+    writeUsefulBytes
+        .init(RubySystem::getBlockSizeBytes())
+        .flags(statistics::nozero | statistics::nonan);
 
     intReadUsefulBytes
         .init(RubySystem::getBlockSizeBytes())
@@ -896,6 +906,8 @@ CacheMemory::profileUsefulBits(Addr line_addr)
             DPRINTF(IndirectLoad, "%s: Sampling float write usefulness for line-addr: 0x%lx with "
                 "count: %d.\n", __func__, line_addr, entry->getWriteUsefulness().count());
         }
+        cacheMemoryStats.readUsefulBytes.sample(entry->getReadUsefulness().count());
+        cacheMemoryStats.writeUsefulBytes.sample(entry->getWriteUsefulness().count());
     }
     entry->resetUsefulness();
 }
