@@ -62,3 +62,5 @@ structure(BoolVec, external="yes") {
 }
 int countBoolVec(BoolVec bVec);
 RequestorID getRequestorID(RequestPtr req);
+Addr getNextAddr(RequestPtr req);
+bool isInvalid(MachineID mid);

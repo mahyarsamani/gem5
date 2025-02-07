@@ -49,12 +49,14 @@
 #include <cassert>
 #include <climits>
 
+#include "cpu/testers/spatter_gen/utility_structs.hh"
 #include "debug/RubyProtocol.hh"
 #include "debug/RubySlicc.hh"
 #include "mem/packet.hh"
 #include "mem/ruby/common/Address.hh"
 #include "mem/ruby/common/BoolVec.hh"
 #include "mem/ruby/common/DataBlock.hh"
+#include "mem/ruby/common/MachineID.hh"
 #include "mem/ruby/common/TypeDefines.hh"
 #include "mem/ruby/common/WriteMask.hh"
 #include "mem/ruby/protocol/RubyRequestType.hh"
@@ -324,6 +326,23 @@ inline RequestorID
 getRequestorID(RequestPtr req)
 {
     return req->requestorId();
+}
+
+inline Addr
+getNextAddr(RequestPtr req)
+{
+    std::shared_ptr<SpatterAccess> spatter_access = req->getExtension<SpatterAccess>();
+    if (spatter_access == nullptr) {
+        return -1;
+    } else {
+        return spatter_access->nextIndAccAddr();
+    }
+}
+
+inline bool
+isInvalid(MachineID m_id)
+{
+    return !m_id.isValid();
 }
 
 } // namespace ruby
