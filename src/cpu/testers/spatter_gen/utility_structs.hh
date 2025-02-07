@@ -30,6 +30,7 @@
 #define __CPU_TESTERS_SPATTER_GEN_UTILITY_STRUCTS_HH__
 
 #include <deque>
+#include <memory>
 #include <queue>
 
 #include "base/random.hh"
@@ -81,12 +82,16 @@ class TimedQueue
 
 
 
-// Represents a single access to a SpatterKernel.
-// It supports multiple levels of indirection.
-// However, the SpatterKernel class only works with one level of
-// indirection (i.e. accessing value[index[i]]).
-struct SpatterAccess : public Packet::SenderState
+// // Represents a single access to a SpatterKernel.
+// // It supports multiple levels of indirection.
+// // However, the SpatterKernel class only works with one level of
+// // indirection (i.e. accessing value[index[i]]).
+class SpatterAccess: public Extension<Request, SpatterAccess>,
+                    public std::enable_shared_from_this<SpatterAccess>
 {
+  private:
+    friend class SpatterKernel;
+
     typedef std::tuple<Addr, size_t> AccessPair;
     typedef enums::SpatterKernelType SpatterKernelType;
 
@@ -95,6 +100,34 @@ struct SpatterAccess : public Packet::SenderState
     Tick accTripTime;
     std::queue<AccessPair> accessPairs;
 
+    AccessPair nextAccessPair()
+    {
+        assert(tripsLeft() > 0);
+        AccessPair access_pair = accessPairs.front();
+        accessPairs.pop();
+        return access_pair;
+    }
+
+    PacketPtr createPacket(Addr addr, size_t size, MemCmd cmd)
+    {
+        RequestPtr req = std::make_shared<Request>(addr, size, 0, requestorId);
+        req->setExtension<SpatterAccess>(shared_from_this());
+        // Dummy PC to have PC-based prefetchers latch on;
+        // get entropy into higher bits
+        // This piece of code is directly copied from
+        // gem5::TrafficGen::
+        req->setPC(((Addr) requestorId) << 2);
+        PacketPtr pkt = new Packet(req, cmd);
+        uint8_t* pkt_data = new uint8_t[req->getSize()];
+        // Randomly intialize pkt_data, for testing cache coherence.
+        for (int i = 0; i < req->getSize(); i++) {
+            pkt_data[i] = random_mt.random<uint8_t>();
+        }
+        pkt->dataDynamic(pkt_data);
+        return pkt;
+    }
+
+  public:
     SpatterAccess(
         RequestorID requestor_id,
         SpatterKernelType kernel_type,
@@ -109,15 +142,19 @@ struct SpatterAccess : public Packet::SenderState
     int tripsLeft() const { return accessPairs.size(); }
 
     void recordTripTime(Tick trip_time) { accTripTime += trip_time; }
+    // NOTE: This is used for the `clone` method;
+    void setAccTripTime(Tick acc_trip_time) { accTripTime = acc_trip_time; }
 
     Tick tripTimeSoFar() const { return accTripTime; }
 
-    AccessPair nextAccessPair()
+    virtual std::unique_ptr<ExtensionBase> clone() const override
     {
-        assert(tripsLeft() > 0);
-        AccessPair access_pair = accessPairs.front();
-        accessPairs.pop();
-        return access_pair;
+        std::unique_ptr<SpatterAccess> clone = \
+            std::make_unique<SpatterAccess>(
+                requestorId, _kernelType, accessPairs
+            );
+        clone->setAccTripTime(accTripTime);
+        return clone;
     }
 
     PacketPtr nextPacketAsNormal()
@@ -146,27 +183,12 @@ struct SpatterAccess : public Packet::SenderState
         return createPacket(addr, size, cmd);
     }
 
-    PacketPtr createPacket(Addr addr, size_t size, MemCmd cmd) const
+    Addr nextIndAccAddr()
     {
-        RequestPtr req = std::make_shared<Request>(addr, size, 0, requestorId);
-
-        // Dummy PC to have PC-based prefetchers latch on;
-        // get entropy into higher bits
-        // This piece of code is directly copied from
-        // gem5::TrafficGen::
-        req->setPC(((Addr) requestorId) << 2);
-        PacketPtr pkt = new Packet(req, cmd);
-        uint8_t* pkt_data = new uint8_t[req->getSize()];
-        // Randomly intialize pkt_data, for testing cache coherence.
-        for (int i = 0; i < req->getSize(); i++) {
-            pkt_data[i] = rng->random<uint8_t>();
-        }
-        pkt->dataDynamic(pkt_data);
-        return pkt;
+        Addr addr;
+        std::tie(addr, std::ignore) = nextAccessPair();
+        return addr;
     }
-
-  private:
-    mutable Random::RandomPtr rng = Random::genRandom();
 };
 
 class SpatterKernel
@@ -257,7 +279,7 @@ class SpatterKernel
 
     bool done() const { return iteration == count; }
 
-    SpatterAccess* nextSpatterAccess()
+    std::shared_ptr<SpatterAccess> nextSpatterAccess()
     {
         std::queue<AccessPair> access_pairs;
         // get the next index for the index array
@@ -278,7 +300,7 @@ class SpatterKernel
             iteration++;
         }
 
-        return new SpatterAccess(requestorId, _type, access_pairs);
+        return std::make_shared<SpatterAccess>(requestorId, _type, access_pairs);
     }
 };
 

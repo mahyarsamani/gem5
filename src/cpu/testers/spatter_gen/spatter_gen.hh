@@ -226,7 +226,7 @@ class SpatterGen: public ClockedObject
     // no need to limit the size of this buffer.
     // it's a response buffer and it will automatically
     // be limited by requestBufferEntries, intRegFileSize, fpRegFileSize
-    TimedQueue<SpatterAccess*> receiveBuffer;
+    TimedQueue<std::shared_ptr<SpatterAccess>> receiveBuffer;
 
   public:
     PARAMS(SpatterGen);

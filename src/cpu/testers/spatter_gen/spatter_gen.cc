@@ -145,7 +145,7 @@ SpatterGen::recvTimingResp(PacketPtr pkt)
     assert(pkt->isResponse());
 
     // record trip time.
-    SpatterAccess* spatter_access = pkt->findNextSenderState<SpatterAccess>();
+    std::shared_ptr<SpatterAccess> spatter_access = pkt->req->getExtension<SpatterAccess>();
     Tick trip_time = (curTick() - requestDepartureTime[pkt->req]);
     requestDepartureTime.erase(pkt->req);
     spatter_access->recordTripTime(trip_time);
@@ -186,9 +186,9 @@ SpatterGen::recvTimingResp(PacketPtr pkt)
         // we do not simulate parts of the pipeline that back things up into
         // fp registers, e.g. functional units of ALU.
         fpRegUsed--;
-        delete spatter_access;
     }
 
+    pkt->req->removeExtension<SpatterAccess>();
     // delete the pkt since we don't need it anymore.
     delete pkt;
 
@@ -362,9 +362,11 @@ SpatterGen::processNextGenEvent()
                 generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
 
                 // create a new packet to access
-                SpatterAccess* spatter_access = receiveBuffer.front();
+                std::shared_ptr<SpatterAccess> spatter_access = receiveBuffer.front();
+                // NOTE: FUTUREME: SpatterAccess::nextPacketAs* adds the
+                // SpatterAccess object as an Extension to the Request in
+                // the Packet that it creates.
                 PacketPtr pkt = spatter_access->nextPacketAsNormal();
-                pkt->pushSenderState(spatter_access);
 
                 // push to requestBuffer
                 requestBuffer.push(pkt, curTick());
@@ -385,9 +387,8 @@ SpatterGen::processNextGenEvent()
                 generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
 
                 // create a new packet to access
-                SpatterAccess* spatter_access = receiveBuffer.front();
+                std::shared_ptr<SpatterAccess> spatter_access = receiveBuffer.front();
                 PacketPtr pkt = spatter_access->nextPacketAsNormal();
-                pkt->pushSenderState(spatter_access);
 
                 // push to requestBuffer
                 requestBuffer.push(pkt, curTick());
@@ -407,9 +408,8 @@ SpatterGen::processNextGenEvent()
                 generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
 
                 SpatterKernel& front = kernels.front();
-                SpatterAccess* spatter_access = front.nextSpatterAccess();
+                std::shared_ptr<SpatterAccess> spatter_access = front.nextSpatterAccess();
                 PacketPtr pkt = spatter_access->nextPacketAsNormal();
-                pkt->pushSenderState(spatter_access);
 
                 requestBuffer.push(pkt, curTick());
                 DPRINTF(
@@ -455,9 +455,8 @@ SpatterGen::processNextGenEvent()
                 generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
 
                 SpatterKernel& front = kernels.front();
-                SpatterAccess* spatter_access = front.nextSpatterAccess();
+                std::shared_ptr<SpatterAccess> spatter_access = front.nextSpatterAccess();
                 PacketPtr pkt = spatter_access->nextPacketAsInd();
-                pkt->pushSenderState(spatter_access);
 
                 requestBuffer.push(pkt, curTick());
                 DPRINTF(
