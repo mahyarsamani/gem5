@@ -97,8 +97,8 @@ enumeration(CHIRequestType, desc="") {
   DvmOpNonSync;
   DvmOpSync;
 
-
-  LoadIndex;
+  // MYSTUFF:
+  ReadIndirect;
 
   null;
 }
@@ -127,15 +127,17 @@ structure(CHIRequestMsg, desc="", interface="Message") {
   Addr txnId,           desc="Transaction ID", default="0";
   bool ns,              desc="Secure State of the transaction. NS=NonSecure", default="true";
 
-  WriteMask read_usefulness,     desc="Mask denoting bytes that were useful for read";
-  WriteMask write_usefulness,    desc="Mask denoting bytes that were useful for write";
-
   MessageSizeType MessageSize, default="MessageSizeType_Control";
 
   // No data for functional access
   bool functionalRead(Packet *pkt) { return false; }
   bool functionalRead(Packet *pkt, WriteMask &mask) { return false; }
   bool functionalWrite(Packet *pkt) { return false; }
+
+  // MYSTUFF:
+  WriteMask read_usefulness,     desc="Mask denoting bytes that were useful for read";
+  WriteMask write_usefulness,    desc="Mask denoting bytes that were useful for write";
+  MachineID valueCacheID,        desc="MachineID of the value cache for an indirect request";
 }
 
 enumeration(CHIResponseType, desc="...") {

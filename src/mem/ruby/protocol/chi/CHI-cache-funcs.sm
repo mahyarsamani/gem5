@@ -282,6 +282,7 @@ Cycles mandatoryQueueLatency(RubyRequestType type) {
   return intToCycles(1);
 }
 
+// MYSTUFF: Calculate the latency of a tag access.
 Cycles tagLatency(bool from_sequencer) {
   if (from_sequencer) {
     //mandatoryQueueLatency accounts for 1 cy
@@ -295,6 +296,7 @@ Cycles dataLatency() {
   return cache.getDataLatency();
 }
 
+// MYSTUFF: Whether the reqType has come from sequencer.
 bool fromSequencer(CHIRequestType reqType) {
   return reqType == CHIRequestType:Load ||
          reqType == CHIRequestType:Store ||
@@ -654,6 +656,7 @@ void setupPendingAtomicSend(TBE tbe) {
 }
 
 // common code for downstream requests
+// MYSTUFF: TODO: Seems like understanding this function is important.
 void prepareRequest(TBE tbe, CHIRequestType type, CHIRequestMsg & out_msg) {
   out_msg.addr := tbe.addr;
   out_msg.accAddr := tbe.addr;
@@ -671,6 +674,11 @@ void prepareRequest(TBE tbe, CHIRequestType type, CHIRequestMsg & out_msg) {
   out_msg.is_local_pf := false;
   out_msg.is_remote_pf := tbe.is_local_pf || tbe.is_remote_pf;
   out_msg.txnId := tbe.txnId;
+
+  // MYSTUFF: TODO: I think the following two lines are necessary?
+  // out_msg.read_usefulness = tbe.read_usefulness;
+  // out_msg.write_usefulness = tbe.write_usefulness;
+  out_msg.valueCacheID := tbe.valueCacheID;
 
   assert(tbe.txnId != static_cast(Addr, "value", -1));
 }
@@ -800,12 +808,6 @@ bool needCacheEntry(CHIRequestType req_type,
   // - if entry already valid
   // - if using DMT; the request is a Read*; and dir entry is invalid
   // oterwise follow config params
-  // if (is_valid(cache_entry) ||
-  //     (enable_DMT && is_invalid(dir_entry) &&
-  //      ((req_type == CHIRequestType:ReadShared) ||
-  //       (req_type == CHIRequestType:ReadUnique) ||
-  //       (req_type == CHIRequestType:ReadOnce))) ||
-  //       req_type == CHIRequestType:LoadIndex) {
   if (is_valid(cache_entry) ||
       (enable_DMT && is_invalid(dir_entry) &&
        ((req_type == CHIRequestType:ReadShared) ||
@@ -830,7 +832,8 @@ bool needCacheEntry(CHIRequestType req_type,
                                  (req_type == CHIRequestType:AtomicStore))) ||
            (alloc_on_seq_line_write && (req_type == CHIRequestType:StoreLine)) ||
            (alloc_on_atomic && ((req_type == CHIRequestType:AtomicReturn) ||
-                                 (req_type == CHIRequestType:AtomicNoReturn)));
+                                 (req_type == CHIRequestType:AtomicNoReturn))) ||
+            (alloc_for_ind_index && (req_type == CHIRequestType:ReadIndirect));
   }
 }
 
@@ -1155,6 +1158,7 @@ State makeFinalState(TBE tbe, CacheEntry cache_entry, DirEntry dir_entry) {
 }
 
 // This is used only with the finalization transitions
+// MYSTUFF: TODO: Maybe talk to a SLICC expert about this.
 State getNextState(Addr address) {
   TBE tbe := getCurrentActiveTBE(address);
   assert(is_valid(tbe));
@@ -1309,8 +1313,9 @@ Event reqToEvent(CHIRequestType type, bool is_prefetch) {
     } else {
       return Event:AtomicNoReturn;
     }
-  // } else if (type == CHIRequestType:LoadIndex) {
-  //  return Event:LoadIndex;
+  } else if (type == CHIRequestType:ReadIndirect) {
+    // MYSTUFF:
+    return Event:ReadIndirect;
   } else {
     error("Invalid CHIRequestType");
   }

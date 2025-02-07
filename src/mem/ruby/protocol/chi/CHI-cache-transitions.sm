@@ -86,6 +86,12 @@ transition({I,SC,UC,SD,UD,UD_T,RU,RSC,RSD,RUSD,SC_RSC,SD_RSC,SD_RSD,UC_RSC,UC_RU
   AllocateTBE_PfRequest;
 }
 
+// MYSTUFF: IT will be useful to evaluate the assumption that this event
+// is only triggered from processNextState. My current assumption is that
+// this is the case; it wouldn't have made sense to Pop_TriggerQueue which
+// is added to in processNextState. Additionally, ProcessNextState_ClearPending
+// is used to clear tbe.pendAction which is set in processNextState. Also,
+// it aligns with what I've seen in the Tiago's code in definition of TBE.
 transition({BUSY_INTR,BUSY_BLKD}, TagArrayRead) {TagArrayRead} {
   Pop_TriggerQueue;
   TagArrayRead;
@@ -994,6 +1000,48 @@ transition({BUSY_BLKD,BUSY_INTR}, ActionStalledOnHazard) {
   StallActionOnHazard;
 }
 
+
+// MYSTUFF:
+transition(I, ReadIndirect, BUSY_BLKD) {
+    Initiate_Request;
+    Initiate_ReadIndirectMiss;
+    // TODO: Figure out if this is the right way to measure index misses.
+    // Profile_Miss;
+    Pop_ReqRdyQueue;
+    ProcessNextState;
+}
+
+// MYSTUFF: NOTE: Send_ReadNoSnp if is_HN and Send_ReadShared if not.
+transition(BUSY_BLKD, ReadIndex) {
+    Pop_TriggerQueue;
+    Send_ReadIndex;
+    ProcessNextState_ClearPending;
+}
+
+// MYSTUFF: NOTE: This is nothing specific. We just put the same request
+// on the reqOut message queue.
+transition(BUSY_BLKD, FwdReadIndirect) {
+    Pop_TriggerQueue;
+    delayFwdIndirect;
+    Fwd_ReadIndirect;
+    ProcessNextState_ClearPending;
+}
+
+// MYSTUFF: NOTE: Now we have the value of index.
+// transition(BUSY_INTR, SendReadValueForSelf) {
+//     Pop_TriggerQueue;
+//     delaySendValue;
+//     Push_ReadValue;
+//     ProcessNextState_ClearPending;
+// }
+
+// transition(BUSY_INTR, SendReadValueForOther) {
+//     Pop_TriggerQueue;
+//     delaySendValue;
+//     Send_ReadValue;
+//     ProcessNextState_ClearPending;
+// }
+
 // Trigger-specifc transitions
 
 transition(BUSY_BLKD, SendWriteBackOrWriteEvict, BUSY_INTR) {DestinationAvailable} {
@@ -1790,11 +1838,3 @@ transition(DvmExtOp_Finished, Final, I) {
   Pop_TriggerQueue;
   Finalize_DeallocateDvmSnoop;
 }
-
-// transition(I, LoadIndex) {
-//   Initiate_Request;
-//   Initiate_LoadIndexMiss;
-//   Profile_Miss;
-//   Pop_ReqRdyQueue;
-//   processNextState;
-// }

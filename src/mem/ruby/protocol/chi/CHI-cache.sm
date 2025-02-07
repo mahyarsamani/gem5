@@ -222,8 +222,15 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   // updated only on true demand requests.
   bool upstream_prefetch_trains_prefetcher := "False";
 
+  // MYSTUFF:
+  // NOTE: Maybe the index cache doesn't need to allocate for index either.
+  // We can answer whether it is useful to cache or not cache index
+  // by counting the number of useful bytes in index cache blocks.
   bool alloc_for_ind_index;
   bool alloc_for_ind_value;
+
+  Cycles send_value_delay := 1;
+  Cycles fwd_ind_acc_delay := 1;
 {
 
   ////////////////////////////////////////////////////////////////////////////
@@ -342,9 +349,12 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     SnpStalled, desc="", in_trans="yes"; // A snoop stall triggered from the inport
     StashOnceShared,             desc="", in_trans="yes"; // Just discarding the hint
     StashOnceUnique,             desc="", in_trans="yes"; // Just discarding the hint
-    // Event to read the indexer array
-    // MYSTUFF
-    // LoadIndex,                 desc="", in_trans="yes";
+    // MYSTUFF:
+    ReadIndirect,                 desc="", in_trans="yes";
+    ReadIndex,                    desc="", in_trans="yes";
+    FwdReadIndirect,              desc="", in_trans="yes";
+    // SendReadValueForSelf,         desc="", in_trans="yes";
+    // SendReadValueForOther,        desc="", in_trans="yes";
 
     // DVM sequencer requests
     DvmTlbi_Initiate, desc="", out_trans="yes", in_trans="yes"; // triggered when a CPU core wants to send a TLBI
@@ -718,6 +728,8 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     // List of actions to be performed while on a transient state
     // See the processNextState function for details
+    // MYSTUFF: This is important in the context of understanding Tiago's
+    // thought process.
     TriggerQueue actions, template="<Cache_Event>", desc="List of actions";
     Event pendAction,         desc="Current pending action";
     Tick delayNextAction,     desc="Delay next action until given tick";
@@ -777,6 +789,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     // MYSTUFF:
     WriteMask read_usefulness, desc="Read usefulness bits for the respective cache line";
     WriteMask write_usefulness, desc="Write usefulness bits for the respective cache line";
+    MachineID valueCacheID;
   }
 
   // TBE table definition

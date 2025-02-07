@@ -163,8 +163,7 @@ action(AllocateTBE_SeqRequest, desc="") {
           out_msg.type := CHIRequestType:Store;
         }
       } else if (in_msg.Type == RubyRequestType:LDIND) {
-        out_msg.type := CHIRequestType:LoadIndex;
-        // out_msg.type := CHIRequestType:Load;
+        out_msg.type := CHIRequestType:ReadIndirect;
       } else if (in_msg.Type == RubyRequestType:ATOMIC_RETURN) {
         out_msg.type := CHIRequestType:AtomicLoad;
       } else if (in_msg.Type == RubyRequestType:ATOMIC_NO_RETURN){
@@ -255,21 +254,29 @@ action(AllocateTBE_PfRequest, desc="Allocate TBE for prefetch request") {
   pfInPort.dequeue(clockEdge());
 }
 
+// MYSTUFF: The role of this function is to intialize TBE for the request.
+// It does not matter whether we are going to allocate a cache_entry for it
+// or not. It just matters that we are servicing it, e.g. even if we're fwding.
+// That last part is my take, prone to being wrong.
 action(Initiate_Request, desc="") {
   State initial := getState(tbe, cache_entry, address);
   bool was_retried := false;
+  // MYSTUFF:
   WriteMask read_usefulness;
   WriteMask write_usefulness;
+  MachineID valueCacheID;
   peek(reqRdyPort, CHIRequestMsg) {
     set_tbe(allocateRequestTBE(address, in_msg));
     // only a msg that was already retried doesn't allow a retry
     was_retried := in_msg.allowRetry == false;
     if (in_msg.type == CHIRequestType:WriteBackFull) {
+        // MYSTUFF:
         read_usefulness := in_msg.read_usefulness;
         write_usefulness := in_msg.write_usefulness;
         DPRINTF(IndirectLoad, "Got %s read usefulness from message.\n", read_usefulness);
         DPRINTF(IndirectLoad, "Got %s write usefulness from message.\n", write_usefulness);
     }
+    valueCacheID := in_msg.valueCacheID;
   }
   DirEntry dir_entry := getDirEntry(address);
   copyCacheAndDir(cache_entry, dir_entry, tbe, initial);
@@ -283,9 +290,13 @@ action(Initiate_Request, desc="") {
   bool dealloc_entry := needDeallocCacheEntry(tbe.reqType);
   assert((alloc_entry && dealloc_entry) == false);
 
+  // MYSTUFF:
   if (is_valid(cache_entry)) {
     cache_entry.reduceUsefulness(read_usefulness, write_usefulness);
   }
+  // MYSTUFF:
+  tbe.valueCacheID := valueCacheID;
+
   // always drops any data when not caching it or when this transaction
   // requires deallocation
   tbe.dataToBeInvalid := dealloc_entry ||
@@ -1566,9 +1577,11 @@ action(Send_ReadShared, desc="") {
 
 action(Send_ReadNoSnp, desc="") {
   assert(is_HN);
+
   assert((tbe.use_DMT == false) ||
          ((tbe.reqType == CHIRequestType:AtomicReturn) ||
-          (tbe.reqType == CHIRequestType:AtomicNoReturn)));
+          (tbe.reqType == CHIRequestType:AtomicNoReturn)) ||
+          (tbe.reqType == CHIRequestType:ReadIndirect));
 
   clearExpectedReqResp(tbe);
   tbe.expected_req_resp.addExpectedDataType(CHIDataType:CompData_UC);
@@ -3453,6 +3466,7 @@ action(CheckCacheFill, desc="") {
   assert(is_valid(tbe));
 
   // only perform the write if we have valid data and need to write
+  // MYSTUFF: NOTE: Need to understand what dataValid and dataToBeInvalid mean?
   bool need_fill := tbe.dataValid && (tbe.dataToBeInvalid == false) && tbe.doCacheFill;
   bool execute_next := true;
 
@@ -3460,7 +3474,6 @@ action(CheckCacheFill, desc="") {
     // can write
     tbe.actions.pushFront(Event:DataArrayWrite);
     tbe.actions.pushFront(Event:FillPipe);
-
   } else if (need_fill && cache.cacheAvail(address)) {
     // don't have a cache block, but there is space to allocate one
     set_cache_entry(cache.allocate(address, new CacheEntry));
@@ -4134,4 +4147,76 @@ action(Profile_OutgoingStart_DVM, desc="") {
 action(Profile_OutgoingEnd_DVM, desc="") {
   assert(is_valid(tbe));
   outgoingTransactionEnd(address, tbe.rcvdRetryAck, false);
+}
+
+// MYSTUFF:
+action(Initiate_ReadIndirectMiss, desc="Start ReadIndex or Fwd ReadIndirect") {
+    assert(is_valid(tbe));
+    assert(tbe.reqType == CHIRequestType:ReadIndirect);
+    // MYSTUFF: within this scope (Initiate_ReadIndirectMiss) tbe.doCacheFill
+    // is true only if alloc_for_ind_index is true.
+    if (tbe.doCacheFill) {
+        tbe.actions.push(Event:ReadIndex);
+    } else {
+        tbe.actions.push(Event:FwdReadIndirect);
+    }
+
+    // MYSTUFF: NOTE: Check to see if we have seen the value cache yet.
+    if (alloc_for_ind_value && isInvalid(tbe.valueCacheID)) {
+        // MYSTUFF: NOTE: We are the value cache. Set the valueCacheID in
+        // tbe so that we can use it when we send a message out.
+        tbe.valueCacheID := machineID;
+    }
+}
+
+// MYSTUFF:
+action(Send_ReadIndex, desc="Read Index") {
+    // MYSTUFF: NOTE: By this time we should have seen the value cache.
+    assert(!isInvalid(tbe.valueCacheID));
+    tbe.actions.push(Event:ReadMissPipe);
+    if (is_HN) {
+        // Here, we're at the home node with a miss.
+        tbe.actions.push(Event:SendReadNoSnp);
+    } else {
+        // MYSTUFF: FUTUREME: This is an untested path. make sure to panic or test.
+        tbe.actions.push(Event:SendReadShared);
+    }
+    tbe.actions.push(Event:CheckCacheFill);
+    tbe.actions.push(Event:TagArrayWrite);
+    // MYSTUFF: TODO: This is when I read the value
+    // if (machineID == tbe.valueCacheID) {
+    //     tbe.actions.push(Event:SendReadValueForSelf);
+    // } else {
+    //     tbe.actions.push(Event:SendReadValueForOther);
+    // }
+}
+
+// MYSTUFF:
+action(delayFwdIndirect, desc="Model the delay to fwd ReadIndirect") {
+    assert(is_valid(tbe));
+    tbe.delayNextAction := curTick() + cyclesToTicks(fwd_ind_acc_delay);
+}
+
+// MYSTUFF:
+action(Fwd_ReadIndirect, desc="Forward ReadIndirect") {
+  // MYSTUFF: NOTE: Does it make sense to add the following assert?
+  // What if we don't want to cache them at all? Or what if we want to cache
+  // them at the memory controller.
+  // assert(is_HN == false);
+  assert(tbe.dataValid == false);
+
+  enqueue(reqOutPort, CHIRequestMsg, request_latency) {
+    prepareRequest(tbe, CHIRequestType:ReadIndirect, out_msg);
+
+    out_msg.Destination.add(mapAddressToDownstreamMachine(tbe.addr));
+    // MYSTUFF: NOTE: What do the following two lines mean?
+    out_msg.dataToFwdRequestor := false;
+    allowRequestRetry(tbe, out_msg);
+  }
+}
+
+// MYSTUFF:
+action(delaySendValue, desc="") {
+  assert(is_valid(tbe));
+  tbe.delayNextAction := curTick() + cyclesToTicks(send_value_delay);
 }
