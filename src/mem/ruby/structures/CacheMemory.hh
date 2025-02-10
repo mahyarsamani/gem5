@@ -160,6 +160,8 @@ class CacheMemory : public SimObject
 
     void setRubySystem(RubySystem* rs);
 
+    virtual void regStats() override;
+
   public:
     int getCacheSize() const { return m_cache_size; }
     int getCacheAssoc() const { return m_cache_assoc; }

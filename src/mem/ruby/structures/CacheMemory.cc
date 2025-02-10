@@ -92,10 +92,10 @@ CacheMemory::setRubySystem(RubySystem* rs)
     dataArray.setClockPeriod(rs->clockPeriod());
     tagArray.setClockPeriod(rs->clockPeriod());
     atomicALUArray.setClockPeriod(rs->clockPeriod());
-    atomicALUArray.setBlockSize(rs->getBlockSizeBytes());
+    atomicALUArray.setBlockSize(m_block_size);
 
     if (m_block_size == 0) {
-        m_block_size = rs->getBlockSizeBytes();
+        m_block_size = m_block_size;
     }
 
     m_ruby_system = rs;
@@ -651,36 +651,40 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
         .init(RubyRequestType_NUM)
         .flags(statistics::pdf | statistics::total);
 
-    readUsefulBytes
-        .init(RubySystem::getBlockSizeBytes())
-        .flags(statistics::nozero | statistics::nonan);
-
-    writeUsefulBytes
-        .init(RubySystem::getBlockSizeBytes())
-        .flags(statistics::nozero | statistics::nonan);
-
-    intReadUsefulBytes
-        .init(RubySystem::getBlockSizeBytes())
-        .flags(statistics::nozero | statistics::nonan);
-
-    intWriteUsefulBytes
-        .init(RubySystem::getBlockSizeBytes())
-        .flags(statistics::nozero | statistics::nonan);
-
-    floatReadUsefulBytes
-        .init(RubySystem::getBlockSizeBytes())
-        .flags(statistics::nozero | statistics::nonan);
-
-    floatWriteUsefulBytes
-        .init(RubySystem::getBlockSizeBytes())
-        .flags(statistics::nozero | statistics::nonan);
-
     for (int i = 0; i < RubyAccessMode_NUM; i++) {
         m_accessModeType
             .subname(i, RubyAccessMode_to_string(RubyAccessMode(i)))
             .flags(statistics::nozero)
             ;
     }
+}
+
+void
+CacheMemory::regStats()
+{
+    cacheMemoryStats.readUsefulBytes
+        .init(m_block_size)
+        .flags(statistics::nozero | statistics::nonan);
+
+    cacheMemoryStats.writeUsefulBytes
+        .init(m_block_size)
+        .flags(statistics::nozero | statistics::nonan);
+
+    cacheMemoryStats.intReadUsefulBytes
+        .init(m_block_size)
+        .flags(statistics::nozero | statistics::nonan);
+
+    cacheMemoryStats.intWriteUsefulBytes
+        .init(m_block_size)
+        .flags(statistics::nozero | statistics::nonan);
+
+    cacheMemoryStats.floatReadUsefulBytes
+        .init(m_block_size)
+        .flags(statistics::nozero | statistics::nonan);
+
+    cacheMemoryStats.floatWriteUsefulBytes
+        .init(m_block_size)
+        .flags(statistics::nozero | statistics::nonan);
 }
 
 void
