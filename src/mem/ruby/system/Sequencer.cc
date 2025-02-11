@@ -624,21 +624,12 @@ Sequencer::readCallback(Addr address, DataBlock& data,
         if (processReadCallback(seq_req, data, ruby_request, externalHit, mach,
                                 initialRequestTime, forwardRequestTime,
                                 firstResponseTime)) {
-        if (seq_req.m_type == RubyRequestType_LDIND) {
-            seq_req.m_type = RubyRequestType_LD;
+            break;
         }
         if (ruby_request) {
             assert((seq_req.m_type == RubyRequestType_LD) ||
                    (seq_req.m_type == RubyRequestType_Load_Linked) ||
                    (seq_req.m_type == RubyRequestType_IFETCH));
-        }
-        if ((seq_req.m_type != RubyRequestType_LD) &&
-            (seq_req.m_type != RubyRequestType_Load_Linked) &&
-            (seq_req.m_type != RubyRequestType_IFETCH) &&
-            (seq_req.m_type != RubyRequestType_REPLACEMENT)) {
-            // Write request: reissue request to the cache hierarchy
-            issueRequest(seq_req.pkt, seq_req.m_second_type);
-            break;
         }
         if (ruby_request) {
             recordMissLatency(&seq_req, true, mach, externalHit,
@@ -649,7 +640,7 @@ Sequencer::readCallback(Addr address, DataBlock& data,
         hitCallback(&seq_req, data, true, mach, externalHit,
                     initialRequestTime, forwardRequestTime,
                     firstResponseTime, !ruby_request);
-        // exclude I Cache
+        // MYSTUFF: NOTE: exclude I Cache
         if (!is_inst) {
             size_t byte_offset = seq_req.pkt->getAddr() - address;
             size_t range = seq_req.pkt->getSize();
