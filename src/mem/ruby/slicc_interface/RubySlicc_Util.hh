@@ -339,6 +339,17 @@ getNextAddr(RequestPtr req)
     }
 }
 
+inline int
+getNextSize(RequestPtr req)
+{
+    std::shared_ptr<SpatterAccess> spatter_access = req->getExtension<SpatterAccess>();
+    if (spatter_access == nullptr) {
+        return -1;
+    } else {
+        return (int) spatter_access->nextIndAccSize();
+    }
+}
+
 inline bool
 isInvalid(MachineID m_id)
 {

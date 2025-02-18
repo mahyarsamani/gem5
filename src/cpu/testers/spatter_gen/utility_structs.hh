@@ -188,9 +188,23 @@ class SpatterAccess: public Extension<Request, SpatterAccess>,
     Addr nextIndAccAddr()
     {
         Addr addr;
-        std::tie(addr, std::ignore) = nextAccessPair();
+        std::tie(addr, std::ignore) = accessPairs.front();
         return addr;
     }
+
+    size_t nextIndAccSize()
+    {
+        size_t size;
+        std::tie(std::ignore, size) = accessPairs.front();
+        return size;
+    }
+
+    void startNextTrip()
+    {
+        assert(tripsLeft() > 0);
+        accessPairs.pop();
+    }
+
 };
 
 class SpatterKernel
