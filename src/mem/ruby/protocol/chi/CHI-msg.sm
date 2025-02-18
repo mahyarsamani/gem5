@@ -99,6 +99,7 @@ enumeration(CHIRequestType, desc="") {
 
   // MYSTUFF:
   ReadIndirect;
+  ReadValue;
 
   null;
 }
@@ -138,6 +139,9 @@ structure(CHIRequestMsg, desc="", interface="Message") {
   WriteMask read_usefulness,     desc="Mask denoting bytes that were useful for read";
   WriteMask write_usefulness,    desc="Mask denoting bytes that were useful for write";
   MachineID valueCacheID,        desc="MachineID of the value cache for an indirect request";
+  // MYSTUFF: Maybe I can
+  // bool isReadIndex;
+  bool isReadValue;
 }
 
 enumeration(CHIResponseType, desc="...") {

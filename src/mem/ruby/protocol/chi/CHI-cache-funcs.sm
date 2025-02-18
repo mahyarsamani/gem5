@@ -1316,6 +1316,8 @@ Event reqToEvent(CHIRequestType type, bool is_prefetch) {
   } else if (type == CHIRequestType:ReadIndirect) {
     // MYSTUFF:
     return Event:ReadIndirect;
+  } else if (type == CHIRequestType:ReadValue) {
+    return Event:ReadValue;
   } else {
     error("Invalid CHIRequestType");
   }

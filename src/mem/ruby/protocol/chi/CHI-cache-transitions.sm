@@ -1035,12 +1035,23 @@ transition(BUSY_BLKD, FwdReadIndirect) {
 //     ProcessNextState_ClearPending;
 // }
 
-// transition(BUSY_INTR, SendReadValueForOther) {
-//     Pop_TriggerQueue;
-//     delaySendValue;
-//     Send_ReadValue;
-//     ProcessNextState_ClearPending;
-// }
+// MYSTUFF: NOTE: Now we have the value of index.
+transition(BUSY_INTR, SendReadValueForOther) {
+    Pop_TriggerQueue;
+    delaySendValue;
+    Send_ReadValue;
+    ProcessNextState_ClearPending;
+}
+
+// MYSTUFF: NOTE: Now we have the address of value, we can read it.
+// FUTUREME: This is only implemented for when L1 is the value cache.
+transition(I, ReadValue, BUSY_BLKD) {
+    Initiate_Request;
+    Initiate_ReadValueMiss;
+    // Profile_Miss;
+    Pop_ReqRdyQueue;
+    ProcessNextState;
+}
 
 // Trigger-specifc transitions
 
