@@ -49,6 +49,15 @@ namespace gem5
 namespace ruby
 {
 
+DataBlock::DataBlock(int blk_size):
+{
+    assert(!m_alloc);
+    m_block_size = blk_size;
+    alloc();
+    readUsefulness = new WriteMask(m_block_size);
+    writeUsefulness = new WriteMask(m_block_size);
+}
+
 DataBlock::DataBlock(const DataBlock &cp)
 {
     assert(cp.isAlloc());
@@ -193,6 +202,7 @@ DataBlock::getData(int offset, int len) const
     assert(m_alloc);
     assert(m_block_size > 0);
     assert(offset + len <= m_block_size);
+    readUsefulness->setMask(offset, len);
     return &m_data[offset];
 }
 
@@ -208,6 +218,7 @@ DataBlock::setData(const uint8_t *data, int offset, int len)
 {
     assert(m_alloc);
     memcpy(&m_data[offset], data, len);
+    writeUsefulness->setMask(offset, len);
 }
 
 void
@@ -217,7 +228,8 @@ DataBlock::setData(PacketPtr pkt)
     assert(m_block_size > 0);
     int offset = getOffset(pkt->getAddr(), floorLog2(m_block_size));
     assert(offset + pkt->getSize() <= m_block_size);
-    pkt->writeData(&m_data[offset]);
+    uint8_t *pkt_data = pkt->getPtr<uint8_t>();
+    memcpy(&m_data[offset], pkt_data, pkt->getSize());
 }
 
 DataBlock &

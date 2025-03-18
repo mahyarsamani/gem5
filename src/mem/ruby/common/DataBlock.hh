@@ -65,12 +65,7 @@ class DataBlock
     // do not need to be changed.
     DataBlock() = default;
 
-    DataBlock(int blk_size)
-    {
-        assert(!m_alloc);
-        m_block_size = blk_size;
-        alloc();
-    }
+    DataBlock(int blk_size);
 
     DataBlock(const DataBlock &cp);
 
@@ -118,6 +113,8 @@ class DataBlock
     bool m_alloc = false;
     int m_block_size = 0;
 
+    WriteMask* readUsefulness;
+    WriteMask* writeUsefulness;
     // Tracks block changes when atomic ops are applied
     std::deque<uint8_t*> m_atomicLog;
 };
