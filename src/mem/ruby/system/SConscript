@@ -48,7 +48,7 @@ if env['CONF']['BUILD_GPU']:
 SimObject('RubySystem.py', sim_objects=['RubySystem'])
 SimObject('Sequencer.py', sim_objects=[
     'RubyPort', 'RubyPortProxy', 'RubySequencer', 'RubyHTMSequencer',
-    'DMASequencer'])
+    'DMASequencer'], enums=['SequencerType'])
 if env['CONF']['BUILD_GPU']:
     SimObject('VIPERCoalescer.py', sim_objects=['VIPERCoalescer'])
     SimObject('VIPERSequencer.py', sim_objects=['VIPERSequencer'])

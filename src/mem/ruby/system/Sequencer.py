@@ -42,6 +42,10 @@ from m5.params import *
 from m5.proxy import *
 
 
+class SequencerType(Enum):
+    vals = ["Data", "Inst", "DMA", "Sys"]
+
+
 class RubyPort(ClockedObject):
     type = "RubyPort"
     abstract = True
@@ -58,7 +62,7 @@ class RubyPort(ClockedObject):
     )
     slave = DeprecatedParam(in_ports, "`slave` is now called `in_ports`")
 
-    is_inst = Param.Bool("Is this an instruction port?")
+    seq_type = Param.SequencerType("Type of sequencer")
 
     interrupt_out_port = VectorRequestPort(
         "Port to connect to x86 interrupt "
@@ -104,6 +108,7 @@ class RubySequencer(RubyPort):
     cxx_header = "mem/ruby/system/Sequencer.hh"
 
     dcache = Param.RubyCache("")
+    icache = Param.RubyCache("")
 
     max_outstanding_requests = Param.Int(
         16, "max requests (incl. prefetches) outstanding"

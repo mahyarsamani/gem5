@@ -169,11 +169,11 @@ class CacheMemory : public SimObject
     Addr getAddressAtIdx(int idx) const;
 
     // TODO: Implement this
-    void setReadUsefulBits(Addr line_addr, size_t byte_offset, size_t range);
-    void setWriteUsefulBits(Addr line_addr, size_t bytes_offset, size_t range);
+    void setReadUsefulness(Addr line_addr, size_t byte_offset, size_t range);
+    void setWriteUsefulness(Addr line_addr, size_t bytes_offset, size_t range);
 
-    WriteMask getReadUsefulBits(Addr line_addr);
-    WriteMask getWriteUsefulBits(Addr line_addr);
+    WriteMask getReadUsefulness(Addr line_addr);
+    WriteMask getWriteUsefulness(Addr line_addr);
 
   private:
     // convert a Address to its location in the cache

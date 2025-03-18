@@ -860,7 +860,7 @@ CacheMemory::htmCommitTransaction()
 }
 
 void
-CacheMemory::setReadUsefulBits(Addr line_addr, size_t byte_offset, size_t range)
+CacheMemory::setReadUsefulness(Addr line_addr, size_t byte_offset, size_t range)
 {
     AbstractCacheEntry* entry = lookup(line_addr);
     if (entry != nullptr) {
@@ -872,7 +872,7 @@ CacheMemory::setReadUsefulBits(Addr line_addr, size_t byte_offset, size_t range)
 }
 
 void
-CacheMemory::setWriteUsefulBits(Addr line_addr, size_t byte_offset, size_t range)
+CacheMemory::setWriteUsefulness(Addr line_addr, size_t byte_offset, size_t range)
 {
     AbstractCacheEntry* entry = lookup(line_addr);
     if (entry != nullptr) {
@@ -884,7 +884,7 @@ CacheMemory::setWriteUsefulBits(Addr line_addr, size_t byte_offset, size_t range
 }
 
 WriteMask
-CacheMemory::getReadUsefulBits(Addr line_addr)
+CacheMemory::getReadUsefulness(Addr line_addr)
 {
     AbstractCacheEntry* entry = lookup(line_addr);
     assert(entry != nullptr);
@@ -893,7 +893,7 @@ CacheMemory::getReadUsefulBits(Addr line_addr)
 }
 
 WriteMask
-CacheMemory::getWriteUsefulBits(Addr line_addr)
+CacheMemory::getWriteUsefulness(Addr line_addr)
 {
     AbstractCacheEntry* entry = lookup(line_addr);
     assert(entry != nullptr);

@@ -72,13 +72,14 @@ Sequencer::Sequencer(const Params &p)
     : RubyPort(p), m_IncompleteTimes(MachineType_NUM),
       deadlockCheckEvent([this]{ wakeup(); }, "Sequencer deadlock check")
 {
-    is_inst = p.is_inst;
-
+    m_sequencer_type = p.seq_type;
     m_outstanding_count = 0;
 
     m_ruby_system = p.ruby_system;
 
     m_dataCache_ptr = p.dcache;
+    m_instCache_ptr = p.icache;
+
     m_max_outstanding_requests = p.max_outstanding_requests;
     m_deadlock_threshold = p.deadlock_threshold;
 
@@ -554,7 +555,7 @@ Sequencer::writeCallback(Addr address, DataBlock& data,
             DPRINTF(IndirectLoad, "%s: Servicing a read response for addr: 0x%lx "
                                 "with byte_offset: %d, and range: %d.\n",
                                 __func__, address, byte_offset, range);
-            m_dataCache_ptr->setWriteUsefulBits(address, byte_offset, range);
+            m_dataCache_ptr->setWriteUsefulness(address, byte_offset, range);
             ruby_request = false;
         } else {
             // handle read request
@@ -641,13 +642,20 @@ Sequencer::readCallback(Addr address, DataBlock& data,
                     initialRequestTime, forwardRequestTime,
                     firstResponseTime, !ruby_request);
         // MYSTUFF: NOTE: exclude I Cache
-        if (!is_inst) {
-            size_t byte_offset = seq_req.pkt->getAddr() - address;
-            size_t range = seq_req.pkt->getSize();
-            DPRINTF(IndirectLoad, "%s: Servicing a read response for addr: 0x%lx "
-                                    "with byte_offset: %d, and range: %d.\n",
-                                    __func__, address, byte_offset, range);
-            m_dataCache_ptr->setReadUsefulBits(address, byte_offset, range);
+        size_t byte_offset = seq_req.pkt->getAddr() - address;
+        size_t range = seq_req.pkt->getSize();
+        DPRINTF(IndirectLoad, "%s: Servicing a read response for addr: 0x%lx "
+                                "with byte_offset: %d, and range: %d.\n",
+                                __func__, address, byte_offset, range);
+        if (m_sequencer_type == SequencerType::Data) {
+            assert(m_instCache_ptr == nullptr);
+            m_dataCache_ptr->setReadUsefulness(address, byte_offset, range);
+        } else if (m_sequencer_type == SequencerType::Inst) {
+            assert(m_dataCache_ptr == nullptr);
+            m_instCache_ptr->setReadUsefulness(address, byte_offset, range);
+        } else {
+            assert(m_sequencer_type == SequencerType::DMA || m_sequencer_type == SequencerType::Sys);
+            assert(m_dataCache_ptr == nullptr && m_instCache_ptr == nullptr);
         }
         ruby_request = false;
         seq_req_list.pop_front();

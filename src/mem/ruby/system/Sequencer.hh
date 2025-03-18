@@ -46,6 +46,7 @@
 #include <unordered_map>
 
 #include "cpu/testers/rubytest/RubyTester.hh"
+#include "enums/SequencerType.hh"
 #include "mem/ruby/common/Address.hh"
 #include "mem/ruby/protocol/MachineType.hh"
 #include "mem/ruby/protocol/RubyRequestType.hh"
@@ -86,6 +87,7 @@ std::ostream& operator<<(std::ostream& out, const SequencerRequest& obj);
 
 class Sequencer : public RubyPort
 {
+  typedef enums::SequencerType SequencerType;
   public:
     typedef RubySequencerParams Params;
     Sequencer(const Params &);
@@ -257,7 +259,7 @@ class Sequencer : public RubyPort
     RubySystem *m_ruby_system;
 
   private:
-    bool is_inst;
+    SequencerType m_sequencer_type;
 
     int m_max_outstanding_requests;
 
@@ -266,6 +268,7 @@ class Sequencer : public RubyPort
     PacketPtr m_cache_inv_pkt;
 
     CacheMemory* m_dataCache_ptr;
+    CacheMemory* m_instCache_ptr;
 
     // The cache access latency for top-level caches (L0/L1). These are
     // currently assessed at the beginning of each memory access through the

@@ -236,8 +236,8 @@ structure (CacheMemory, external = "yes") {
   int getNumBlocks();
   Addr getAddressAtIdx(int);
 
-  WriteMask getReadUsefulBits(Addr);
-  WriteMask getWriteUsefulBits(Addr);
+  WriteMask getReadUsefulness(Addr);
+  WriteMask getWriteUsefulness(Addr);
 
   void profileUsefulBits(Addr);
   void profileDemandHit();
