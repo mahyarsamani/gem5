@@ -48,7 +48,6 @@ action(AllocateTBE_Request, desc="") {
     // Move request to rdy queue
     peek(reqInPort, CHIRequestMsg) {
       enqueue(reqRdyOutPort, CHIRequestMsg, allocation_latency) {
-        DPRINTF(IndirectLoad, "Received a message with type %s.\n", in_msg.type);
         assert(in_msg.addr == address);
         assert(in_msg.is_local_pf == false);
         out_msg := in_msg;
@@ -262,6 +261,7 @@ action(Initiate_Request, desc="") {
   State initial := getState(tbe, cache_entry, address);
   bool was_retried := false;
   // MYSTUFF:
+  bool reduce_usefulness := false;
   WriteMask read_usefulness;
   WriteMask write_usefulness;
   MachineID valueCacheID;
@@ -273,8 +273,9 @@ action(Initiate_Request, desc="") {
         // MYSTUFF:
         read_usefulness := in_msg.read_usefulness;
         write_usefulness := in_msg.write_usefulness;
-        DPRINTF(IndirectLoad, "Got %s read usefulness from message.\n", read_usefulness);
-        DPRINTF(IndirectLoad, "Got %s write usefulness from message.\n", write_usefulness);
+        reduce_usefulness := true;
+        DPRINTF(IndirectLoad, "Got read usefulness with count %d from message.\n", read_usefulness.count());
+        DPRINTF(IndirectLoad, "Got write usefulness with count %d from message.\n", write_usefulness.count());
     }
     valueCacheID := in_msg.valueCacheID;
   }
@@ -291,8 +292,8 @@ action(Initiate_Request, desc="") {
   assert((alloc_entry && dealloc_entry) == false);
 
   // MYSTUFF:
-  if (is_valid(cache_entry)) {
-    cache_entry.reduceUsefulness(read_usefulness, write_usefulness);
+  if (reduce_usefulness && is_valid(cache_entry) && cache_entry.DataBlk.isAlloc()) {
+    cache_entry.DataBlk.reduceUsefulness(read_usefulness, write_usefulness);
   }
   // MYSTUFF:
   tbe.valueCacheID := valueCacheID;
@@ -416,10 +417,13 @@ action(RestoreFromHazard, desc="") {
 
 action(Initiate_Replacement, desc="") {
   assert(is_invalid(tbe));
-  WriteMask read_usefulness := cache_entry.getReadUsefulness();
-  WriteMask write_usefulness := cache_entry.getWriteUsefulness();
+
+  WriteMask read_usefulness := cache_entry.DataBlk.getReadUsefulness();
+  WriteMask write_usefulness := cache_entry.DataBlk.getWriteUsefulness();
+  cache.profileUsefulness(address, read_usefulness, write_usefulness);
+
   State initial := getState(tbe, cache_entry, address);
-  cache.profileUsefulBits(address);
+
   DPRINTF(IndirectLoad, "Initiate_Replacement action, address: 0x%lx.\n", address);
   if (unify_repl_TBEs) {
     peek(replTriggerInPort, ReplacementMsg) {
@@ -1741,8 +1745,8 @@ action(Send_WriteBackOrWriteEvict, desc="") {
     // TODO: assign out_msg.usefulness here.
     out_msg.read_usefulness := tbe.read_usefulness;
     out_msg.write_usefulness := tbe.write_usefulness;
-    DPRINTF(IndirectLoad, "Sending read usefulness mask %s with message.\n", out_msg.read_usefulness);
-    DPRINTF(IndirectLoad, "Sending write usefulness mask %s with message.\n", out_msg.write_usefulness);
+    DPRINTF(IndirectLoad, "Sending read usefulness mask with count %d with message.\n", out_msg.read_usefulness.count());
+    DPRINTF(IndirectLoad, "Sending write usefulness mask with count %d with message.\n", out_msg.write_usefulness.count());
     allowRequestRetry(tbe, out_msg);
   }
   clearExpectedReqResp(tbe);
@@ -3138,7 +3142,6 @@ action(Send_Data, desc="") {
     }
     tbe.snd_pendBytes.setMask(offset, range, false);
 
-    DPRINTF(IndirectLoad, "Sending %d bytes with offset %d with base_addr 0x%lx.\n", range, offset, tbe.addr);
     if ((tbe.reqType == CHIRequestType:AtomicReturn) &&
         (tbe.atomic_to_be_wb == false)){
         out_msg.dataBlk := tbe.oldDataBlk;
@@ -3412,6 +3415,8 @@ action(Finalize_UpdateCacheFromTBE, desc="") {
     assert(tbe.dataValid);
     assert(is_valid(cache_entry));
     cache_entry.DataBlk := tbe.dataBlk;
+    cache_entry.DataBlk.copyReadUsefulness(tbe.dataBlk.getReadUsefulness());
+    cache_entry.DataBlk.copyWriteUsefulness(tbe.dataBlk.getWriteUsefulness());
     DPRINTF(RubySlicc, "Cached data %s pfb %s\n", tbe.dataBlk, cache_entry.HWPrefetched);
   } else {
     // make sure only deallocate the cache entry if data is invalid
@@ -3635,7 +3640,6 @@ action(ProcessNextState_ClearPending, desc="") {
 
 action(Callback_LoadHit, desc="") {
   assert(is_valid(tbe));
-  DPRINTF(IndirectLoad, "Callback_LoadHit action for addr 0x%lx.\n", tbe.accAddr);
   assert(tbe.reqType == CHIRequestType:Load);
   if (tbe.is_local_pf == false) {
     assert(tbe.dataValid);
@@ -3693,7 +3697,6 @@ action(Callback_ExpressPrefetchHit, desc="") {
 // NOTE: should create a separate trigger for this callback ?
 action(Callback_Miss, desc="") {
   assert(is_valid(tbe));
-  DPRINTF(IndirectLoad, "Callback_Miss action for addr 0x%lx.\n", tbe.accAddr);
   if (tbe.dataValid && tbe.is_local_pf) {
     assert(use_prefetcher);
     pfProxy.completePrefetch(tbe.addr);

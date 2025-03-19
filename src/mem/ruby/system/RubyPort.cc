@@ -45,7 +45,6 @@
 #include "cpu/testers/rubytest/RubyTester.hh"
 #include "debug/Config.hh"
 #include "debug/Drain.hh"
-#include "debug/IndirectLoad.hh"
 #include "debug/Ruby.hh"
 #include "mem/ruby/protocol/AccessPermission.hh"
 #include "mem/ruby/slicc_interface/AbstractController.hh"
@@ -465,7 +464,6 @@ RubyPort::ruby_hit_callback(PacketPtr pkt)
     DPRINTF(RubyPort, "Hit callback for %s 0x%x\n", pkt->cmdString(),
             pkt->getAddr());
 
-    DPRINTF(IndirectLoad, "%s: Hit callback for pkt: %s.\n", __func__, pkt->print());
 
     // The packet was destined for memory and has not yet been turned
     // into a response

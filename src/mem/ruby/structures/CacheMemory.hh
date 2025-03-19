@@ -168,13 +168,6 @@ class CacheMemory : public SimObject
     int getNumBlocks() const { return m_cache_num_sets * m_cache_assoc; }
     Addr getAddressAtIdx(int idx) const;
 
-    // TODO: Implement this
-    void setReadUsefulness(Addr line_addr, size_t byte_offset, size_t range);
-    void setWriteUsefulness(Addr line_addr, size_t bytes_offset, size_t range);
-
-    WriteMask getReadUsefulness(Addr line_addr);
-    WriteMask getWriteUsefulness(Addr line_addr);
-
   private:
     // convert a Address to its location in the cache
     int64_t addressToCacheSet(Addr address) const;
@@ -288,7 +281,7 @@ class CacheMemory : public SimObject
       // These function increment the number of demand hits/misses by one
       // each time they are called
       // TODO: Implement this function.
-      void profileUsefulBits(Addr line_address);
+      void profileUsefulness(Addr line_addr, const WriteMask read_usefulness, const WriteMask write_usefulness);
       void profileDemandHit();
       void profileDemandMiss();
       void profilePrefetchHit();

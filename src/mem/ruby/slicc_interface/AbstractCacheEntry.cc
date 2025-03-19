@@ -127,36 +127,5 @@ AbstractCacheEntry::getInHtmWriteSet() const
     return m_htmInWriteSet;
 }
 
-void
-AbstractCacheEntry::reduceUsefulness(const WriteMask& read_upstream, const WriteMask& write_upstream)
-{
-    readUsefulness.orMask(read_upstream);
-    writeUsefulness.orMask(write_upstream);
-}
-
-void
-AbstractCacheEntry::setReadUsefulness(size_t byte_offset, size_t range)
-{
-    DPRINTF(IndirectLoad,
-        "%s: Setting read usefulness for line-addr: "
-        "0x%lx with byte_offset: %d, range: %d.\n",
-        __func__, m_Address, byte_offset, range);
-    readUsefulness.setMask(byte_offset, range, true);
-    DPRINTF(IndirectLoad, "%s: Usefulness for line-addr: 0x%lx is: %s.\n",
-            __func__, m_Address, readUsefulness);
-}
-
-void
-AbstractCacheEntry::setWriteUsefulness(size_t byte_offset, size_t range)
-{
-    DPRINTF(IndirectLoad,
-        "%s: Setting write usefulness for line-addr: "
-        "0x%lx with byte_offset: %d, range: %d.\n",
-        __func__, m_Address, byte_offset, range);
-    writeUsefulness.setMask(byte_offset, range, true);
-    DPRINTF(IndirectLoad, "%s: Usefulness for line-addr: 0x%lx is: %s.\n",
-            __func__, m_Address, writeUsefulness);
-}
-
 } // namespace ruby
 } // namespace gem5

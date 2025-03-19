@@ -326,20 +326,20 @@ CacheMemory::allocate(Addr address, AbstractCacheEntry *entry)
             // Call reset function here to set initial value for different
             // replacement policies.
             m_replacementPolicy_ptr->reset(entry->replacementData);
-            if (pendingReadUsefulness.find(address) != pendingReadUsefulness.end()) {
-                entry->copyReadUsefulness(pendingReadUsefulness[address]);
-                pendingReadUsefulness.erase(address);
-            }
-            if (pendingWriteUsefulness.find(address) != pendingWriteUsefulness.end()) {
-                entry->copyWriteUsefulness(pendingWriteUsefulness[address]);
-                pendingWriteUsefulness.erase(address);
-            }
-            DPRINTF(IndirectLoad, "%s: Allocated an entry for addr: 0x%lx "
-                                    "with the following read usefulness: %s.\n",
-                                __func__, address, entry->getReadUsefulness());
-            DPRINTF(IndirectLoad, "%s: Allocated an entry for addr: 0x%lx "
-                                    "with the following write usefulness: %s.\n",
-                                __func__, address, entry->getWriteUsefulness());
+            // if (pendingReadUsefulness.find(address) != pendingReadUsefulness.end()) {
+            //     entry->copyReadUsefulness(pendingReadUsefulness[address]);
+            //     pendingReadUsefulness.erase(address);
+            // }
+            // if (pendingWriteUsefulness.find(address) != pendingWriteUsefulness.end()) {
+            //     entry->copyWriteUsefulness(pendingWriteUsefulness[address]);
+            //     pendingWriteUsefulness.erase(address);
+            // }
+            // DPRINTF(IndirectLoad, "%s: Allocated an entry for addr: 0x%lx "
+            //                         "with the following read usefulness: %s.\n",
+            //                     __func__, address, entry->getReadUsefulness());
+            // DPRINTF(IndirectLoad, "%s: Allocated an entry for addr: 0x%lx "
+            //                         "with the following write usefulness: %s.\n",
+            //                     __func__, address, entry->getWriteUsefulness());
             return entry;
         }
     }
@@ -691,14 +691,14 @@ void
 CacheMemory::resetStats()
 {
     statistics::Group::resetStats();
-    DPRINTF(IndirectLoad, "%s: Resetting all the useful bits.\n", __func__);
-    for (auto& set: m_cache) {
-        for (auto& entry: set) {
-            if (entry != nullptr) {
-                entry->resetUsefulness();
-            }
-        }
-    }
+    // DPRINTF(IndirectLoad, "%s: Resetting all the useful bits.\n", __func__);
+    // for (auto& set: m_cache) {
+    //     for (auto& entry: set) {
+    //         if (entry != nullptr) {
+    //             entry->resetUsefulness();
+    //         }
+    //     }
+    // }
     pendingReadUsefulness.clear();
     pendingWriteUsefulness.clear();
 }
@@ -860,73 +860,28 @@ CacheMemory::htmCommitTransaction()
 }
 
 void
-CacheMemory::setReadUsefulness(Addr line_addr, size_t byte_offset, size_t range)
+CacheMemory::profileUsefulness(Addr line_addr, const WriteMask read_usefulness, const WriteMask write_usefulness)
 {
-    AbstractCacheEntry* entry = lookup(line_addr);
-    if (entry != nullptr) {
-        assert(pendingReadUsefulness.find(line_addr) == pendingReadUsefulness.end());
-        entry->setReadUsefulness(byte_offset, range);
-    } else {
-        pendingReadUsefulness[line_addr].setMask(byte_offset, range, true);
-    }
-}
-
-void
-CacheMemory::setWriteUsefulness(Addr line_addr, size_t byte_offset, size_t range)
-{
-    AbstractCacheEntry* entry = lookup(line_addr);
-    if (entry != nullptr) {
-        assert(pendingWriteUsefulness.find(line_addr) == pendingWriteUsefulness.end());
-        entry->setWriteUsefulness(byte_offset, range);
-    } else {
-        pendingWriteUsefulness[line_addr].setMask(byte_offset, range, true);
-    }
-}
-
-WriteMask
-CacheMemory::getReadUsefulness(Addr line_addr)
-{
-    AbstractCacheEntry* entry = lookup(line_addr);
-    assert(entry != nullptr);
-
-    return entry->getReadUsefulness();
-}
-
-WriteMask
-CacheMemory::getWriteUsefulness(Addr line_addr)
-{
-    AbstractCacheEntry* entry = lookup(line_addr);
-    assert(entry != nullptr);
-
-    return entry->getWriteUsefulness();
-}
-
-void
-CacheMemory::profileUsefulBits(Addr line_addr)
-{
-    AbstractCacheEntry* entry = lookup(line_addr);
-    assert(entry != nullptr);
     auto range_type_entry = rangeTypeMap.contains(line_addr);
     if (range_type_entry != rangeTypeMap.end()) {
         if (range_type_entry->second == UsefulDataType::Integer) {
-            cacheMemoryStats.intReadUsefulBytes.sample(entry->getReadUsefulness().count());
-            cacheMemoryStats.intWriteUsefulBytes.sample(entry->getWriteUsefulness().count());
+            cacheMemoryStats.intReadUsefulBytes.sample(read_usefulness.count());
+            cacheMemoryStats.intWriteUsefulBytes.sample(write_usefulness.count());
             DPRINTF(IndirectLoad, "%s: Sampling int read usefulness for line-addr: 0x%lx with "
-                "count: %d.\n", __func__, line_addr, entry->getReadUsefulness().count());
+                "count: %d.\n", __func__, line_addr, read_usefulness.count());
             DPRINTF(IndirectLoad, "%s: Sampling int write usefulness for line-addr: 0x%lx with "
-                "count: %d.\n", __func__, line_addr, entry->getWriteUsefulness().count());
+                "count: %d.\n", __func__, line_addr, write_usefulness.count());
         } else {
-            cacheMemoryStats.floatReadUsefulBytes.sample(entry->getReadUsefulness().count());
-            cacheMemoryStats.floatWriteUsefulBytes.sample(entry->getWriteUsefulness().count());
+            cacheMemoryStats.floatReadUsefulBytes.sample(read_usefulness.count());
+            cacheMemoryStats.floatWriteUsefulBytes.sample(write_usefulness.count());
             DPRINTF(IndirectLoad, "%s: Sampling float read usefulness for line-addr: 0x%lx with "
-                "count: %d.\n", __func__, line_addr, entry->getReadUsefulness().count());
+                "count: %d.\n", __func__, line_addr, read_usefulness.count());
             DPRINTF(IndirectLoad, "%s: Sampling float write usefulness for line-addr: 0x%lx with "
-                "count: %d.\n", __func__, line_addr, entry->getWriteUsefulness().count());
+                "count: %d.\n", __func__, line_addr, write_usefulness.count());
         }
-        cacheMemoryStats.readUsefulBytes.sample(entry->getReadUsefulness().count());
-        cacheMemoryStats.writeUsefulBytes.sample(entry->getWriteUsefulness().count());
+        cacheMemoryStats.readUsefulBytes.sample(read_usefulness.count());
+        cacheMemoryStats.writeUsefulBytes.sample(write_usefulness.count());
     }
-    entry->resetUsefulness();
 }
 
 void

@@ -82,6 +82,17 @@ structure(DataBlock, external = "yes", desc="..."){
   void copyPartial(DataBlock, WriteMask);
   void atomicPartial(DataBlock, WriteMask);
   void atomicPartial(DataBlock, WriteMask, bool);
+
+  bool isAlloc();
+
+  void copyReadUsefulness(WriteMask);
+  void copyWriteUsefulness(WriteMask);
+
+  void reduceUsefulness(WriteMask, WriteMask);
+
+  WriteMask getReadUsefulness();
+  WriteMask getWriteUsefulness();
+
   int numAtomicLogEntries();
   void clearAtomicLogEntries();
 }

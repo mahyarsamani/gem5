@@ -69,17 +69,7 @@ class DataBlock
 
     DataBlock(const DataBlock &cp);
 
-    ~DataBlock()
-    {
-        if (m_alloc)
-            delete [] m_data;
-
-        // If data block involved in atomic
-        // operations, free all meta data
-        for (auto log : m_atomicLog) {
-            delete [] log;
-        }
-    }
+    ~DataBlock();
 
     DataBlock& operator=(const DataBlock& obj);
 
@@ -106,6 +96,17 @@ class DataBlock
     void setBlockSize(int block_size) { realloc(block_size); }
     bool isAlloc() const { return m_alloc; }
     void realloc(int blk_size);
+
+    void setReadUsefulness(int offset, int len);
+    void setWriteUsefulness(int offset, int len);
+
+    void copyReadUsefulness(WriteMask read_usefulness);
+    void copyWriteUsefulness(WriteMask write_usefulness);
+
+    void reduceUsefulness(const WriteMask read_usefulness, const WriteMask write_usefulness);
+
+    WriteMask getReadUsefulness() const;
+    WriteMask getWriteUsefulness() const;
 
   private:
     void alloc();

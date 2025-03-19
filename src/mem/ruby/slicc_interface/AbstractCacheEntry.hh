@@ -124,18 +124,6 @@ class AbstractCacheEntry : public ReplaceableEntry
     bool getInHtmWriteSet() const;
     virtual void invalidateEntry() {}
 
-    void reduceUsefulness(const WriteMask& read_upstream, const WriteMask& write_upstream);
-
-    WriteMask getReadUsefulness() { return readUsefulness; }
-    void setReadUsefulness(size_t offset, size_t range);
-    void copyReadUsefulness(const WriteMask& orig) { readUsefulness = orig; }
-
-    WriteMask getWriteUsefulness() { return writeUsefulness; }
-    void setWriteUsefulness(size_t offset, size_t range);
-    void copyWriteUsefulness(const WriteMask& orig) { writeUsefulness = orig; }
-
-    void resetUsefulness() { readUsefulness.clear(); writeUsefulness.clear(); }
-
   private:
     // hardware transactional memory
     bool m_htmInReadSet;

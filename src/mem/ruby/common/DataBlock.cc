@@ -40,6 +40,8 @@
 
 #include "mem/ruby/common/DataBlock.hh"
 
+#include "base/trace.hh"
+#include "debug/MSDebug.hh"
 #include "mem/ruby/common/Address.hh"
 #include "mem/ruby/common/WriteMask.hh"
 
@@ -49,13 +51,11 @@ namespace gem5
 namespace ruby
 {
 
-DataBlock::DataBlock(int blk_size):
+DataBlock::DataBlock(int blk_size)
 {
     assert(!m_alloc);
     m_block_size = blk_size;
     alloc();
-    readUsefulness = new WriteMask(m_block_size);
-    writeUsefulness = new WriteMask(m_block_size);
 }
 
 DataBlock::DataBlock(const DataBlock &cp)
@@ -68,6 +68,8 @@ DataBlock::DataBlock(const DataBlock &cp)
     m_block_size = cp.getBlockSize();
     m_data = new uint8_t[m_block_size];
     memcpy(m_data, cp.m_data, m_block_size);
+    readUsefulness = new WriteMask(m_block_size);
+    writeUsefulness = new WriteMask(m_block_size);
     m_alloc = true;
     // If this data block is involved in an atomic operation, the effect
     // of applying the atomic operations on the data block are recorded in
@@ -77,6 +79,21 @@ DataBlock::DataBlock(const DataBlock &cp)
         memcpy(block_update, cp.m_atomicLog[i], m_block_size);
         m_atomicLog.push_back(block_update);
     }
+}
+
+DataBlock::~DataBlock()
+{
+    if (m_alloc)
+        delete [] m_data;
+
+    // If data block involved in atomic
+    // operations, free all meta data
+    for (auto log : m_atomicLog) {
+        delete [] log;
+    }
+
+    delete readUsefulness;
+    delete writeUsefulness;
 }
 
 void
@@ -89,6 +106,8 @@ DataBlock::alloc()
     }
 
     m_data = new uint8_t[m_block_size];
+    readUsefulness = new WriteMask(m_block_size);
+    writeUsefulness = new WriteMask(m_block_size);
     m_alloc = true;
     clear();
 }
@@ -101,6 +120,8 @@ DataBlock::realloc(int blk_size)
 
     if (m_alloc) {
         delete [] m_data;
+        delete readUsefulness;
+        delete writeUsefulness;
         m_alloc = false;
     }
     alloc();
@@ -112,6 +133,8 @@ DataBlock::clear()
     assert(m_alloc);
     assert(m_block_size > 0);
     memset(m_data, 0, m_block_size);
+    readUsefulness->clear();
+    writeUsefulness->clear();
 }
 
 bool
@@ -202,7 +225,6 @@ DataBlock::getData(int offset, int len) const
     assert(m_alloc);
     assert(m_block_size > 0);
     assert(offset + len <= m_block_size);
-    readUsefulness->setMask(offset, len);
     return &m_data[offset];
 }
 
@@ -218,7 +240,6 @@ DataBlock::setData(const uint8_t *data, int offset, int len)
 {
     assert(m_alloc);
     memcpy(&m_data[offset], data, len);
-    writeUsefulness->setMask(offset, len);
 }
 
 void
@@ -228,8 +249,63 @@ DataBlock::setData(PacketPtr pkt)
     assert(m_block_size > 0);
     int offset = getOffset(pkt->getAddr(), floorLog2(m_block_size));
     assert(offset + pkt->getSize() <= m_block_size);
-    uint8_t *pkt_data = pkt->getPtr<uint8_t>();
-    memcpy(&m_data[offset], pkt_data, pkt->getSize());
+    pkt->writeData(&m_data[offset]);
+}
+
+void
+DataBlock::copyReadUsefulness(WriteMask read_usefulness)
+{
+    assert(m_alloc);
+    assert(m_block_size > 0);
+    readUsefulness->clear();
+    readUsefulness->orMask(read_usefulness);
+}
+
+void
+DataBlock::copyWriteUsefulness(WriteMask write_usefulness)
+{
+    assert(m_alloc);
+    assert(m_block_size > 0);
+    writeUsefulness->clear();
+    writeUsefulness->orMask(write_usefulness);
+}
+
+void
+DataBlock::setReadUsefulness(int offset, int len)
+{
+    assert(m_alloc);
+    assert(m_block_size > 0);
+    readUsefulness->setMask(offset, len);
+}
+
+void
+DataBlock::setWriteUsefulness(int offset, int len)
+{
+    assert(m_alloc);
+    assert(m_block_size > 0);
+    writeUsefulness->setMask(offset, len);
+}
+
+void
+DataBlock::reduceUsefulness(const WriteMask read_usefulness,
+        const WriteMask write_usefulness)
+{
+    assert(m_alloc);
+    assert(m_block_size > 0);
+    readUsefulness->orMask(read_usefulness);
+    writeUsefulness->orMask(write_usefulness);
+}
+
+WriteMask
+DataBlock::getReadUsefulness() const
+{
+    return *readUsefulness;
+}
+
+WriteMask
+DataBlock::getWriteUsefulness() const
+{
+    return *writeUsefulness;
 }
 
 DataBlock &
@@ -238,14 +314,20 @@ DataBlock::operator=(const DataBlock & obj)
     // Reallocate if needed
     if (m_alloc && m_block_size != obj.getBlockSize()) {
         delete [] m_data;
+        delete readUsefulness;
+        delete writeUsefulness;
+        DPRINTF(MSDebug, "%s: Reallocating data block and usefulness "
+                "due to different blocksize in rhs and lhs.\n", __func__);
         m_block_size = obj.getBlockSize();
         alloc();
+        readUsefulness = new WriteMask(obj.getBlockSize());
+        writeUsefulness = new WriteMask(obj.getBlockSize());
     } else if (!m_alloc) {
         m_block_size = obj.getBlockSize();
         alloc();
-
         // Assume this will be realloc'd later if zero.
         if (m_block_size == 0) {
+            DPRINTF(MSDebug, "%s: Returning a data block with zero blocksize.\n", __func__);
             return *this;
         }
     } else {

@@ -46,8 +46,8 @@
 #include "base/logging.hh"
 #include "base/str.hh"
 #include "cpu/testers/rubytest/RubyTester.hh"
-#include "debug/LLSC.hh"
 #include "debug/IndirectLoad.hh"
+#include "debug/LLSC.hh"
 #include "debug/MemoryAccess.hh"
 #include "debug/ProtocolTrace.hh"
 #include "debug/RubyHitMiss.hh"
@@ -550,12 +550,12 @@ Sequencer::writeCallback(Addr address, DataBlock& data,
             hitCallback(&seq_req, data, success, mach, externalHit,
                         initialRequestTime, forwardRequestTime,
                         firstResponseTime, !ruby_request);
-            size_t byte_offset = seq_req.pkt->getAddr() - address;
-            size_t range = seq_req.pkt->getSize();
-            DPRINTF(IndirectLoad, "%s: Servicing a read response for addr: 0x%lx "
-                                "with byte_offset: %d, and range: %d.\n",
-                                __func__, address, byte_offset, range);
-            m_dataCache_ptr->setWriteUsefulness(address, byte_offset, range);
+            // size_t byte_offset = seq_req.pkt->getAddr() - address;
+            // size_t range = seq_req.pkt->getSize();
+            // DPRINTF(IndirectLoad, "%s: Servicing a read response for addr: 0x%lx "
+            //                     "with byte_offset: %d, and range: %d.\n",
+            //                     __func__, address, byte_offset, range);
+            // m_dataCache_ptr->setWriteUsefulness(address, byte_offset, range);
             ruby_request = false;
         } else {
             // handle read request
@@ -641,22 +641,21 @@ Sequencer::readCallback(Addr address, DataBlock& data,
         hitCallback(&seq_req, data, true, mach, externalHit,
                     initialRequestTime, forwardRequestTime,
                     firstResponseTime, !ruby_request);
-        // MYSTUFF: NOTE: exclude I Cache
-        size_t byte_offset = seq_req.pkt->getAddr() - address;
-        size_t range = seq_req.pkt->getSize();
-        DPRINTF(IndirectLoad, "%s: Servicing a read response for addr: 0x%lx "
-                                "with byte_offset: %d, and range: %d.\n",
-                                __func__, address, byte_offset, range);
-        if (m_sequencer_type == SequencerType::Data) {
-            assert(m_instCache_ptr == nullptr);
-            m_dataCache_ptr->setReadUsefulness(address, byte_offset, range);
-        } else if (m_sequencer_type == SequencerType::Inst) {
-            assert(m_dataCache_ptr == nullptr);
-            m_instCache_ptr->setReadUsefulness(address, byte_offset, range);
-        } else {
-            assert(m_sequencer_type == SequencerType::DMA || m_sequencer_type == SequencerType::Sys);
-            assert(m_dataCache_ptr == nullptr && m_instCache_ptr == nullptr);
-        }
+        // size_t byte_offset = seq_req.pkt->getAddr() - address;
+        // size_t range = seq_req.pkt->getSize();
+        // DPRINTF(IndirectLoad, "%s: Servicing a read response for addr: 0x%lx "
+        //                         "with byte_offset: %d, and range: %d.\n",
+        //                         __func__, address, byte_offset, range);
+        // if (m_sequencer_type == SequencerType::Data) {
+        //     assert(m_instCache_ptr == nullptr);
+        //     m_dataCache_ptr->setReadUsefulness(address, byte_offset, range);
+        // } else if (m_sequencer_type == SequencerType::Inst) {
+        //     assert(m_dataCache_ptr == nullptr);
+        //     m_instCache_ptr->setReadUsefulness(address, byte_offset, range);
+        // } else {
+        //     assert(m_sequencer_type == SequencerType::DMA || m_sequencer_type == SequencerType::Sys);
+        //     assert(m_dataCache_ptr == nullptr && m_instCache_ptr == nullptr);
+        // }
         ruby_request = false;
         seq_req_list.pop_front();
     }
@@ -770,6 +769,11 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
             (type == RubyRequestType_ATOMIC_RETURN)) {
             pkt->setData(
                 data.getData(getOffset(request_address), pkt->getSize()));
+            DPRINTF(IndirectLoad, "%s: Setting readUsefulness for addr: "
+                    "0x%lx with offset: %d, len: %d.\n", __func__,
+                    makeLineAddress(request_address),
+                    getOffset(request_address), pkt->getSize());
+            data.setReadUsefulness(getOffset(request_address), pkt->getSize());
 
            if (type == RubyRequestType_ATOMIC_RETURN) {
                DPRINTF(RubySequencer, "ATOMIC RETURN data %s\n", data);
@@ -798,6 +802,11 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
             // Types of stores set the actual data here, apart from
             // failed Store Conditional requests
             data.setData(pkt);
+            DPRINTF(IndirectLoad, "%s: Setting writeUsefulness for addr: "
+                "0x%lx with offset: %d, len: %d.\n", __func__,
+                makeLineAddress(request_address),
+                getOffset(request_address), pkt->getSize());
+            data.setWriteUsefulness(getOffset(request_address), pkt->getSize());
             DPRINTF(RubySequencer, "set data %s\n", data);
         }
     }
@@ -970,13 +979,6 @@ Sequencer::empty() const
 RequestStatus
 Sequencer::makeRequest(PacketPtr pkt)
 {
-    std::shared_ptr<AccessTypeIdentifier> ext = pkt->getExtension<AccessTypeIdentifier>();
-    if (ext != nullptr) {
-        DPRINTF(IndirectLoad, "%s: Received pkt: %s with access type: %s.\n", __func__, pkt->print(), ext->print());
-    } else {
-        DPRINTF(IndirectLoad, "%s: Received pkt: %s without access id.\n", __func__, pkt->print());
-    }
-
     // HTM abort signals must be allowed to reach the Sequencer
     // the same cycle they are issued. They cannot be retried.
     if ((m_outstanding_count >= m_max_outstanding_requests) &&
@@ -1073,7 +1075,6 @@ Sequencer::makeRequest(PacketPtr pkt)
             } else if (pkt->req->isInstFetch()) {
                 primary_type = secondary_type = RubyRequestType_IFETCH;
             } else if (pkt->isIndirect()) {
-                DPRINTF(IndirectLoad, "%s: pkt: %s\n", __func__, pkt->print());
                 primary_type = secondary_type = RubyRequestType_LDIND;
             } else {
                 if (pkt->req->isReadModifyWrite()) {
