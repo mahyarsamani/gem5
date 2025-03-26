@@ -786,8 +786,6 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     bool wakeup_pending_snp;
     bool wakeup_pending_tgr;
 
-    bool is_floating_point;
-    bool is_atomic;
     // MYSTUFF:
     WriteMask read_usefulness, desc="Read usefulness bits for the respective cache line";
     WriteMask write_usefulness, desc="Write usefulness bits for the respective cache line";
@@ -835,7 +833,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   int sc_lock_multiplier, default="0";
 
   // Definitions of the TBE tables
-
+  TBE ms_dummy_tbe, constructor="m_ruby_system->getBlockSizeBytes()";
   // Main TBE table used for incoming requests
   TBETable TBEs,      template="<Cache_TBE>", constructor="m_number_of_TBEs";
   TBEStorage storTBEs, constructor="this, m_number_of_TBEs";

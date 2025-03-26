@@ -393,8 +393,11 @@ action(RestoreFromHazard, desc="") {
   hazard_tbe.wakeup_pending_snp := tbe.wakeup_pending_snp;
   hazard_tbe.wakeup_pending_tgr := tbe.wakeup_pending_tgr;
 
+  replicateTBE(hazard_tbe, ms_dummy_tbe);
+
   deallocateSnpTBE(tbe);
   set_tbe(hazard_tbe);
+  replicateTBE(ms_dummy_tbe, tbe);
 
   // if the pending request is a WB or Evict then it becomes a stale request
   // if data is no longer in the expected state

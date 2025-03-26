@@ -276,22 +276,24 @@ if (!(${{cvec[0]}})) {
             code("unset_tbe(m_tbe_ptr);")
         elif self.proc_name == "stallPort":
             code("scheduleEvent(Cycles(1));")
-
         else:
             # Normal function
             if "external" not in func and not func.isInternalMachineFunc:
                 self.error("Invalid function")
-
             params = ""
             first_param = True
 
             for param_code, type in zip(cvec, type_vec):
+                if self.proc_name == "replicateTBE":
+                    param = str(param_code).strip("(").strip(")").strip("*")
+                else:
+                    param = str(param_code)
                 if first_param:
-                    params = str(param_code)
+                    params = param
                     first_param = False
                 else:
                     params += ", "
-                    params += str(param_code)
+                    params += param
 
             fix = code.nofix()
             code("(${{func.c_name}}($params))")

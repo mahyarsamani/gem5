@@ -1545,3 +1545,103 @@ bool checkResourceAvailable(RequestType request_type, Addr addr) {
   }
   return avail;
 }
+
+void replicateTBE(TBE src, TBE dst) {
+  assert(is_valid(src));
+  assert(is_valid(dst));
+
+  dst.is_req_tbe := src.is_req_tbe;
+  dst.is_snp_tbe := src.is_snp_tbe;
+  dst.is_repl_tbe := src.is_repl_tbe;
+  dst.is_dvm_tbe := src.is_dvm_tbe;
+  dst.is_dvm_snp_tbe := src.is_dvm_snp_tbe;
+
+  dst.storSlot := src.storSlot;
+
+  dst.addr := src.addr;
+  dst.accAddr := src.accAddr;
+  dst.accSize := src.accSize;
+  dst.reqType := src.reqType;
+  dst.txnId := src.txnId;
+  dst.ns := src.ns;
+  dst.requestor := src.requestor;
+  dst.fwdRequestor := src.fwdRequestor;
+  dst.use_DMT := src.use_DMT;
+  dst.use_DCT := src.use_DCT;
+
+  dst.is_local_pf := src.is_local_pf;
+  dst.is_remote_pf := src.is_remote_pf;
+
+  dst.atomic_op := src.atomic_op;
+  dst.atomic_to_be_done := src.atomic_to_be_done;
+  dst.atomic_to_be_wb := src.atomic_to_be_wb;
+
+  dst.seqReq := src.seqReq;
+  dst.isSeqReqValid := src.isSeqReqValid;
+
+  dst.state := src.state;
+
+  dst.hasUseTimeout := src.hasUseTimeout;
+  dst.dataBlk := src.dataBlk;
+  dst.oldDataBlk := src.oldDataBlk;
+  dst.dataBlkValid := src.dataBlkValid;
+  dst.dataValid := src.dataValid;
+  dst.dataAMOValid := src.dataAMOValid;
+  dst.dataDirty := src.dataDirty;
+  dst.dataMaybeDirtyUpstream := src.dataMaybeDirtyUpstream;
+  dst.dataUnique := src.dataUnique;
+  dst.dataToBeInvalid := src.dataToBeInvalid;
+  dst.dataToBeSharedClean := src.dataToBeSharedClean;
+  dst.dir_sharers := src.dir_sharers;
+  dst.dir_owner := src.dir_owner;
+  dst.dir_ownerExists := src.dir_ownerExists;
+  dst.dir_ownerIsExcl := src.dir_ownerIsExcl;
+  dst.doCacheFill := src.doCacheFill;
+
+  dst.actions := src.actions;
+  dst.pendAction := src.pendAction;
+  dst.delayNextAction := src.delayNextAction;
+  dst.finalState := src.finalState;
+
+  dst.expected_req_resp := src.expected_req_resp;
+  dst.expected_snp_resp := src.expected_snp_resp;
+  dst.defer_expected_comp := src.defer_expected_comp;
+  dst.slicchack1 := src.slicchack1;
+  dst.slicchack2 := src.slicchack2;
+
+
+  dst.snd_pendEv := src.snd_pendEv;
+  dst.snd_pendBytes := src.snd_pendBytes;
+  dst.snd_msgType := src.snd_msgType;
+  dst.snd_destination := src.snd_destination;
+
+  dst.updateDirOnCompAck := src.updateDirOnCompAck;
+  dst.requestorToBeOwner := src.requestorToBeOwner;
+  dst.requestorToBeExclusiveOwner := src.requestorToBeExclusiveOwner;
+
+  dst.snpNeedsData := src.snpNeedsData;
+  dst.fwdedState := src.fwdedState;
+  dst.is_req_hazard := src.is_req_hazard;
+  dst.is_repl_hazard := src.is_repl_hazard;
+  dst.is_stale := src.is_stale;
+
+  dst.pendReqType := src.pendReqType;
+  dst.pendReqAllowRetry := src.pendReqAllowRetry;
+  dst.rcvdRetryAck := src.rcvdRetryAck;
+  dst.rcvdRetryCredit := src.rcvdRetryCredit;
+
+  dst.pendReqAccAddr := src.pendReqAccAddr;
+  dst.pendReqAccSize := src.pendReqAccSize;
+  dst.pendReqDest := src.pendReqDest;
+  dst.pendReqD2OrigReq := src.pendReqD2OrigReq;
+  dst.pendReqRetToSrc := src.pendReqRetToSrc;
+
+  dst.wakeup_pending_req := src.wakeup_pending_req;
+  dst.wakeup_pending_snp := src.wakeup_pending_snp;
+  dst.wakeup_pending_tgr := src.wakeup_pending_tgr;
+
+    // MYSTUFF:
+  dst.read_usefulness := src.read_usefulness;
+  dst.write_usefulness := src.write_usefulness;
+  dst.valueCacheID := src.valueCacheID;
+}
