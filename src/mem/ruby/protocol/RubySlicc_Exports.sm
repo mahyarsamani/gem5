@@ -85,6 +85,10 @@ structure(DataBlock, external = "yes", desc="..."){
 
   bool isAlloc();
 
+  // MYSTUFF:
+  void setIsPrefetched(bool);
+  bool getIsPrefetched();
+
   void copyReadUsefulness(WriteMask);
   void copyWriteUsefulness(WriteMask);
 
@@ -92,6 +96,7 @@ structure(DataBlock, external = "yes", desc="..."){
 
   WriteMask getReadUsefulness();
   WriteMask getWriteUsefulness();
+  // FFUTSYM:
 
   int numAtomicLogEntries();
   void clearAtomicLogEntries();

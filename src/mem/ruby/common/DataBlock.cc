@@ -70,6 +70,7 @@ DataBlock::DataBlock(const DataBlock &cp)
     memcpy(m_data, cp.m_data, m_block_size);
     readUsefulness = new WriteMask(m_block_size);
     writeUsefulness = new WriteMask(m_block_size);
+    isPrefetched = cp.isPrefetched;
     m_alloc = true;
     // If this data block is involved in an atomic operation, the effect
     // of applying the atomic operations on the data block are recorded in
@@ -108,6 +109,7 @@ DataBlock::alloc()
     m_data = new uint8_t[m_block_size];
     readUsefulness = new WriteMask(m_block_size);
     writeUsefulness = new WriteMask(m_block_size);
+    isPrefetched = false;
     m_alloc = true;
     clear();
 }

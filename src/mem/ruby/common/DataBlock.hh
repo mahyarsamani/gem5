@@ -97,6 +97,10 @@ class DataBlock
     bool isAlloc() const { return m_alloc; }
     void realloc(int blk_size);
 
+    // MYSTUFF:
+    void setIsPrefetched(bool is_prefetched) { isPrefetched = is_prefetched; }
+    bool getIsPrefetched() const { return isPrefetched; }
+
     void setReadUsefulness(int offset, int len);
     void setWriteUsefulness(int offset, int len);
 
@@ -107,6 +111,7 @@ class DataBlock
 
     WriteMask getReadUsefulness() const;
     WriteMask getWriteUsefulness() const;
+    // FFUTSYM:
 
   private:
     void alloc();
@@ -114,8 +119,12 @@ class DataBlock
     bool m_alloc = false;
     int m_block_size = 0;
 
+    // MYSTUFF:
+    bool isPrefetched;
     WriteMask* readUsefulness;
     WriteMask* writeUsefulness;
+    // FFUTSYM:
+
     // Tracks block changes when atomic ops are applied
     std::deque<uint8_t*> m_atomicLog;
 };
