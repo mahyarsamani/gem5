@@ -32,7 +32,7 @@ from m5.util.pybind import PyBindMethod
 
 
 class UsefulDataType(Enum):
-    vals = ["Integer", "FloatingPoint"]
+    vals = ["Index", "Value", "Any"]
 
 
 class RubyCache(SimObject):
@@ -60,5 +60,3 @@ class RubyCache(SimObject):
     tagAccessLatency = Param.Cycles(1, "cycles for a tag array access")
     resourceStalls = Param.Bool(False, "stall if there is a resource failure")
     ruby_system = Param.RubySystem(Parent.any, "")
-
-    cxx_exports = [PyBindMethod("registerRange")]
