@@ -233,7 +233,7 @@ structure (CacheMemory, external = "yes") {
   int getNumBlocks();
   Addr getAddressAtIdx(int);
 
-  void profileUsefulness(Addr, WriteMask, WriteMask);
+  void profileUsefulness(Addr, bool, std::string, WriteMask, WriteMask);
   void profileDemandHit();
   void profileDemandMiss();
   void profilePrefetchHit();

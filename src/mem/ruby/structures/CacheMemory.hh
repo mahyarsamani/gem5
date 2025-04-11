@@ -67,12 +67,14 @@
 namespace gem5
 {
 
-typedef enums::UsefulDataType UsefulDataType;
 namespace ruby
 {
 
 class CacheMemory : public SimObject
 {
+  private:
+    int m_sparse_access_size;
+
   public:
     typedef RubyCacheParams Params;
     typedef std::shared_ptr<replacement_policy::ReplacementData> ReplData;
@@ -83,10 +85,15 @@ class CacheMemory : public SimObject
 
     // Public Methods
     // perform a cache access and see if we hit or not.  Return true on a hit.
+    // NOTE: I don't think this function is used anywhere.
+    // I checked this by doing a grep of "tryCacheAccess" in the gem5/src and
+    // the build directory.
     bool tryCacheAccess(Addr address, RubyRequestType type,
                         DataBlock*& data_ptr);
 
     // similar to above, but doesn't require full access check
+    // NOTE: I don't think this function is used anywhere. Same as
+    // tryCacheAccess.
     bool testCacheAccess(Addr address, RubyRequestType type,
                          DataBlock*& data_ptr);
 
@@ -98,6 +105,11 @@ class CacheMemory : public SimObject
     //   b) an unused line in the same cache "way"
     bool cacheAvail(Addr address) const;
 
+    // MYSTUFF: NOTE: This is what I will use to check if I
+    // can allocate for compacted cache lines.
+    bool cacheAvailWithSparsityInMind(Addr address, bool is_sparse) const;
+    // FFUTSYM:
+
     // Returns a NULL entry that acts as a placeholder for invalid lines
     AbstractCacheEntry*
     getNullEntry() const
@@ -107,16 +119,29 @@ class CacheMemory : public SimObject
 
     // find an unused entry and sets the tag appropriate for the address
     AbstractCacheEntry* allocate(Addr address, AbstractCacheEntry* new_entry);
+    // MYSTUFF:
+    AbstractCacheEntry* allocateWithSparsityInMind(Addr address, AbstractCacheEntry* new_entry, bool is_sparse);
+    // FFUTSYM:
+
     void allocateVoid(Addr address, AbstractCacheEntry* new_entry)
     {
         allocate(address, new_entry);
     }
+    // MYSTUFF:
+    void allocateVoidWithSparsityInMind(Addr address, AbstractCacheEntry* new_entry, bool is_sparse)
+    {
+        allocateWithSparsityInMind(address, new_entry, is_sparse);
+    }
+    // FFUTSYM:
 
     // Explicitly free up this address
     void deallocate(Addr address);
 
     // Returns with the physical address of the conflicting cache line
     Addr cacheProbe(Addr address) const;
+    // MYSTUFF:
+    std::vector<Addr> cacheProbeWithSparsityInMind(Addr address, bool is_sparse);
+    // FFUTSYM:
 
     // looks an address up in the cache
     AbstractCacheEntry* lookup(Addr address);
@@ -169,6 +194,7 @@ class CacheMemory : public SimObject
     Addr getAddressAtIdx(int idx) const;
 
   private:
+    typedef enums::UsefulDataType UsefulDataType;
     // convert a Address to its location in the cache
     int64_t addressToCacheSet(Addr address) const;
 
@@ -182,9 +208,8 @@ class CacheMemory : public SimObject
     CacheMemory& operator=(const CacheMemory& obj);
 
   private:
-    // typedef enums::DataType DataType;
 
-    AddrRangeMap<UsefulDataType> rangeTypeMap;
+    int m_sparse_size;
     // Data Members (m_prefix)
     bool m_is_instruction_only_cache;
 
@@ -192,6 +217,11 @@ class CacheMemory : public SimObject
     // The second index is the the amount associativity.
     std::unordered_map<Addr, int> m_tag_index;
     std::vector<std::vector<AbstractCacheEntry*> > m_cache;
+
+    // MYSTUFF:
+    int m_set_capacity;
+    std::vector<int> m_used_set_capacity;
+    // FFUTSYM:
 
     /** We use the replacement policies from the Classic memory system. */
     replacement_policy::Base *m_replacementPolicy_ptr;
@@ -263,31 +293,33 @@ class CacheMemory : public SimObject
 
         statistics::Vector m_accessModeType;
 
+        statistics::Histogram usefulBytes;
         statistics::Histogram readUsefulBytes;
         statistics::Histogram writeUsefulBytes;
 
-        statistics::Histogram intReadUsefulBytes;
-        statistics::Histogram intWriteUsefulBytes;
+        statistics::Histogram indexUsefulBytes;
+        statistics::Histogram indexReadUsefulBytes;
+        statistics::Histogram indexWriteUsefulBytes;
 
-        statistics::Histogram floatReadUsefulBytes;
-        statistics::Histogram floatWriteUsefulBytes;
+        statistics::Histogram valueUsefulBytes;
+        statistics::Histogram valueReadUsefulBytes;
+        statistics::Histogram valueWriteUsefulBytes;
+
+        statistics::Scalar uselessBlocksNotExplainedbyPrefetch;
     } cacheMemoryStats;
-
-    std::unordered_map<int64_t, WriteMask> pendingReadUsefulness;
-    std::unordered_map<int64_t, WriteMask> pendingWriteUsefulness;
 
     public:
       void resetStats() override;
       // These function increment the number of demand hits/misses by one
       // each time they are called
       // TODO: Implement this function.
-      void profileUsefulness(Addr line_addr, const WriteMask read_usefulness, const WriteMask write_usefulness);
+      void profileUsefulness(Addr line_addr, bool is_prefetched, std::string type, const WriteMask read_usefulness, const WriteMask write_usefulness);
+      void profileUnexplainedUselessness(Addr line_addr);
       void profileDemandHit();
       void profileDemandMiss();
       void profilePrefetchHit();
       void profilePrefetchMiss();
 
-      void registerRange(const AddrRange& range, const UsefulDataType data_type);
 };
 
 std::ostream& operator<<(std::ostream& out, const CacheMemory& obj);

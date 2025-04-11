@@ -197,6 +197,22 @@ void setAccessPermission(CacheEntry cache_entry, Addr addr, State state) {
   }
 }
 
+
+bool isConsideredEvict(CHIRequestType type)
+{
+  if (type == CHIRequestType:Evict ||
+      type == CHIRequestType:WriteBackFull ||
+      type == CHIRequestType:WriteCleanFull ||
+      type == CHIRequestType:WriteEvictFull ||
+      type == CHIRequestType:WriteUniquePtl ||
+      type == CHIRequestType:WriteUniqueFull ||
+      type == CHIRequestType:WriteUniqueZero) {
+    return true;
+  }
+  return false;
+}
+
+
 void functionalRead(Addr addr, Packet *pkt, WriteMask &mask) {
   // read if bitmask has bytes not in mask or if data is dirty
 
@@ -580,10 +596,6 @@ TBE _allocateReplacementTBE(Addr addr, int storSlot), return_by_pointer="yes" {
   tbe.use_DMT := false;
   tbe.use_DCT := false;
 
-  // CacheEntry cache_entry := getCacheEntry(addr);
-  // tbe.read_usefulness := cache_entry.DataBlk.getReadUsefulness();
-  // tbe.write_usefulness := cache_entry.DataBlk.getWriteUsefulness();
-
   return tbe;
 }
 
@@ -676,9 +688,13 @@ void prepareRequest(TBE tbe, CHIRequestType type, CHIRequestMsg & out_msg) {
   out_msg.is_remote_pf := tbe.is_local_pf || tbe.is_remote_pf;
   out_msg.txnId := tbe.txnId;
 
-  // MYSTUFF: TODO: I think the following two lines are necessary?
-  // out_msg.read_usefulness = tbe.read_usefulness;
-  // out_msg.write_usefulness = tbe.write_usefulness;
+  // MYSTUFF: TODO: I think the following two lines are necessary?...
+  out_msg.read_usefulness := tbe.read_usefulness;
+  out_msg.write_usefulness := tbe.write_usefulness;
+  if (isConsideredEvict(out_msg.type)) {
+    DPRINTF(IndirectLoad, "Sending read usefulness mask with count %d with message.\n", out_msg.read_usefulness.count());
+    DPRINTF(IndirectLoad, "Sending write usefulness mask with count %d with message.\n", out_msg.write_usefulness.count());
+  }
   out_msg.valueCacheID := tbe.valueCacheID;
 
   assert(tbe.txnId != static_cast(Addr, "value", -1));

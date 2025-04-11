@@ -112,6 +112,12 @@ CacheMemory::init()
 
     m_cache.resize(m_cache_num_sets,
                     std::vector<AbstractCacheEntry*>(m_cache_assoc, nullptr));
+
+    // MYSTUFF:
+    m_set_capacity = m_cache_assoc * m_block_size;
+    m_used_set_capacity.resize(m_cache_num_sets, 0);
+    // FFUTSYM:
+
     replacement_data.resize(m_cache_num_sets,
                                std::vector<ReplData>(m_cache_assoc, nullptr));
     // instantiate all the replacement_data here
@@ -184,7 +190,11 @@ CacheMemory::getAddressAtIdx(int idx) const
     assert(set < m_cache_num_sets);
 
     int way = idx - set * m_cache_assoc;
-    assert (way < m_cache_assoc);
+    // MYSTUFF: Got to change this to something that is equivalent to the same
+    // assertion but doesn't break since we are letting allocation go past
+    // the associativity of the cache.
+    // assert (way < m_cache_assoc);
+    assert(m_used_set_capacity[set] < m_set_capacity);
 
     AbstractCacheEntry* entry = m_cache[set][way];
     if (entry == NULL ||
@@ -289,6 +299,16 @@ CacheMemory::cacheAvail(Addr address) const
     return false;
 }
 
+bool
+CacheMemory::cacheAvailWithSparsityInMind(Addr address, bool is_sparse) const
+{
+    assert(address == makeLineAddress(address));
+
+    int64_t cache_set = addressToCacheSet(address);
+    int access_size = is_sparse ? m_sparse_access_size : m_block_size;
+    return m_used_set_capacity[cache_set] + access_size <= m_set_capacity;
+}
+
 AbstractCacheEntry*
 CacheMemory::allocate(Addr address, AbstractCacheEntry *entry)
 {
@@ -326,25 +346,77 @@ CacheMemory::allocate(Addr address, AbstractCacheEntry *entry)
             // Call reset function here to set initial value for different
             // replacement policies.
             m_replacementPolicy_ptr->reset(entry->replacementData);
-            // if (pendingReadUsefulness.find(address) != pendingReadUsefulness.end()) {
-            //     entry->copyReadUsefulness(pendingReadUsefulness[address]);
-            //     pendingReadUsefulness.erase(address);
-            // }
-            // if (pendingWriteUsefulness.find(address) != pendingWriteUsefulness.end()) {
-            //     entry->copyWriteUsefulness(pendingWriteUsefulness[address]);
-            //     pendingWriteUsefulness.erase(address);
-            // }
-            // DPRINTF(IndirectLoad, "%s: Allocated an entry for addr: 0x%lx "
-            //                         "with the following read usefulness: %s.\n",
-            //                     __func__, address, entry->getReadUsefulness());
-            // DPRINTF(IndirectLoad, "%s: Allocated an entry for addr: 0x%lx "
-            //                         "with the following write usefulness: %s.\n",
-            //                     __func__, address, entry->getWriteUsefulness());
             return entry;
         }
     }
     panic("Allocate didn't find an available entry");
 }
+
+// MYSTUFF:
+AbstractCacheEntry*
+CacheMemory::allocateWithSparsityInMind(Addr address, AbstractCacheEntry* entry, bool is_sparse)
+{
+    assert(address == makeLineAddress(address));
+    assert(!isTagPresent(address));
+    assert(cacheAvailWithSparsityInMind(address, is_sparse));
+
+    int access_size = is_sparse ? m_sparse_access_size : m_block_size;
+    DPRINTF(RubyCache, "Allocating address: %#x with size %d.\n", address, access_size);
+
+    entry->initBlockSize(m_block_size);
+    entry->setRubySystem(m_ruby_system);
+
+    bool allocated = false;
+    int64_t cache_set = addressToCacheSet(address);
+    std::vector<AbstractCacheEntry*>& set = m_cache[cache_set];
+    for (int i = 0; i < set.size(); i++) {
+        if (!set[i] || set[i]->m_Permission == AccessPermission_NotPresent) {
+            if (set[i] && (set[i] != entry)) {
+                warn_once("This protocol contains a cache entry handling bug: "
+                    "Entries in the cache should never be NotPresent! If\n"
+                    "this entry (%#x) is not tracked elsewhere, it will memory "
+                    "leak here. Fix your protocol to eliminate these!",
+                    address);
+            }
+            set[i] = entry;  // Init entry
+            set[i]->m_Address = address;
+            set[i]->m_Permission = AccessPermission_Invalid;
+            DPRINTF(RubyCache, "Allocate clearing lock for addr: 0x%x\n", address);
+            set[i]->m_locked = -1;
+            m_tag_index[address] = i;
+            set[i]->setPosition(cache_set, i);
+            set[i]->replacementData = replacement_data[cache_set][i];
+            set[i]->setLastAccess(curTick());
+
+            // Call reset function here to set initial value for different
+            // replacement policies.
+            m_replacementPolicy_ptr->reset(entry->replacementData);
+            // MYSTUFF: The lines above are copied form allocate.
+            set[i]->setSparse(is_sparse);
+            allocated = true;
+            // FFUTSYM:
+        }
+    }
+    // MYSTUFF: This block is colmpletely me.
+    if (!allocated) {
+        set.push_back(entry);
+        entry->m_Address = address;
+        entry->m_Permission = AccessPermission_Invalid;
+        DPRINTF(RubyCache, "Allocate clearing lock for addr: 0x%x\n", address);
+        entry->m_locked = -1;
+        m_tag_index[address] = set.size() - 1;
+        entry->setPosition(cache_set, set.size() - 1);
+        entry->replacementData = replacement_data[cache_set][set.size() - 1];
+        entry->setLastAccess(curTick());
+        entry->setSparse(is_sparse);
+        m_replacementPolicy_ptr->reset(entry->replacementData);
+        allocated = true;
+    }
+    m_used_set_capacity[cache_set] += access_size;
+    return entry;
+    // FFUTSYM:
+}
+// FFUTSYM:
 
 void
 CacheMemory::deallocate(Addr address)
@@ -355,8 +427,13 @@ CacheMemory::deallocate(Addr address)
     m_replacementPolicy_ptr->invalidate(entry->replacementData);
     uint32_t cache_set = entry->getSet();
     uint32_t way = entry->getWay();
+    // MYSTUFF:
+    int access_size = entry->isSparse() ? m_sparse_access_size : m_block_size;
+    m_used_set_capacity[cache_set] -= access_size;
+    // FFUTSYM:
     delete entry;
     m_cache[cache_set][way] = NULL;
+
     m_tag_index.erase(address);
 }
 
@@ -375,6 +452,31 @@ CacheMemory::cacheProbe(Addr address) const
     }
     return m_cache[cacheSet][m_replacementPolicy_ptr->
                         getVictim(candidates)->getWay()]->m_Address;
+}
+
+std::vector<Addr>
+CacheMemory::cacheProbeWithSparsityInMind(Addr address, bool is_sparse)
+{
+    assert(address == makeLineAddress(address));
+    assert(!cacheAvailWithSparsityInMind(address, is_sparse));
+
+    int64_t cache_set = addressToCacheSet(address);
+    int need_to_find = is_sparse ? m_sparse_access_size : m_block_size;
+    std::vector<AbstractCacheEntry*>& set = m_cache[cache_set];
+
+    std::vector<Addr> ret;
+    while (need_to_find > 0) {
+        std::vector<ReplaceableEntry*> candidates;
+        for (int i = 0; i < set.size(); i++) {
+            if (std::find(ret.begin(), ret.end(), set[i]->m_Address) == ret.end()) {
+                candidates.push_back(static_cast<ReplaceableEntry*>(set[i]));
+            }
+        }
+        AbstractCacheEntry* victim = set[m_replacementPolicy_ptr->getVictim(candidates)->getWay()];
+        ret.push_back(victim->m_Address);
+        need_to_find -= victim->isSparse() ? m_sparse_access_size : m_block_size;
+    }
+    return ret;
 }
 
 // looks an address up in the cache
@@ -587,12 +689,17 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
       ADD_STAT(m_prefetch_accesses, "Number of cache prefetch accesses",
                m_prefetch_hits + m_prefetch_misses),
       ADD_STAT(m_accessModeType, ""),
+      ADD_STAT(usefulBytes, "Number of useful bytes per block."),
       ADD_STAT(readUsefulBytes, "Number of useful bytes per block for read."),
-        ADD_STAT(writeUsefulBytes, "Number of useful bytes per block for write."),
-      ADD_STAT(intReadUsefulBytes, "Number of useful bytes per block for read for integers."),
-      ADD_STAT(intWriteUsefulBytes, "Number of useful bytes per block for write for integers."),
-      ADD_STAT(floatReadUsefulBytes, "Number of useful bytes per block for read for floats."),
-      ADD_STAT(floatWriteUsefulBytes, "Number of useful bytes per block for write for floats.")
+      ADD_STAT(writeUsefulBytes, "Number of useful bytes per block for write."),
+      ADD_STAT(indexUsefulBytes, "Number of useful bytes per block for index."),
+      ADD_STAT(indexReadUsefulBytes, "Number of useful bytes per block for read for index."),
+      ADD_STAT(indexWriteUsefulBytes, "Number of useful bytes per block for write for index."),
+      ADD_STAT(valueUsefulBytes, "Number of useful bytes per block for value."),
+      ADD_STAT(valueReadUsefulBytes, "Number of useful bytes per block for read for value."),
+      ADD_STAT(valueWriteUsefulBytes, "Number of useful bytes per block for write for value."),
+      ADD_STAT(uselessBlocksNotExplainedbyPrefetch,
+               "Number of useless blocks not explained by prefetch")
 {
     numDataArrayReads
         .flags(statistics::nozero);
@@ -662,28 +769,39 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
 void
 CacheMemory::regStats()
 {
+    cacheMemoryStats.usefulBytes
+        .init(m_block_size + 1)
+        .flags(statistics::nozero | statistics::nonan);
+
     cacheMemoryStats.readUsefulBytes
-        .init(m_block_size)
+        .init(m_block_size + 1)
         .flags(statistics::nozero | statistics::nonan);
-
     cacheMemoryStats.writeUsefulBytes
-        .init(m_block_size)
+        .init(m_block_size + 1)
         .flags(statistics::nozero | statistics::nonan);
 
-    cacheMemoryStats.intReadUsefulBytes
-        .init(m_block_size)
+    cacheMemoryStats.indexUsefulBytes
+        .init(m_block_size + 1)
         .flags(statistics::nozero | statistics::nonan);
 
-    cacheMemoryStats.intWriteUsefulBytes
-        .init(m_block_size)
+    cacheMemoryStats.indexReadUsefulBytes
+        .init(m_block_size + 1)
         .flags(statistics::nozero | statistics::nonan);
 
-    cacheMemoryStats.floatReadUsefulBytes
-        .init(m_block_size)
+    cacheMemoryStats.indexWriteUsefulBytes
+        .init(m_block_size + 1)
         .flags(statistics::nozero | statistics::nonan);
 
-    cacheMemoryStats.floatWriteUsefulBytes
-        .init(m_block_size)
+    cacheMemoryStats.valueUsefulBytes
+        .init(m_block_size + 1)
+        .flags(statistics::nozero | statistics::nonan);
+
+    cacheMemoryStats.valueReadUsefulBytes
+        .init(m_block_size + 1)
+        .flags(statistics::nozero | statistics::nonan);
+
+    cacheMemoryStats.valueWriteUsefulBytes
+        .init(m_block_size + 1)
         .flags(statistics::nozero | statistics::nonan);
 }
 
@@ -691,16 +809,7 @@ void
 CacheMemory::resetStats()
 {
     statistics::Group::resetStats();
-    // DPRINTF(IndirectLoad, "%s: Resetting all the useful bits.\n", __func__);
-    // for (auto& set: m_cache) {
-    //     for (auto& entry: set) {
-    //         if (entry != nullptr) {
-    //             entry->resetUsefulness();
-    //         }
-    //     }
-    // }
-    pendingReadUsefulness.clear();
-    pendingWriteUsefulness.clear();
+    // MYSTUFF: NOTE: Maybe reset usefulness here?
 }
 
 // assumption: SLICC generated files will only call this function
@@ -860,34 +969,47 @@ CacheMemory::htmCommitTransaction()
 }
 
 void
-CacheMemory::profileUsefulness(Addr line_addr, const WriteMask read_usefulness, const WriteMask write_usefulness)
+CacheMemory::profileUsefulness(Addr line_addr, bool is_prefetched, std::string type, const WriteMask read_usefulness, const WriteMask write_usefulness)
 {
-    auto range_type_entry = rangeTypeMap.contains(line_addr);
-    if (range_type_entry != rangeTypeMap.end()) {
-        if (range_type_entry->second == UsefulDataType::Integer) {
-            cacheMemoryStats.intReadUsefulBytes.sample(read_usefulness.count());
-            cacheMemoryStats.intWriteUsefulBytes.sample(write_usefulness.count());
-            DPRINTF(IndirectLoad, "%s: Sampling int read usefulness for line-addr: 0x%lx with "
-                "count: %d.\n", __func__, line_addr, read_usefulness.count());
-            DPRINTF(IndirectLoad, "%s: Sampling int write usefulness for line-addr: 0x%lx with "
-                "count: %d.\n", __func__, line_addr, write_usefulness.count());
-        } else {
-            cacheMemoryStats.floatReadUsefulBytes.sample(read_usefulness.count());
-            cacheMemoryStats.floatWriteUsefulBytes.sample(write_usefulness.count());
-            DPRINTF(IndirectLoad, "%s: Sampling float read usefulness for line-addr: 0x%lx with "
-                "count: %d.\n", __func__, line_addr, read_usefulness.count());
-            DPRINTF(IndirectLoad, "%s: Sampling float write usefulness for line-addr: 0x%lx with "
-                "count: %d.\n", __func__, line_addr, write_usefulness.count());
-        }
-        cacheMemoryStats.readUsefulBytes.sample(read_usefulness.count());
-        cacheMemoryStats.writeUsefulBytes.sample(write_usefulness.count());
+    WriteMask total_usefulness = read_usefulness;
+    total_usefulness.orMask(write_usefulness);
+    int total_count = total_usefulness.count();
+
+    int read_count = read_usefulness.count();
+    int write_count = write_usefulness.count();
+
+    if (read_count == 0 && write_count == 0 && !is_prefetched) {
+        profileUnexplainedUselessness(line_addr);
+    }
+    if (type == "index") {
+        cacheMemoryStats.indexUsefulBytes.sample(total_count);
+        cacheMemoryStats.indexReadUsefulBytes.sample(read_count);
+        cacheMemoryStats.indexWriteUsefulBytes.sample(write_count);
+        DPRINTF(IndirectLoad, "%s: Sampling int read usefulness for line-addr: 0x%lx with "
+            "count: %d.\n", __func__, line_addr, read_count);
+        DPRINTF(IndirectLoad, "%s: Sampling int write usefulness for line-addr: 0x%lx with "
+            "count: %d.\n", __func__, line_addr, write_count);
+    } else if (type == "value") {
+        cacheMemoryStats.valueUsefulBytes.sample(total_count);
+        cacheMemoryStats.valueReadUsefulBytes.sample(read_count);
+        cacheMemoryStats.valueWriteUsefulBytes.sample(write_count);
+        DPRINTF(IndirectLoad, "%s: Sampling float read usefulness for line-addr: 0x%lx with "
+            "count: %d.\n", __func__, line_addr, read_count);
+        DPRINTF(IndirectLoad, "%s: Sampling float write usefulness for line-addr: 0x%lx with "
+            "count: %d.\n", __func__, line_addr, write_count);
+    } else {
+        assert(type == "any");
+        cacheMemoryStats.usefulBytes.sample(total_count);
+        cacheMemoryStats.readUsefulBytes.sample(read_count);
+        cacheMemoryStats.writeUsefulBytes.sample(write_count);
     }
 }
 
 void
-CacheMemory::registerRange(const AddrRange& range, const UsefulDataType data_type)
+CacheMemory::profileUnexplainedUselessness(Addr line_addr)
 {
-    rangeTypeMap.insert(range, data_type);
+    DPRINTF(IndirectLoad, "%s: Addr %#x is useless and not prefetched.\n", __func__, line_addr);
+    cacheMemoryStats.uselessBlocksNotExplainedbyPrefetch++;
 }
 
 void

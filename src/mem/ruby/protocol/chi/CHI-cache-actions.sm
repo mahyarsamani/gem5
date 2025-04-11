@@ -269,7 +269,7 @@ action(Initiate_Request, desc="") {
     set_tbe(allocateRequestTBE(address, in_msg));
     // only a msg that was already retried doesn't allow a retry
     was_retried := in_msg.allowRetry == false;
-    if (in_msg.type == CHIRequestType:WriteBackFull) {
+    if (isConsideredEvict(in_msg.type)) {
         // MYSTUFF:
         read_usefulness := in_msg.read_usefulness;
         write_usefulness := in_msg.write_usefulness;
@@ -293,7 +293,22 @@ action(Initiate_Request, desc="") {
 
   // MYSTUFF:
   if (reduce_usefulness && is_valid(cache_entry) && cache_entry.DataBlk.isAlloc()) {
-    cache_entry.DataBlk.reduceUsefulness(read_usefulness, write_usefulness);
+    // FUTUREME: You might ask yourself why not reduce into cache_entryc.dataBlk.*Usefulness?
+    // I made this implementation decision becuase, the sequencer on load/store hit call back
+    // will update the data block in the tbe and then in Finalize_UpdateCacheFromTBE
+    // the dataBlk from the tbe will be copied into the cache_entry. Becuase of this, I
+    // had to also copy the usefulness from tbe.dataBlk into the cache_entry.dataBlk.
+    // Now, this is fine for L1 cache. However, for L2/L3/.. caches, we only need to reduce
+    // the usefulness only if the data exists, i.e. cache_entry.DataBlk.isAlloc()
+    // (why would we consider it useful if it doesn't exist?).
+    // Now, because when we get a replacement Finalize_UpdateCacheFromTBE is also called in the
+    // future it will override the usefulness with zeroes. So, I make sure to store the correct
+    // usefulness in the tbe regardless of whether it's explicit like in callbacks to sequencer
+    // or implicit like in here. I think this is enough documentation for now. Let's hope
+    // this fixes all the zero usefulness I'm seeing at the L2 cache.
+    tbe.dataBlk.copyReadUsefulness(cache_entry.DataBlk.getReadUsefulness());
+    tbe.dataBlk.copyWriteUsefulness(cache_entry.DataBlk.getWriteUsefulness());
+    tbe.dataBlk.reduceUsefulness(read_usefulness, write_usefulness);
   }
   // MYSTUFF:
   tbe.valueCacheID := valueCacheID;
@@ -423,7 +438,8 @@ action(Initiate_Replacement, desc="") {
 
   WriteMask read_usefulness := cache_entry.DataBlk.getReadUsefulness();
   WriteMask write_usefulness := cache_entry.DataBlk.getWriteUsefulness();
-  cache.profileUsefulness(address, read_usefulness, write_usefulness);
+  bool is_prefetched := cache_entry.DataBlk.getIsPrefetched();
+  cache.profileUsefulness(address, is_prefetched, "any", read_usefulness, write_usefulness);
 
   State initial := getState(tbe, cache_entry, address);
 
@@ -1745,11 +1761,6 @@ action(Send_WriteBackOrWriteEvict, desc="") {
       prepareRequest(tbe, CHIRequestType:WriteEvictFull, out_msg);
     }
     out_msg.Destination.add(mapAddressToDownstreamMachine(tbe.addr));
-    // TODO: assign out_msg.usefulness here.
-    out_msg.read_usefulness := tbe.read_usefulness;
-    out_msg.write_usefulness := tbe.write_usefulness;
-    DPRINTF(IndirectLoad, "Sending read usefulness mask with count %d with message.\n", out_msg.read_usefulness.count());
-    DPRINTF(IndirectLoad, "Sending write usefulness mask with count %d with message.\n", out_msg.write_usefulness.count());
     allowRequestRetry(tbe, out_msg);
   }
   clearExpectedReqResp(tbe);
@@ -3420,6 +3431,7 @@ action(Finalize_UpdateCacheFromTBE, desc="") {
     cache_entry.DataBlk := tbe.dataBlk;
     cache_entry.DataBlk.copyReadUsefulness(tbe.dataBlk.getReadUsefulness());
     cache_entry.DataBlk.copyWriteUsefulness(tbe.dataBlk.getWriteUsefulness());
+    cache_entry.DataBlk.setIsPrefetched(tbe.is_local_pf || tbe.is_remote_pf);
     DPRINTF(RubySlicc, "Cached data %s pfb %s\n", tbe.dataBlk, cache_entry.HWPrefetched);
   } else {
     // make sure only deallocate the cache entry if data is invalid
