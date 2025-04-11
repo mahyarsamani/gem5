@@ -67,11 +67,16 @@ class AbstractCacheEntry : public ReplaceableEntry
   private:
     // The last access tick for the cache entry.
     Tick m_last_touch_tick;
+    bool m_sparse;
 
   public:
     AbstractCacheEntry();
     virtual ~AbstractCacheEntry() = 0;
 
+    // MYSTUFF:
+    void setSparse(bool is_sparse) { m_sparse = is_sparse; }
+    bool isSparse() const { return m_sparse; }
+    // FFUTSYM:
     // Get/Set permission of the entry
     AccessPermission getPermission() const;
     void changePermission(AccessPermission new_perm);
