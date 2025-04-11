@@ -26,7 +26,6 @@
 
 import os
 import sys
-from io import StringIO
 from pathlib import Path
 from typing import (
     Callable,
@@ -41,14 +40,13 @@ from typing import (
 import m5
 import m5.ticks
 from m5.ext.pystats.simstat import SimStat
-from m5.objects import Root
 from m5.stats import addStatVisitor
-from m5.util import warn
+from m5.util import inform, warn
 
 from ..components.boards.abstract_board import AbstractBoard
-from ..components.processors.switchable_processor import SwitchableProcessor
 from .exit_event import ExitEvent
 from .exit_event_generators import (
+    SimStep,
     dump_stats_generator,
     exit_generator,
     reset_stats_generator,
@@ -406,6 +404,9 @@ class Simulator:
         self._last_exit_event = None
         self._exit_event_count = 0
 
+        self._last_sim_entry_time = 0
+        self._simulated_ticks_so_far = 0
+
         if checkpoint_path:
             warn(
                 "Setting the checkpoint path via the Simulator constructor is "
@@ -477,6 +478,12 @@ class Simulator:
     def get_max_ticks(self) -> int:
         assert hasattr(self, "_max_ticks"), "Max ticks not set"
         return self._max_ticks
+
+    def get_simulated_ticks_so_far(self) -> int:
+        """
+        Returns the number of ticks simulated so far.
+        """
+        return self._simulated_ticks_so_far
 
     def schedule_simpoint(self, simpoint_start_insts: List[int]) -> None:
         """
@@ -683,7 +690,11 @@ class Simulator:
             # any final things.
             self._board._post_instantiate()
 
-    def run(self, max_ticks: Optional[int] = None) -> None:
+    def run(
+        self,
+        max_ticks: Optional[int] = None,
+        exit_on_tick_zero: Optional[bool] = False,
+    ) -> None:
         """
         This function will start or continue the simulator run and handle exit
         events accordingly.
@@ -694,6 +705,19 @@ class Simulator:
                           event is met the tick count is reset. This is the
                           **maximum number of ticks per simulation run.
         """
+
+        if (not max_ticks is None) and exit_on_tick_zero:
+            raise ValueError(
+                "The `max_ticks` and `exit_on_tick_zero` parameters cannot "
+                "be set at the same time."
+            )
+
+        if exit_on_tick_zero:
+            inform(
+                "`exit_on_tick_zero` is enabled. "
+                "Will jump out of simulation loop before starting simulation."
+            )
+            self.set_max_ticks(0)
 
         if max_ticks and max_ticks != self._max_ticks:
             warn(
@@ -715,9 +739,14 @@ class Simulator:
         # We instantiate the board if it has not already been instantiated.
         self._instantiate()
 
+        self._last_sim_entry_time = m5.curTick()
         # This while loop will continue until an a generator yields True.
         while True:
             self._last_exit_event = m5.simulate(self.get_max_ticks())
+            self._simulated_ticks_so_far = (
+                m5.curTick() - self._last_sim_entry_time
+            )
+            self._last_sim_entry_time = m5.curTick()
 
             # Translate the exit event cause to the exit event enum.
             exit_enum = ExitEvent.translate_exit_status(
@@ -742,7 +771,9 @@ class Simulator:
             try:
                 # If the user has specified their own generator for this exit
                 # event, use it.
-                exit_on_completion = next(self._on_exit_event[exit_enum])
+                sim_step = next(self._on_exit_event[exit_enum])
+                next_max_ticks = SimStep.convert_to_ticks(sim_step)
+                exit_on_completion = next_max_ticks == 0
             except StopIteration:
                 # If the user's generator has ended, throw a warning and use
                 # the default generator for this exit event.
@@ -751,22 +782,24 @@ class Simulator:
                     f"event'{exit_enum.value}' has ended. Using the default "
                     "generator."
                 )
-                exit_on_completion = next(
-                    self._default_on_exit_dict[exit_enum]
-                )
+                sim_step = next(self._default_on_exit_dict[exit_enum])
+                next_max_ticks = SimStep.convert_to_ticks(sim_step)
+                exit_on_completion = next_max_ticks == 0
             except KeyError:
                 # If the user has not specified their own generator for this
                 # exit event, use the default.
-                exit_on_completion = next(
-                    self._default_on_exit_dict[exit_enum]
-                )
+                sim_step = next(self._default_on_exit_dict[exit_enum])
+                next_max_ticks = SimStep.convert_to_ticks(sim_step)
+                exit_on_completion = next_max_ticks == 0
 
             self._exit_event_count += 1
 
             # If the generator returned True we will return from the Simulator
             # run loop. In the case of a function: if it returned True.
             if exit_on_completion:
-                return
+                break
+            else:
+                self.set_max_ticks(next_max_ticks)
 
     def save_checkpoint(self, checkpoint_dir: Path) -> None:
         """

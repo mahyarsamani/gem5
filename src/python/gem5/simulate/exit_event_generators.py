@@ -24,14 +24,15 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+from enum import Enum, unique
 from pathlib import Path
-from typing import (
-    Generator,
-    Optional,
-)
+from typing import Generator, Optional, Union
 
 import m5.stats
+from m5 import MaxTick, curTick
+from m5.ticks import fromSeconds
 from m5.util import warn
+from m5.util.convert import toLatency
 
 from gem5.resources.looppoint import Looppoint
 
@@ -43,6 +44,22 @@ from ..resources.resource import SimpointResource
 """
 In this package we store generators for simulation exit events.
 """
+
+
+@unique
+class SimStep(Enum):
+    STOP = 0
+    REMAINING_TIME = 2**63 - 1
+
+    @classmethod
+    def convert_to_ticks(cls, time: Union["SimStep", str]) -> int:
+        if isinstance(time, SimStep):
+            if time == SimStep.STOP:
+                return 0
+            if time == SimStep.REMAINING_TIME:
+                return MaxTick - curTick()
+        elif isinstance(time, str):
+            return fromSeconds(toLatency(time))
 
 
 def warn_default_decorator(gen: Generator, type: str, effect: str):
@@ -66,7 +83,7 @@ def exit_generator():
     the Simulator run loop should exit.
     """
     while True:
-        yield True
+        yield SimStep.STOP
 
 
 def switch_generator(processor: AbstractProcessor):
@@ -80,7 +97,7 @@ def switch_generator(processor: AbstractProcessor):
         if is_switchable:
             yield processor.switch()
         else:
-            yield False
+            yield SimStep.REMAINING_TIME
 
 
 def dump_reset_generator():
@@ -94,7 +111,7 @@ def dump_reset_generator():
     while True:
         m5.stats.dump()
         m5.stats.reset()
-        yield False
+        yield SimStep.REMAINING_TIME
 
 
 def save_checkpoint_generator(checkpoint_dir: Optional[Path] = None):
@@ -111,7 +128,7 @@ def save_checkpoint_generator(checkpoint_dir: Optional[Path] = None):
         checkpoint_dir = Path(options.outdir)
     while True:
         m5.checkpoint((checkpoint_dir / f"cpt.{str(m5.curTick())}").as_posix())
-        yield False
+        yield SimStep.REMAINING_TIME
 
 
 def reset_stats_generator():
@@ -121,7 +138,7 @@ def reset_stats_generator():
     """
     while True:
         m5.stats.reset()
-        yield False
+        yield SimStep.REMAINING_TIME
 
 
 def dump_stats_generator():
@@ -130,7 +147,7 @@ def dump_stats_generator():
     """
     while True:
         m5.stats.dump()
-        yield False
+        yield SimStep.REMAINING_TIME
 
 
 def skip_generator():
@@ -140,7 +157,7 @@ def skip_generator():
     The simulation will continue after this generator.
     """
     while True:
-        yield False
+        yield SimStep.REMAINING_TIME
 
 
 def simpoints_save_checkpoint_generator(
@@ -174,9 +191,9 @@ def simpoints_save_checkpoint_generator(
         # When there are remaining SimPoints in the list, let the Simulation
         # loop continues, otherwise, exit the Simulation loop.
         if count < len(simpoint_list):
-            yield False
+            yield SimStep.REMAINING_TIME
         else:
-            yield True
+            yield SimStep.STOP
 
 
 def looppoint_save_checkpoint_generator(
@@ -219,9 +236,9 @@ def looppoint_save_checkpoint_generator(
                 looppoint.update_relatives_counts()
             m5.checkpoint((checkpoint_dir / f"cpt.Region{region}").as_posix())
         total_pairs -= 1
-        yield False
+        yield SimStep.REMAINING_TIME
 
-    yield True
+    yield SimStep.STOP
 
 
 def spatter_exit_generator(spatter_gen: SpatterGenerator):
