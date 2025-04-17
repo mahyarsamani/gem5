@@ -89,18 +89,18 @@ class WriteMask
         clear();
     }
 
-    WriteMask& operator=(const WriteMask& source) {
-        if (this != &source) {
-            mSize = source.mSize;
-            mMask = source.mMask;
-            mAtomic = source.mAtomic;
-            mAtomicOp.clear();
-            for (const auto& pair : source.mAtomicOp) {
-                mAtomicOp.push_back(std::make_pair(pair.first, pair.second->clone()));
-            }
-        }
-        return *this;
-    }
+    // WriteMask& operator=(const WriteMask& source) {
+    //     if (this != &source) {
+    //         mSize = source.mSize;
+    //         mMask = source.mMask;
+    //         mAtomic = source.mAtomic;
+    //         mAtomicOp.clear();
+    //         for (const auto& pair : source.mAtomicOp) {
+    //             mAtomicOp.push_back(std::make_pair(pair.first, pair.second->clone()));
+    //         }
+    //     }
+    //     return *this;
+    // }
 
 
     void
