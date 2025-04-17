@@ -1141,6 +1141,17 @@ class Request : public Extensible<Request>
     }
 };
 
+class SparseID: public Extension<Request, SparseID>
+{
+  public:
+    SparseID() : Extension<Request, SparseID>() {}
+
+    virtual std::unique_ptr<ExtensionBase> clone() const override
+    {
+        return std::make_unique<SparseID>();
+    }
+};
+
 } // namespace gem5
 
 #endif // __MEM_REQUEST_HH__
