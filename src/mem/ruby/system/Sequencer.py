@@ -40,6 +40,7 @@
 from m5.objects.ClockedObject import ClockedObject
 from m5.params import *
 from m5.proxy import *
+from m5.util.pybind import PyBindMethod
 
 
 class SequencerType(Enum):
@@ -122,6 +123,8 @@ class RubySequencer(RubyPort):
     # id used by protocols that support multiple sequencers per controller
     # 99 is the dummy default value
     coreid = Param.Int(99, "CorePair core id")
+
+    cxx_exports = [PyBindMethod("addSparsePC")]
 
     def connectCpuPorts(self, cpu):
         """

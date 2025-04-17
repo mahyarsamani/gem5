@@ -259,6 +259,7 @@ class Sequencer : public RubyPort
     RubySystem *m_ruby_system;
 
   private:
+    std::set<Addr> sparse_pcs;
     SequencerType m_sequencer_type;
 
     int m_max_outstanding_requests;
@@ -375,6 +376,11 @@ class Sequencer : public RubyPort
      * This is independent of this Sequencer object's version id.
      */
     void llscClearLocalMonitor();
+
+    void addSparsePC(Addr pc)
+    {
+        sparse_pcs.insert(pc);
+    }
 };
 
 inline std::ostream&

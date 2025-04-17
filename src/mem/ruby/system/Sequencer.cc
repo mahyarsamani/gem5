@@ -1203,6 +1203,13 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
         msg->m_htmTransactionUid = pkt->getHtmTransactionUid();
     }
 
+    RequestPtr request = msg->getRequestPtr();
+    assert(request == pkt->req);
+    if (sparse_pcs.find(pc) != sparse_pcs.end()) {
+        std::shared_ptr<SparseID> sparse_id = std::make_shared<SparseID>();
+        request->setExtension<SparseID>(sparse_id);
+    }
+
     Tick latency = cyclesToTicks(
                         m_controller->mandatoryQueueLatency(secondary_type));
     assert(latency > 0);
