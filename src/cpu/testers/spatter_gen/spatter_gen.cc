@@ -300,7 +300,7 @@ SpatterGen::indirAccessOk(int int_regs, int fp_regs, Tick when) const
 {
     bool have_fp_reg = fp_regs > 0;
     bool have_kernel = !kernels.empty() && (state == SpatterGenState::RUNNING);
-    return have_fp_reg;
+    return have_kernel && have_fp_reg;
 }
 
 void
@@ -308,9 +308,13 @@ SpatterGen::scheduleNextGenEvent(Tick when)
 {
     int avail_int_regs = intRegFileSize - intRegUsed;
     int avail_fp_regs = fpRegFileSize - fpRegUsed;
-    bool have_work = initAccessOk(avail_int_regs, avail_fp_regs, curTick()) ||
-                    interAccessOk(avail_int_regs, avail_fp_regs, curTick()) ||
-                    ultAccessOk(avail_int_regs, avail_fp_regs, curTick());
+    bool have_work = (
+                    accessMode == SpatterAccessMode::normal &&
+                        (initAccessOk(avail_int_regs, avail_fp_regs, curTick()) ||
+                        interAccessOk(avail_int_regs, avail_fp_regs, curTick()) ||
+                        ultAccessOk(avail_int_regs, avail_fp_regs, curTick())))
+                    ||
+                    (accessMode == SpatterAccessMode::indirect && indirAccessOk(avail_int_regs, avail_fp_regs, curTick()));
     Tick schedule_tick = std::max(when, firstGeneratorAvailableTime);
     if (have_work && (!nextGenEvent.scheduled())) {
         schedule(nextGenEvent, schedule_tick);
