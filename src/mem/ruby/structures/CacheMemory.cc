@@ -46,6 +46,7 @@
 #include "base/logging.hh"
 #include "debug/HtmMem.hh"
 #include "debug/IndirectLoad.hh"
+#include "debug/MSDebug.hh"
 #include "debug/RubyCache.hh"
 #include "debug/RubyCacheTrace.hh"
 #include "debug/RubyResourceStalls.hh"
@@ -70,6 +71,7 @@ operator<<(std::ostream& out, const CacheMemory& obj)
 
 CacheMemory::CacheMemory(const Params &p)
     : SimObject(p),
+    m_sparse_access_size(p.sparse_access_size),
     dataArray(p.dataArrayBanks, p.dataAccessLatency, p.start_index_bit),
     tagArray(p.tagArrayBanks, p.tagAccessLatency, p.start_index_bit),
     atomicALUArray(p.atomicALUs, p.atomicLatency),
@@ -361,7 +363,7 @@ CacheMemory::allocateWithSparsityInMind(Addr address, AbstractCacheEntry* entry,
     assert(cacheAvailWithSparsityInMind(address, is_sparse));
 
     int access_size = is_sparse ? m_sparse_access_size : m_block_size;
-    DPRINTF(RubyCache, "Allocating address: %#x with size %d.\n", address, access_size);
+    DPRINTF(MSDebug, "Allocating address: %#x with size %d.\n", address, access_size);
 
     entry->initBlockSize(m_block_size);
     entry->setRubySystem(m_ruby_system);
@@ -394,11 +396,13 @@ CacheMemory::allocateWithSparsityInMind(Addr address, AbstractCacheEntry* entry,
             // MYSTUFF: The lines above are copied form allocate.
             set[i]->setSparse(is_sparse);
             allocated = true;
+            break;
             // FFUTSYM:
         }
     }
     // MYSTUFF: This block is colmpletely me.
     if (!allocated) {
+        DPRINTF(MSDebug, "%s: Need to extend the associativity of the cache.\n", __func__);
         set.push_back(entry);
         entry->m_Address = address;
         entry->m_Permission = AccessPermission_Invalid;
@@ -406,6 +410,7 @@ CacheMemory::allocateWithSparsityInMind(Addr address, AbstractCacheEntry* entry,
         entry->m_locked = -1;
         m_tag_index[address] = set.size() - 1;
         entry->setPosition(cache_set, set.size() - 1);
+        replacement_data[cache_set].push_back(m_replacementPolicy_ptr->instantiateEntry());
         entry->replacementData = replacement_data[cache_set][set.size() - 1];
         entry->setLastAccess(curTick());
         entry->setSparse(is_sparse);
@@ -454,30 +459,24 @@ CacheMemory::cacheProbe(Addr address) const
                         getVictim(candidates)->getWay()]->m_Address;
 }
 
-std::vector<Addr>
-CacheMemory::cacheProbeWithSparsityInMind(Addr address, bool is_sparse)
+// MYSTUFF:
+Addr
+CacheMemory::cacheProbeWithSparsityInMind(Addr address, bool is_sparse) const
 {
     assert(address == makeLineAddress(address));
     assert(!cacheAvailWithSparsityInMind(address, is_sparse));
 
-    int64_t cache_set = addressToCacheSet(address);
-    int need_to_find = is_sparse ? m_sparse_access_size : m_block_size;
-    std::vector<AbstractCacheEntry*>& set = m_cache[cache_set];
-
-    std::vector<Addr> ret;
-    while (need_to_find > 0) {
-        std::vector<ReplaceableEntry*> candidates;
-        for (int i = 0; i < set.size(); i++) {
-            if (std::find(ret.begin(), ret.end(), set[i]->m_Address) == ret.end()) {
-                candidates.push_back(static_cast<ReplaceableEntry*>(set[i]));
-            }
-        }
-        AbstractCacheEntry* victim = set[m_replacementPolicy_ptr->getVictim(candidates)->getWay()];
-        ret.push_back(victim->m_Address);
-        need_to_find -= victim->isSparse() ? m_sparse_access_size : m_block_size;
+    int64_t cacheSet = addressToCacheSet(address);
+    std::vector<ReplaceableEntry*> candidates;
+    for (int i = 0; i < m_cache[cacheSet].size(); i++) {
+        candidates.push_back(static_cast<ReplaceableEntry*>(
+                                                       m_cache[cacheSet][i]));
     }
-    return ret;
+    return m_cache[cacheSet][m_replacementPolicy_ptr->
+                        getVictim(candidates)->getWay()]->m_Address;
 }
+// FFUTSYM:
+
 
 // looks an address up in the cache
 AbstractCacheEntry*

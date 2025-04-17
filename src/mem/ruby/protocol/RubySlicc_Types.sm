@@ -196,6 +196,7 @@ structure(RubyRequest, desc="...", interface="Message", external="yes") {
 
 structure(AbstractCacheEntry, primitive="yes", external = "yes") {
   void changePermission(AccessPermission);
+  bool isSparse();
 }
 
 structure (DirectoryMemory, external = "yes") {
@@ -209,10 +210,19 @@ structure (DirectoryMemory, external = "yes") {
 
 structure (CacheMemory, external = "yes") {
   bool cacheAvail(Addr);
+  // MYSTUFF:
+  bool cacheAvailWithSparsityInMind(Addr, bool);
+  // FFUTSYM:
   Addr cacheProbe(Addr);
+  // MYSTUFF:
+  Addr cacheProbeWithSparsityInMind(Addr, bool);
+  // FFUTSYM:
   AbstractCacheEntry getNullEntry();
   AbstractCacheEntry allocate(Addr, AbstractCacheEntry);
   AbstractCacheEntry allocate(Addr, AbstractCacheEntry, bool);
+  // MYSTUFF:
+  AbstractCacheEntry allocateWithSparsityInMind(Addr, AbstractCacheEntry, bool);
+  // FFUTSYM:
   void allocateVoid(Addr, AbstractCacheEntry);
   void deallocate(Addr);
   AbstractCacheEntry lookup(Addr);

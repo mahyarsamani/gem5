@@ -477,6 +477,7 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   tbe.use_DCT := false;
 
   tbe.hasUseTimeout := false;
+  tbe.is_sparse := in_msg.is_sparse;
 
   return tbe;
 }
@@ -687,6 +688,7 @@ void prepareRequest(TBE tbe, CHIRequestType type, CHIRequestMsg & out_msg) {
   out_msg.is_local_pf := false;
   out_msg.is_remote_pf := tbe.is_local_pf || tbe.is_remote_pf;
   out_msg.txnId := tbe.txnId;
+  out_msg.is_sparse := tbe.is_sparse;
 
   // MYSTUFF: TODO: I think the following two lines are necessary?...
   out_msg.read_usefulness := tbe.read_usefulness;
@@ -1562,6 +1564,7 @@ bool checkResourceAvailable(RequestType request_type, Addr addr) {
   return avail;
 }
 
+// MYSTUFF:
 void replicateTBE(TBE src, TBE dst) {
   assert(is_valid(src));
   assert(is_valid(dst));
@@ -1656,8 +1659,41 @@ void replicateTBE(TBE src, TBE dst) {
   dst.wakeup_pending_snp := src.wakeup_pending_snp;
   dst.wakeup_pending_tgr := src.wakeup_pending_tgr;
 
-    // MYSTUFF:
   dst.read_usefulness := src.read_usefulness;
   dst.write_usefulness := src.write_usefulness;
   dst.valueCacheID := src.valueCacheID;
 }
+
+bool cacheAvail(Addr address, bool is_sparse)
+{
+    if (compact_with_sparsity) {
+        return cache.cacheAvailWithSparsityInMind(address, is_sparse);
+    } else {
+        return cache.cacheAvail(address);
+    }
+}
+
+AbstractCacheEntry allocate(Addr address, CacheEntry cache_entry, bool is_sparse), return_by_pointer="yes" {
+    if (compact_with_sparsity) {
+        return cache.allocateWithSparsityInMind(address, cache_entry, is_sparse);
+    } else {
+        return cache.allocate(address, cache_entry);
+    }
+}
+
+Addr cacheProbe(Addr address, bool is_sparse) {
+    if (compact_with_sparsity) {
+        return cache.cacheProbeWithSparsityInMind(address, is_sparse);
+    } else {
+        return cache.cacheProbe(address);
+    }
+}
+
+void deallocate(Addr address) {
+    // NOTE: No need to have a WithSparsityInMind version of this function.
+    // CacheMemory can internally check to see if entry at `address` is sparse.
+    cache.deallocate(address);
+}
+
+// FFUTSYM:
+

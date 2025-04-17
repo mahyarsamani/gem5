@@ -60,3 +60,8 @@ class RubyCache(SimObject):
     tagAccessLatency = Param.Cycles(1, "cycles for a tag array access")
     resourceStalls = Param.Bool(False, "stall if there is a resource failure")
     ruby_system = Param.RubySystem(Parent.any, "")
+
+    # MYSTUFF:
+    sparse_access_size = Param.Int(
+        "Size counted to toward the occupancy of sparse accesses."
+    )

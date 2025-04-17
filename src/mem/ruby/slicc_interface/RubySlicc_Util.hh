@@ -322,6 +322,15 @@ countBoolVec(BoolVec bVec)
     return count;
 }
 
+// MYSTUFF:
+
+inline bool
+isSparse(RequestPtr req)
+{
+    std::shared_ptr<SparseID> sparse_id = req->getExtension<SparseID>();
+    return sparse_id != nullptr ? true : false;
+}
+
 inline RequestorID
 getRequestorID(RequestPtr req)
 {
@@ -355,6 +364,8 @@ isInvalid(MachineID m_id)
 {
     return !m_id.isValid();
 }
+
+// FFUTSYM:
 
 } // namespace ruby
 } // namespace gem5

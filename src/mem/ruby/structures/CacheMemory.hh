@@ -140,7 +140,7 @@ class CacheMemory : public SimObject
     // Returns with the physical address of the conflicting cache line
     Addr cacheProbe(Addr address) const;
     // MYSTUFF:
-    std::vector<Addr> cacheProbeWithSparsityInMind(Addr address, bool is_sparse);
+    Addr cacheProbeWithSparsityInMind(Addr address, bool is_sparse) const;
     // FFUTSYM:
 
     // looks an address up in the cache

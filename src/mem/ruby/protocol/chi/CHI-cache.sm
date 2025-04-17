@@ -229,6 +229,8 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   bool alloc_for_ind_index;
   bool alloc_for_ind_value;
 
+  bool compact_with_sparsity;
+
   Cycles send_value_delay := 1;
   Cycles fwd_ind_acc_delay := 1;
 {
@@ -790,6 +792,8 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     WriteMask read_usefulness, desc="Read usefulness bits for the respective cache line";
     WriteMask write_usefulness, desc="Write usefulness bits for the respective cache line";
     MachineID valueCacheID;
+    bool is_sparse;
+    // FFUTSYM:
   }
 
   // TBE table definition
