@@ -469,6 +469,9 @@ CacheMemory::cacheProbeWithSparsityInMind(Addr address, bool is_sparse) const
     int64_t cacheSet = addressToCacheSet(address);
     std::vector<ReplaceableEntry*> candidates;
     for (int i = 0; i < m_cache[cacheSet].size(); i++) {
+        if (m_cache[cacheSet][i] == nullptr) {
+            continue;
+        }
         candidates.push_back(static_cast<ReplaceableEntry*>(
                                                        m_cache[cacheSet][i]));
     }

@@ -430,6 +430,12 @@ AbstractController::mapAddressToMachine(Addr addr, MachineType mtype) const
     return mach;
 }
 
+bool
+AbstractController::mappedToMachine(Addr addr, MachineID mid)
+{
+    return m_net_ptr->mappedToMachine(addr, mid);
+}
+
 MachineID
 AbstractController::mapAddressToDownstreamMachine(Addr addr, MachineType mtype)
 const

@@ -232,6 +232,8 @@ class AbstractController : public ClockedObject, public Consumer
     MachineID mapAddressToDownstreamMachine(Addr addr,
                                     MachineType mtype = MachineType_NUM) const;
 
+    bool mappedToMachine(Addr addr, MachineID mid);
+
     /** List of downstream destinations (towards memory) */
     const NetDest& allDownstreamDest() const { return downstreamDestinations; }
 

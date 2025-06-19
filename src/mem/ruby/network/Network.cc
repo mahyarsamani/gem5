@@ -251,6 +251,25 @@ Network::addressToNodeID(Addr addr, MachineType mtype)
     return m_ruby_system->MachineType_base_count(mtype);
 }
 
+bool
+Network::mappedToMachine(Addr addr, MachineID mid)
+{
+    bool ret = false;
+    // Look through the address maps for entries with matching machine
+    // type to get the responsible node for this address.
+    const auto &matching_ranges = addrMap.equal_range(mid.getType());
+    for (auto it = matching_ranges.first; it != matching_ranges.second; it++) {
+        AddrMapNode &node = it->second;
+        auto &ranges = node.ranges;
+        for (AddrRange &range: ranges) {
+            if (range.contains(addr)) {
+                ret |= (node.id == mid.getNum());
+            }
+        }
+    }
+    return ret;
+}
+
 NodeID
 Network::getLocalNodeID(NodeID global_id) const
 {

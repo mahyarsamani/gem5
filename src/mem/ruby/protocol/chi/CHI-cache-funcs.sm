@@ -53,6 +53,7 @@ void set_tbe(TBE b);
 void unset_tbe();
 MachineID mapAddressToDownstreamMachine(Addr addr);
 MachineID mapAddressToMachine(Addr addr, MachineType mtype);
+bool mappedToMachine(Addr addr, MachineID mid);
 
 void incomingTransactionStart(Addr, Event, State, bool);
 void incomingTransactionEnd(Addr, State);
@@ -313,6 +314,7 @@ Cycles dataLatency() {
 }
 
 // MYSTUFF: Whether the reqType has come from sequencer.
+// This is an exhaustive list of requests that come from the sequencer.
 bool fromSequencer(CHIRequestType reqType) {
   return reqType == CHIRequestType:Load ||
          reqType == CHIRequestType:Store ||
@@ -435,6 +437,17 @@ void initializeTBE(TBE tbe, Addr addr, int storSlot) {
   tbe.is_stale := false;
 }
 
+CHIRequestType msgTypeToTBEType(CHIRequestType type)
+{
+    if (type == CHIRequestType:ReadValueAddrNotif) {
+        return CHIRequestType:Load;
+    } else if (type == CHIRequestType:StoreValueAddrNotif) {
+        return CHIRequestType:Store;
+    } else {
+        return type;
+    }
+}
+
 TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes" {
   // We must have reserved resources for this allocation
   storTBEs.decrementReserved();
@@ -461,7 +474,11 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   tbe.accAddr := in_msg.accAddr;
   tbe.accSize := in_msg.accSize;
   tbe.requestor := in_msg.requestor;
-  tbe.reqType := in_msg.type;
+// MYSTUFF
+//   tbe.reqType := in_msg.type;
+  tbe.reqType := msgTypeToTBEType(in_msg.type);
+  tbe.secondType := in_msg.secondType;
+// FFUTSYM
 
   tbe.isSeqReqValid := in_msg.isSeqReqValid;
   tbe.seqReq := in_msg.seqReq;
@@ -670,7 +687,6 @@ void setupPendingAtomicSend(TBE tbe) {
 }
 
 // common code for downstream requests
-// MYSTUFF: TODO: Seems like understanding this function is important.
 void prepareRequest(TBE tbe, CHIRequestType type, CHIRequestMsg & out_msg) {
   out_msg.addr := tbe.addr;
   out_msg.accAddr := tbe.addr;
@@ -690,14 +706,19 @@ void prepareRequest(TBE tbe, CHIRequestType type, CHIRequestMsg & out_msg) {
   out_msg.txnId := tbe.txnId;
   out_msg.is_sparse := tbe.is_sparse;
 
-  // MYSTUFF: TODO: I think the following two lines are necessary?...
+  // MYSTUFF:
   out_msg.read_usefulness := tbe.read_usefulness;
   out_msg.write_usefulness := tbe.write_usefulness;
   if (isConsideredEvict(out_msg.type)) {
     DPRINTF(IndirectLoad, "Sending read usefulness mask with count %d with message.\n", out_msg.read_usefulness.count());
     DPRINTF(IndirectLoad, "Sending write usefulness mask with count %d with message.\n", out_msg.write_usefulness.count());
   }
+
+  out_msg.compactCacheID := tbe.compactCacheID;
   out_msg.valueCacheID := tbe.valueCacheID;
+  out_msg.indexCacheID := tbe.indexCacheID;
+  out_msg.secondType := tbe.secondType;
+  // FFUTSYM:
 
   assert(tbe.txnId != static_cast(Addr, "value", -1));
 }
@@ -820,14 +841,19 @@ void printResources() {
                 triggerQueue.getSize(curTick()));
 }
 
-bool needCacheEntry(CHIRequestType req_type,
+bool needCacheEntry(CHIRequestType req_type, CHIRequestType second_type,
                     CacheEntry cache_entry, DirEntry dir_entry,
                     bool is_prefetch) {
   // never allocates:
   // - if entry already valid
   // - if using DMT; the request is a Read*; and dir entry is invalid
   // oterwise follow config params
-  if (is_valid(cache_entry) ||
+  if (second_type != CHIRequestType:null) {
+    // TODO: Need to figure out what we need to do later.
+    return  (alloc_for_ind_index && (second_type == CHIRequestType:ReadIndex)) ||
+            (alloc_for_ind_value && (second_type == CHIRequestType:ReadValueAddrNotif)) ||
+            (alloc_for_ind_value && (second_type == CHIRequestType:StoreValueAddrNotif));
+  } else if (is_valid(cache_entry) ||
       (enable_DMT && is_invalid(dir_entry) &&
        ((req_type == CHIRequestType:ReadShared) ||
         (req_type == CHIRequestType:ReadUnique) ||
@@ -1176,8 +1202,7 @@ State makeFinalState(TBE tbe, CacheEntry cache_entry, DirEntry dir_entry) {
   return makeFinalStateHelper(cache_state, dir_state);
 }
 
-// This is used only with the finalization transitions
-// MYSTUFF: TODO: Maybe talk to a SLICC expert about this.
+// MYSTUFF: NOTE: This is used only with the finalization transitions
 State getNextState(Addr address) {
   TBE tbe := getCurrentActiveTBE(address);
   assert(is_valid(tbe));
@@ -1333,10 +1358,13 @@ Event reqToEvent(CHIRequestType type, bool is_prefetch) {
       return Event:AtomicNoReturn;
     }
   } else if (type == CHIRequestType:ReadIndirect) {
-    // MYSTUFF:
     return Event:ReadIndirect;
-  } else if (type == CHIRequestType:ReadValue) {
-    return Event:ReadValue;
+  } else if (type == CHIRequestType:ReadIndex) {
+    return Event:Load;
+  } else if (type == CHIRequestType:ReadValueAddrNotif) {
+    return Event:Load;
+  } else if (type == CHIRequestType:StoreValueAddrNotif) {
+    return Event:Store;
   } else {
     error("Invalid CHIRequestType");
   }
@@ -1661,7 +1689,13 @@ void replicateTBE(TBE src, TBE dst) {
 
   dst.read_usefulness := src.read_usefulness;
   dst.write_usefulness := src.write_usefulness;
+
+  dst.compactCacheID := src.compactCacheID;
   dst.valueCacheID := src.valueCacheID;
+  dst.indexCacheID := src.indexCacheID;
+  dst.secondType := src.secondType;
+  dst.no_fwd_data_upstream  := src.no_fwd_data_upstream;
+  dst.is_sparse := src.is_sparse;
 }
 
 bool cacheAvail(Addr address, bool is_sparse)
@@ -1696,4 +1730,3 @@ void deallocate(Addr address) {
 }
 
 // FFUTSYM:
-

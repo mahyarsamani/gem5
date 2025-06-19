@@ -149,6 +149,7 @@ action(AllocateTBE_SeqRequest, desc="") {
       out_msg.txnId := max_outstanding_transactions;
       out_msg.ns := !in_msg.isSecure;
       // MYSTUFF:
+      out_msg.secondType := CHIRequestType:null;
       out_msg.is_sparse := isSparse(in_msg.getRequestPtr());
       // FFUTSYM:
 
@@ -166,6 +167,10 @@ action(AllocateTBE_SeqRequest, desc="") {
         }
       } else if (in_msg.Type == RubyRequestType:LDIND) {
         out_msg.type := CHIRequestType:ReadIndirect;
+        out_msg.secondType := CHIRequestType:ReadIndirect;
+      } else if (in_msg.Type == RubyRequestType:STIND) {
+        out_msg.type := CHIRequestType:StoreIndirect;
+        out_msg.secondType := CHIRequestType:StoreIndirect;
       } else if (in_msg.Type == RubyRequestType:ATOMIC_RETURN) {
         out_msg.type := CHIRequestType:AtomicLoad;
       } else if (in_msg.Type == RubyRequestType:ATOMIC_NO_RETURN){
@@ -267,20 +272,27 @@ action(Initiate_Request, desc="") {
   bool reduce_usefulness := false;
   WriteMask read_usefulness;
   WriteMask write_usefulness;
+  MachineID compactCacheID;
   MachineID valueCacheID;
+  MachineID indexCacheID;
+  // FFUTSYM:
+
   peek(reqRdyPort, CHIRequestMsg) {
     set_tbe(allocateRequestTBE(address, in_msg));
     // only a msg that was already retried doesn't allow a retry
     was_retried := in_msg.allowRetry == false;
+    // MYSTUFF:
     if (isConsideredEvict(in_msg.type)) {
-        // MYSTUFF:
         read_usefulness := in_msg.read_usefulness;
         write_usefulness := in_msg.write_usefulness;
         reduce_usefulness := true;
         DPRINTF(IndirectLoad, "Got read usefulness with count %d from message.\n", read_usefulness.count());
         DPRINTF(IndirectLoad, "Got write usefulness with count %d from message.\n", write_usefulness.count());
     }
+    compactCacheID := in_msg.compactCacheID;
     valueCacheID := in_msg.valueCacheID;
+    indexCacheID := in_msg.indexCacheID;
+    // FFUTSYM:
   }
   DirEntry dir_entry := getDirEntry(address);
   copyCacheAndDir(cache_entry, dir_entry, tbe, initial);
@@ -288,7 +300,7 @@ action(Initiate_Request, desc="") {
   tbe.use_DMT := is_HN && enable_DMT;
   tbe.use_DCT := enable_DCT;
 
-  bool alloc_entry := needCacheEntry(tbe.reqType,
+  bool alloc_entry := needCacheEntry(tbe.reqType, tbe.secondType,
                                      cache_entry, dir_entry,
                                      tbe.is_local_pf);
   bool dealloc_entry := needDeallocCacheEntry(tbe.reqType);
@@ -313,8 +325,32 @@ action(Initiate_Request, desc="") {
     tbe.dataBlk.copyWriteUsefulness(cache_entry.DataBlk.getWriteUsefulness());
     tbe.dataBlk.reduceUsefulness(read_usefulness, write_usefulness);
   }
-  // MYSTUFF:
+  tbe.compactCacheID := compactCacheID;
   tbe.valueCacheID := valueCacheID;
+  tbe.indexCacheID := indexCacheID;
+  if (tbe.secondType == CHIRequestType:ReadIndirect) {
+    if (alloc_for_compact && isInvalid(tbe.compactCacheID)) {
+        // NOTE: We should see the compact cache before we see the value cache.
+        // In other words, the compact cache is upstream of the value cache.
+        // They can be the same cache too.
+        assert(isInvalid(tbe.valueCacheID));
+        // NOTE: We are the value cache. Set the valueCacheID in
+        // tbe so that we can use it when we send a message out.
+        tbe.compactCacheID := machineID;
+    }
+    // NOTE: Check to see if we have seen the value cache yet.
+    if (alloc_for_ind_value && isInvalid(tbe.valueCacheID)) {
+        // NOTE: We are the value cache. Set the valueCacheID in
+        // tbe so that we can use it when we send a message out.
+        tbe.valueCacheID := machineID;
+    }
+    if (alloc_for_ind_index && isInvalid(tbe.indexCacheID)) {
+        // NOTE: We are the index cache. Set the indexCacheID in
+        // tbe so that we can use it when we send a message out.
+        tbe.indexCacheID := machineID;
+    }
+  }
+  // FFUTSYM:
 
   // always drops any data when not caching it or when this transaction
   // requires deallocation
@@ -4191,56 +4227,34 @@ action(Profile_OutgoingEnd_DVM, desc="") {
 action(Initiate_ReadIndirectMiss, desc="Start ReadIndex or Fwd ReadIndirect") {
     assert(is_valid(tbe));
     assert(tbe.reqType == CHIRequestType:ReadIndirect);
-    // MYSTUFF: within this scope (Initiate_ReadIndirectMiss) tbe.doCacheFill
+    // NOTE: within this scope (Initiate_ReadIndirectMiss) tbe.doCacheFill
     // is true only if alloc_for_ind_index is true.
     if (tbe.doCacheFill) {
-        tbe.actions.push(Event:ReadIndex);
+        tbe.actions.push(Event:EnqueueReadIndex);
     } else {
         tbe.actions.push(Event:FwdReadIndirect);
     }
+}
 
-    // MYSTUFF: NOTE: Check to see if we have seen the value cache yet.
-    if (alloc_for_ind_value && isInvalid(tbe.valueCacheID)) {
-        // MYSTUFF: NOTE: We are the value cache. Set the valueCacheID in
-        // tbe so that we can use it when we send a message out.
-        tbe.valueCacheID := machineID;
+action(Enqueue_ReadIndex, desc="Read Index") {
+    // NOTE: By this time we should have seen the value cache.
+    enqueue(reqRdyOutPort, CHIRequestMsg, request_latency) {
+        prepareRequest(tbe, CHIRequestType:ReadIndex, out_msg);
+
+        out_msg.Destination.clear();
+        out_msg.Destination.add(machineID);
+
+        allowRequestRetry(tbe, out_msg);
     }
 }
 
-// MYSTUFF:
-action(Send_ReadIndex, desc="Read Index") {
-    // MYSTUFF: NOTE: By this time we should have seen the value cache.
-    assert(!isInvalid(tbe.valueCacheID));
-    tbe.actions.push(Event:ReadMissPipe);
-    if (is_HN) {
-        // Here, we're at the home node with a miss.
-        tbe.actions.push(Event:SendReadNoSnp);
-    } else {
-        // MYSTUFF: FUTUREME: This is an untested path. make sure to panic or test.
-        tbe.actions.push(Event:SendReadShared);
-    }
-    tbe.actions.push(Event:CheckCacheFill);
-    tbe.actions.push(Event:TagArrayWrite);
-    // MYSTUFF: TODO: This is when I read the value
-    // if (machineID == tbe.valueCacheID) {
-    //     tbe.actions.push(Event:SendReadValueForSelf);
-    // } else {
-    //     tbe.actions.push(Event:SendReadValueForOther);
-    // }
-    if (machineID != tbe.valueCacheID) {
-        tbe.actions.push(Event:SendReadValueForOther);
-    }
-}
-
-// MYSTUFF:
 action(delayFwdIndirect, desc="Model the delay to fwd ReadIndirect") {
     assert(is_valid(tbe));
     tbe.delayNextAction := curTick() + cyclesToTicks(fwd_ind_acc_delay);
 }
 
-// MYSTUFF:
 action(Fwd_ReadIndirect, desc="Forward ReadIndirect") {
-  // MYSTUFF: NOTE: Does it make sense to add the following assert?
+  // NOTE: Does it make sense to add the following assert?
   // What if we don't want to cache them at all? Or what if we want to cache
   // them at the memory controller.
   // assert(is_HN == false);
@@ -4250,84 +4264,87 @@ action(Fwd_ReadIndirect, desc="Forward ReadIndirect") {
     prepareRequest(tbe, CHIRequestType:ReadIndirect, out_msg);
 
     out_msg.Destination.add(mapAddressToDownstreamMachine(tbe.addr));
-    // MYSTUFF: NOTE: What do the following two lines mean?
+    // NOTE: What do the following two lines mean?
     out_msg.dataToFwdRequestor := false;
     allowRequestRetry(tbe, out_msg);
   }
 }
 
-// MYSTUFF:
-action(delaySendValue, desc="Model the delay for writing index to cache.") {
-  assert(is_valid(tbe));
-  tbe.delayNextAction := curTick() + cyclesToTicks(send_value_delay);
-}
+action(Enqueue_AccessValue, desc="Notify Value Cache") {
+    // NOTE: This is called when we are the value cache.
+    assert(is_valid(tbe));
 
-action(Send_ReadValue, desc="Send a request to value cache to read.") {
-    assert(!isInvalid(tbe.valueCacheID));
+    // TODO: This is for now only compatible with SpatterAccess.
+    // We should use the value stored in the dataBlk to calculate
+    // the next address. FIXME: No_Spatter_Access
     enqueue(reqOutPort, CHIRequestMsg, request_latency) {
-        // Addr addr,                desc="Request line address";
         out_msg.addr := makeLineAddress(getNextAddr(tbe.seqReq));
-        // Addr accAddr,             desc="Original access address. Set for Write*Ptl and requests from the sequencer";
         out_msg.accAddr := getNextAddr(tbe.seqReq);
-        // int  accSize,             desc="Access size. Set for Write*Ptl and requests from the sequencer";
         out_msg.accSize := getNextSize(tbe.seqReq);
-        // CHIRequestType type,      desc="Request type";
-        out_msg.type := CHIRequestType:ReadValue;
 
-        // MachineID requestor,      desc="Requestor ID";
-        // MYSTUFF: FIXME: Whether to set this to machineID or valueCacheID?
-        // I don't think this really matters.
-        out_msg.requestor := machineID;
+        out_msg.type := CHIRequestType:ReadValueAddrNotif;
 
-        // MachineID fwdRequestor,   desc="Where to send data for DMT/DCT requests";
-        // MYSTUFF: FIXME: This is something to think about when trying to enable DMT/DCT for indirect accesses.
-        out_msg.fwdRequestor := tbe.valueCacheID;
-        // bool dataToFwdRequestor,  desc="Data has to be forwarded to fwdRequestor";
-        out_msg.dataToFwdRequestor := true;
-        // bool retToSrc,            desc="Affects whether or not a snoop resp returns data";
-        // MYSTUFF: FIXME: What does this mean?
-        out_msg.retToSrc := false;
-        // bool allowRetry,          desc="This request can be retried";
-        // MYSTUFF: FIXME: What does this mean?
-        out_msg.allowRetry := true;
-        // NetDest Destination,      desc="Message destination";
         out_msg.Destination.clear();
         out_msg.Destination.add(tbe.valueCacheID);
 
-        // RequestPtr seqReq,        default="nullptr", desc="Pointer to original request from CPU/sequencer (nullptr if not valid)";
-        out_msg.seqReq := tbe.seqReq;
-        // bool isSeqReqValid,       default="false",   desc="Set if seqReq is valid (not nullptr)";
-        out_msg.isSeqReqValid := tbe.isSeqReqValid;
-
-        // bool is_local_pf,         desc="Request generated by a local prefetcher";
-        out_msg.is_local_pf := false;
-        // bool is_remote_pf,        desc="Request generated a prefetcher in another cache";
-        out_msg.is_remote_pf := false;
-
-        // WriteMask atomic_op,      desc="Atomic Operation Wrapper";
-        // MYSTUFF: FIXME: What does this mean? Doesn't matter I think.
-
-        // bool usesTxnId,       desc="True if using a Transaction ID", default="false";
-        // MYSTUFF: FIXME: At some point we should be using this.
-        out_msg.usesTxnId := false;
-        // Addr txnId,           desc="Transaction ID", default="0";
-        // MYSTUFF: FIXME: At some point we should be using this.
-
-        // bool ns,              desc="Secure State of the transaction. NS=NonSecure", default="true";
-        out_msg.ns := true;
-
-        // MessageSizeType MessageSize, default="MessageSizeType_Control";
-        // MYSTUFF: FIXME: What does this mean? Doesn't matter I think.
-
-        // MYSTUFF:
-        // WriteMask read_usefulness,     desc="Mask denoting bytes that were useful for read";
-        // WriteMask write_usefulness,    desc="Mask denoting bytes that were useful for write";
-        // MachineID valueCacheID,        desc="MachineID of the value cache for an indirect request";
-        out_msg.valueCacheID := tbe.valueCacheID;
+        allowRequestRetry(tbe, out_msg);
     }
 }
 
-// MYSTUFF: NOTE:
-action(Initiate_ReadValueMiss, desc="Read the value array using the addr") {
+// action(Initiate_ReadValue_Miss, desc="") {
+//   tbe.actions.push(Event:ReadMissPipe);
+//   if (is_HN && tbe.use_DMT) {
+//     tbe.requestorToBeExclusiveOwner := true;
+//     tbe.dataMaybeDirtyUpstream := true; // SNF always replies with CompData_UC
+//     if (tbe.valueCacheID != machineID) {
+//         if (enable_DMT_early_dealloc) {
+//         tbe.actions.push(Event:SendRespSepData);
+//         }
+//         tbe.actions.push(Event:WaitCompAck);
+//         tbe.actions.pushNB(Event:SendReadNoSnpDMT);
+//     }
+//   } else if (is_HN) {
+//     tbe.actions.push(Event:SendReadNoSnp);
+//     if (tbe.valueCacheID != machineID) {
+//         tbe.actions.push(Event:WaitCompAck);
+//         tbe.actions.pushNB(Event:SendCompData);
+//     }
+//   } else {
+//     tbe.actions.push(Event:SendReadValue);
+//     if (tbe.valueCacheID != machineID) {
+//         tbe.actions.push(Event:WaitCompAck);
+//         tbe.actions.pushNB(Event:SendCompData);
+//     }
+//   }
+//   tbe.actions.push(Event:CheckCacheFill);
+//   tbe.actions.push(Event:TagArrayWrite);
 
-}
+//   // NOTE: We need to add something like this here.
+//   // if (tbe.valueCacheID == machineID && isValid(tbe.compactCacheID)) {
+//   //   tbe.actions.push(Event:EnqueueCompact);
+//   // }
+// }
+
+// action(Send_ReadValue, desc="") {
+//   assert(is_HN == false);
+//   assert(tbe.dataValid == false);
+
+//   clearExpectedReqResp(tbe);
+//   tbe.expected_req_resp.addExpectedDataType(CHIDataType:DataSepResp_UC);
+//   tbe.expected_req_resp.addExpectedDataType(CHIDataType:CompData_UC);
+//   tbe.expected_req_resp.addExpectedDataType(CHIDataType:CompData_UD_PD);
+//   tbe.expected_req_resp.addExpectedDataType(CHIDataType:CompData_SC);
+//   // NOTE: the first CompData received counts as RespSepData
+//   tbe.expected_req_resp.addExpectedRespType(CHIResponseType:RespSepData);
+//   tbe.expected_req_resp.setExpectedCount(2);
+//   tbe.dataBlkValid.clear();
+
+//   enqueue(reqOutPort, CHIRequestMsg, request_latency) {
+//     prepareRequest(tbe, CHIRequestType:ReadValue, out_msg);
+//     out_msg.Destination.add(mapAddressToDownstreamMachine(tbe.addr));
+//     out_msg.dataToFwdRequestor := false;
+//     allowRequestRetry(tbe, out_msg);
+//   }
+// }
+
+// FFUTSYM:

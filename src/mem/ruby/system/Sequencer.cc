@@ -49,6 +49,7 @@
 #include "debug/IndirectLoad.hh"
 #include "debug/LLSC.hh"
 #include "debug/MemoryAccess.hh"
+#include "debug/MSDebug.hh"
 #include "debug/ProtocolTrace.hh"
 #include "debug/RubyHitMiss.hh"
 #include "debug/RubySequencer.hh"
@@ -1206,6 +1207,7 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
     RequestPtr request = msg->getRequestPtr();
     assert(request == pkt->req);
     if (sparse_pcs.find(pc) != sparse_pcs.end()) {
+        DPRINTF(MSDebug, "Sparse PC %#lx\n", pc);
         std::shared_ptr<SparseID> sparse_id = std::make_shared<SparseID>();
         request->setExtension<SparseID>(sparse_id);
     }

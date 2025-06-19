@@ -99,7 +99,10 @@ enumeration(CHIRequestType, desc="") {
 
   // MYSTUFF:
   ReadIndirect;
-  ReadValue;
+  StoreIndirect;
+  ReadIndex;
+  ReadValueAddrNotif;
+  StoreValueAddrNotif;
 
   null;
 }
@@ -138,9 +141,13 @@ structure(CHIRequestMsg, desc="", interface="Message") {
   // MYSTUFF:
   WriteMask read_usefulness,     desc="Mask denoting bytes that were useful for read";
   WriteMask write_usefulness,    desc="Mask denoting bytes that were useful for write";
-  MachineID valueCacheID,        desc="MachineID of the value cache for an indirect request";
 
-  bool isReadValue;
+  MachineID compactCacheID,      desc="MachineID of the compact cache for an indirect request";
+  MachineID valueCacheID,        desc="MachineID of the value cache for an indirect request";
+  MachineID indexCacheID,        desc="MachineID of the index cache for an indirect request";
+
+  CHIRequestType secondType,     desc="Secondary type of request for an indirect request";
+  // DEPRECATED
   bool is_sparse;
   // FFUTSYM:
 }

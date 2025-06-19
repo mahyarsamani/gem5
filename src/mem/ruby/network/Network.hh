@@ -140,6 +140,8 @@ class Network : public ClockedObject
      */
     NodeID addressToNodeID(Addr addr, MachineType mtype);
 
+    bool mappedToMachine(Addr addr, MachineID mid);
+
     Port &
     getPort(const std::string &, PortID idx=InvalidPortID) override
     {

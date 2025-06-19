@@ -228,6 +228,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   // by counting the number of useful bytes in index cache blocks.
   bool alloc_for_ind_index;
   bool alloc_for_ind_value;
+  bool alloc_for_compact;
 
   bool compact_with_sparsity;
 
@@ -348,17 +349,13 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     SnpUniqueFwd,                desc="", in_trans="yes";
     SnpOnce,                     desc="", in_trans="yes";
     SnpOnceFwd,                  desc="", in_trans="yes";
-    SnpStalled, desc="", in_trans="yes"; // A snoop stall triggered from the inport
+    SnpStalled,                  desc="", in_trans="yes"; // A snoop stall triggered from the inport
     StashOnceShared,             desc="", in_trans="yes"; // Just discarding the hint
     StashOnceUnique,             desc="", in_trans="yes"; // Just discarding the hint
     // MYSTUFF:
-    ReadIndirect,                 desc="", in_trans="yes";
-    ReadIndex,                    desc="", in_trans="yes";
-    FwdReadIndirect,              desc="", in_trans="yes";
-    // SendReadValueForSelf,         desc="", in_trans="yes";
-    SendReadValueForOther,        desc="", in_trans="yes";
-
-    ReadValue,                    desc="", in_trans="yes";
+    ReadIndirect,                desc="", in_trans="yes";
+    EnqueueReadIndex,            desc="", in_trans="yes";
+    FwdReadIndirect,             desc="", in_trans="yes";
 
     // DVM sequencer requests
     DvmTlbi_Initiate, desc="", out_trans="yes", in_trans="yes"; // triggered when a CPU core wants to send a TLBI
@@ -789,9 +786,17 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     bool wakeup_pending_tgr;
 
     // MYSTUFF:
-    WriteMask read_usefulness, desc="Read usefulness bits for the respective cache line";
+    WriteMask read_usefulness,  desc="Read usefulness bits for the respective cache line";
     WriteMask write_usefulness, desc="Write usefulness bits for the respective cache line";
+
+    MachineID compactCacheID;
     MachineID valueCacheID;
+    MachineID indexCacheID;
+
+    CHIRequestType secondType;
+    bool no_fwd_data_upstream, desc="Set if we don't want to forward data upstream";
+
+    // NOTE: Deprecated but too lazy to remove.
     bool is_sparse;
     // FFUTSYM:
   }

@@ -1011,14 +1011,14 @@ transition(I, ReadIndirect, BUSY_BLKD) {
     ProcessNextState;
 }
 
-// MYSTUFF: NOTE: Send_ReadNoSnp if is_HN and Send_ReadShared if not.
-transition(BUSY_BLKD, ReadIndex) {
+// NOTE: Send_ReadNoSnp if is_HN and Send_ReadShared if not.
+transition(BUSY_BLKD, EnqueueReadIndex) {
     Pop_TriggerQueue;
-    Send_ReadIndex;
+    Enqueue_ReadIndex;
     ProcessNextState_ClearPending;
 }
 
-// MYSTUFF: NOTE: This is nothing specific. We just put the same request
+// NOTE: This is nothing specific. We just put the same request
 // on the reqOut message queue.
 transition(BUSY_BLKD, FwdReadIndirect) {
     Pop_TriggerQueue;
@@ -1027,31 +1027,28 @@ transition(BUSY_BLKD, FwdReadIndirect) {
     ProcessNextState_ClearPending;
 }
 
-// MYSTUFF: NOTE: Now we have the value of index.
-// transition(BUSY_INTR, SendReadValueForSelf) {
+// TODO: Need to uncomment this.
+// transition(BUSY_INTR, EnqueueAccessValue) {
 //     Pop_TriggerQueue;
-//     delaySendValue;
-//     Push_ReadValue;
+//     Enqueue_AccessValue;
 //     ProcessNextState_ClearPending;
 // }
 
-// MYSTUFF: NOTE: Now we have the value of index.
-transition(BUSY_INTR, SendReadValueForOther) {
-    Pop_TriggerQueue;
-    delaySendValue;
-    Send_ReadValue;
-    ProcessNextState_ClearPending;
-}
+// transition(I, ReadValue, BUSY_BLKD) {
+//     Initiate_Request;
+//     Initiate_ReadValue_Miss;
+//     Allocate_DirEntry;
+//     // Profile_Miss;
+//     Pop_ReqRdyQueue;
+//     ProcessNextState;
+// }
 
-// MYSTUFF: NOTE: Now we have the address of value, we can read it.
-// FUTUREME: This is only implemented for when L1 is the value cache.
-transition(I, ReadValue, BUSY_BLKD) {
-    Initiate_Request;
-    Initiate_ReadValueMiss;
-    // Profile_Miss;
-    Pop_ReqRdyQueue;
-    ProcessNextState;
-}
+// transition(BUSY_BLKD, SendReadValue) {
+//     Pop_TriggerQueue;
+//     Send_ReadValue;
+//     Profile_OutgoingStart;
+//     ProcessNextState_ClearPending;
+// }
 
 // Trigger-specifc transitions
 

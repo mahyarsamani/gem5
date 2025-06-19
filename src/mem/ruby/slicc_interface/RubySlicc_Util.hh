@@ -328,7 +328,11 @@ inline bool
 isSparse(RequestPtr req)
 {
     std::shared_ptr<SparseID> sparse_id = req->getExtension<SparseID>();
-    return sparse_id != nullptr ? true : false;
+    bool is_sparse = sparse_id != nullptr;
+    if (is_sparse) {
+        req->removeExtension<SparseID>();
+    }
+    return is_sparse;
 }
 
 inline RequestorID
