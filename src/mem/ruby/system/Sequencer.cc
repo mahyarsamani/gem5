@@ -723,6 +723,56 @@ Sequencer::atomicCallback(Addr address, DataBlock& data,
     }
 }
 
+// MYSTUFF
+void
+Sequencer::handleIndArrival(PacketPtr pkt)
+{
+    if (prodExitTimes.find(pkt->req) != prodExitTimes.end()) {
+        auto [relation_name, instance_id, exit_time] = prodExitTimes[pkt->req];
+        prodExitTimes.erase(pkt->req);
+        // warn("%s: Access to producer for relation %s with instance id %d took %d ticks. curTick: %ld, exit_time: %ld\n", name(), relation_name, instance_id, curTick() - exit_time, curTick(), exit_time);
+        if (indRelProdAccLat.find(relation_name) == indRelProdAccLat.end()) {
+            statistics::Histogram* new_stat = new statistics::Histogram(
+                    this,
+                    csprintf("%s.indRelProdAccLat.%s", name(), relation_name).c_str(),
+                    statistics::units::Tick::get(),
+                    "Access latency for the producer of the indirect access.");
+            new_stat->init(16);
+            indRelProdAccLat[relation_name] = new_stat;
+        }
+        indRelProdAccLat[relation_name]->sample(curTick() - exit_time);
+    }
+    if (consExitTimes.find(pkt->req) != consExitTimes.end()) {
+        auto [relation_name, instance_id, exit_time] = consExitTimes[pkt->req];
+        consExitTimes.erase(pkt->req);
+        // warn("%s: Access to consumer for relation %s with instance id %d took %d ticks. curTick: %ld, exit_time: %ld\n", name(), relation_name, instance_id, curTick() - exit_time, curTick(), exit_time);
+        Tick overall_exit_time = indAccExitTimes[relation_name][instance_id];
+        indAccExitTimes[relation_name].erase(instance_id);
+        // warn("%s: Overall access time for relation %s with instance id %d is %d ticks. curTick: %ld, overall_exit_time: %ld\n", name(), relation_name, instance_id, curTick() - overall_exit_time, curTick(), overall_exit_time);
+        if (indRelConsAccLat.find(relation_name) == indRelConsAccLat.end()) {
+            statistics::Histogram* new_stat = new statistics::Histogram(
+                    this,
+                    csprintf("%s.indRelConsAccLat.%s", name(), relation_name).c_str(),
+                    statistics::units::Tick::get(),
+                    "Access latency for the consumer of the indirect access.");
+            new_stat->init(16);
+            indRelConsAccLat[relation_name] = new_stat;
+        }
+        indRelConsAccLat[relation_name]->sample(curTick() - exit_time);
+        if (indRelAccLat.find(relation_name) == indRelAccLat.end()) {
+            statistics::Histogram* new_stat = new statistics::Histogram(
+                    this,
+                    csprintf("%s.indRelAccLat.%s", name(), relation_name).c_str(),
+                    statistics::units::Tick::get(),
+                    "Overall access latency for the indirect access.");
+            new_stat->init(16);
+            indRelAccLat[relation_name] = new_stat;
+        }
+        indRelAccLat[relation_name]->sample(curTick() - overall_exit_time);
+    }
+}
+// FFUTSYM
+
 void
 Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
                        bool llscSuccess,
@@ -836,6 +886,10 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
         ruby_hit_callback(pkt);
         testDrainComplete();
     }
+
+    // MYSTUFF
+    handleIndArrival(pkt);
+    // FFUTSYM
 }
 
 void
@@ -1118,9 +1172,35 @@ Sequencer::makeRequest(PacketPtr pkt)
     if (status != RequestStatus_Aliased)
         issueRequest(pkt, secondary_type);
 
+    // MYSTUFF
+    handleIndExit(pkt);
+    // FFUTSYM
+
     // TODO: issue hardware prefetches here
     return RequestStatus_Issued;
 }
+
+// MYSTUFF
+void
+Sequencer::handleIndExit(PacketPtr pkt)
+{
+    std::shared_ptr<IndAccProd> ind_acc_prod = pkt->req->getExtension<IndAccProd>();
+    if (ind_acc_prod != nullptr) {
+        std::string relation_name = ind_acc_prod->relationName();
+        int instance_id = ind_acc_prod->relationInstanceId();
+        pkt->req->removeExtension<IndAccProd>();
+        prodExitTimes[pkt->req] = std::make_tuple(relation_name, instance_id, curTick());
+        indAccExitTimes[relation_name][instance_id] = curTick();
+    }
+    std::shared_ptr<IndAccCons> ind_acc_cons = pkt->req->getExtension<IndAccCons>();
+    if (ind_acc_cons != nullptr) {
+        std::string relation_name = ind_acc_cons->relationName();
+        int instance_id = ind_acc_cons->relationInstanceId();
+        pkt->req->removeExtension<IndAccCons>();
+        consExitTimes[pkt->req] = std::make_tuple(relation_name, instance_id, curTick());
+    }
+}
+// FFUTSYM
 
 void
 Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)

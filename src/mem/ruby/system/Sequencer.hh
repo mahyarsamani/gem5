@@ -260,6 +260,18 @@ class Sequencer : public RubyPort
 
   private:
     std::set<Addr> sparse_pcs;
+
+    std::unordered_map<RequestPtr, std::tuple<std::string, int, Tick>> prodExitTimes;
+    std::unordered_map<RequestPtr, std::tuple<std::string, int, Tick>> consExitTimes;
+    std::unordered_map<std::string, std::unordered_map<int, Tick>> indAccExitTimes;
+
+    std::unordered_map<std::string, statistics::Histogram*> indRelProdAccLat;
+    std::unordered_map<std::string, statistics::Histogram*> indRelConsAccLat;
+    std::unordered_map<std::string, statistics::Histogram*> indRelAccLat;
+
+    void handleIndExit(PacketPtr pkt);
+    void handleIndArrival(PacketPtr pkt);
+
     SequencerType m_sequencer_type;
 
     int m_max_outstanding_requests;

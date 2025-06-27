@@ -1152,6 +1152,50 @@ class SparseID: public Extension<Request, SparseID>
     }
 };
 
+class IndAccProd: public Extension<Request, IndAccProd>
+{
+  private:
+    std::string _relationName;
+    int _relationInstanceId;
+
+  public:
+    IndAccProd(std::string relation_name, int instance_id):
+        Extension<Request, IndAccProd>(),
+        _relationName(relation_name),
+        _relationInstanceId(instance_id)
+    {}
+
+    virtual std::unique_ptr<ExtensionBase> clone() const override
+    {
+        return std::make_unique<IndAccProd>(*this);
+    }
+
+    std::string relationName() const { return _relationName; }
+    int relationInstanceId() const { return _relationInstanceId; }
+};
+
+class IndAccCons: public Extension<Request, IndAccCons>
+{
+  private:
+    std::string _relationName;
+    int _relationInstanceId;
+
+  public:
+    IndAccCons(std::string relation_name, int instance_id):
+        Extension<Request, IndAccCons>(),
+        _relationName(relation_name),
+        _relationInstanceId(instance_id)
+    {}
+
+    virtual std::unique_ptr<ExtensionBase> clone() const override
+    {
+        return std::make_unique<IndAccCons>(*this);
+    }
+
+    std::string relationName() const { return _relationName; }
+    int relationInstanceId() const { return _relationInstanceId; }
+};
+
 } // namespace gem5
 
 #endif // __MEM_REQUEST_HH__

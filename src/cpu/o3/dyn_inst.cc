@@ -89,7 +89,10 @@ DynInst::DynInst(const Arrays &arrays, const StaticInstPtr &static_inst,
 #ifdef GEM5_DEBUG
     cpu->snList.insert(seqNum);
 #endif
-
+    _isProducer = false;
+    _isConsumer = false;
+    _relationName = "";
+    _relationInstanceId = -1;
 }
 
 DynInst::DynInst(const Arrays &arrays, const StaticInstPtr &static_inst,
@@ -99,12 +102,21 @@ DynInst::DynInst(const Arrays &arrays, const StaticInstPtr &static_inst,
 {
     set(pc, _pc);
     set(predPC, pred_pc);
+    _isProducer = false;
+    _isConsumer = false;
+    _relationName = "";
+    _relationInstanceId = -1;
 }
 
 DynInst::DynInst(const Arrays &arrays, const StaticInstPtr &_staticInst,
         const StaticInstPtr &_macroop)
     : DynInst(arrays, _staticInst, _macroop, 0, nullptr)
-{}
+{
+    _isProducer = false;
+    _isConsumer = false;
+    _relationName = "";
+    _relationInstanceId = -1;
+}
 
 /*
  * This custom "new" operator uses the default "new" operator to allocate space

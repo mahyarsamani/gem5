@@ -49,6 +49,7 @@
 #include "cpu/o3/fu_pool.hh"
 #include "cpu/o3/limits.hh"
 #include "debug/IQ.hh"
+#include "debug/MSDebug.hh"
 #include "enums/OpClass.hh"
 #include "params/BaseO3CPU.hh"
 #include "sim/core.hh"
@@ -156,7 +157,7 @@ InstructionQueue::InstructionQueue(CPU *cpu_ptr, IEW *iew_ptr,
 
         DPRINTF(IQ, "IQ sharing policy set to Threshold:"
                 "%i entries per thread.\n",thresholdIQ);
-   }
+    }
     for (ThreadID tid = numThreads; tid < MaxThreads; tid++) {
         maxEntries[tid] = 0;
     }
@@ -559,6 +560,39 @@ InstructionQueue::hasReadyInsts()
     return false;
 }
 
+int
+InstructionQueue::IndAccRelation::trackProducer(const DynInstPtr& producer_inst, const std::string& proxy_simobject_name)
+{
+    assert(producer_inst->numDestRegs() == 1);
+    regIdMap[producer_inst->renamedDestIdx(0)] = nextId;
+    DPRINTF(MSDebug, "%s: %s: Tracking program counter %#lx for register %d with id %d.\n", proxy_simobject_name, __func__,
+            producer_inst->pcState().instAddr(), producer_inst->renamedDestIdx(0)->flatIndex(), nextId);
+    nextId++;
+    return nextId - 1;
+}
+
+int
+InstructionQueue::IndAccRelation::trackConsumer(const DynInstPtr& consumer_inst, const std::string& proxy_simobject_name)
+{
+    std::string error = "";
+    for (int idx = 0; idx < consumer_inst->numSrcRegs(); ++idx) {
+        PhysRegIdPtr src_reg = consumer_inst->renamedSrcIdx(idx);
+        error += "(" + std::to_string(idx) + ": " + std::to_string(src_reg->flatIndex()) + ") ";
+        auto it = regIdMap.find(src_reg);
+        if (it != regIdMap.end()) {
+            int id = it->second;
+            DPRINTF(MSDebug, "%s: %s: Consumer at program counter %#lx for register %d with id %d.\n",
+                    proxy_simobject_name, __func__, consumer_inst->pcState().instAddr(), it->first->flatIndex(), id);
+            regIdMap.erase(it);
+            return id;
+        }
+    }
+    DPRINTF(MSDebug, "%s: %s: Problematic program counter %#lx with regs: %s\n",
+            proxy_simobject_name, __func__, consumer_inst->pcState().instAddr(), error);
+    warn("Consumer instruction %s does not have a producer in the relation %s", consumer_inst->pcState(), _name);
+    return -1;
+}
+
 void
 InstructionQueue::insert(const DynInstPtr &new_inst)
 {
@@ -590,6 +624,30 @@ InstructionQueue::insert(const DynInstPtr &new_inst)
     // Have this instruction set itself as the producer of its destination
     // register(s).
     addToProducers(new_inst);
+
+    Addr program_counter = new_inst->pcState().instAddr();
+
+    assert(producerRelationMap.find(program_counter) == producerRelationMap.end() ||
+           consumerRelationMap.find(program_counter) == consumerRelationMap.end());
+
+    if (producerRelationMap.find(program_counter) != producerRelationMap.end()) {
+        IndAccRelation* relation = producerRelationMap[program_counter];
+        int id = relation->trackProducer(new_inst, cpu->name());
+
+        new_inst->setProducer();
+        new_inst->setRelationName(relation->name());
+        new_inst->setRelationInstanceId(id);
+    }
+    if (consumerRelationMap.find(program_counter) != consumerRelationMap.end()) {
+        IndAccRelation* relation = consumerRelationMap[program_counter];
+        int id = relation->trackConsumer(new_inst, cpu->name());
+
+        if (id != -1) {
+            new_inst->setConsumer();
+            new_inst->setRelationName(relation->name());
+            new_inst->setRelationInstanceId(id);
+        }
+    }
 
     if (new_inst->isMemRef()) {
         memDepUnit[new_inst->threadNumber].insert(new_inst);

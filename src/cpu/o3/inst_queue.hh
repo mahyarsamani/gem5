@@ -57,6 +57,7 @@
 #include "cpu/o3/mem_dep_unit.hh"
 #include "cpu/o3/store_set.hh"
 #include "cpu/op_class.hh"
+#include "cpu/reg_class.hh"
 #include "cpu/timebuf.hh"
 #include "enums/SMTQueuePolicy.hh"
 #include "sim/eventq.hh"
@@ -97,6 +98,40 @@ class IEW;
  */
 class InstructionQueue
 {
+  private:
+    class IndAccRelation
+    {
+      private:
+        std::string _name;
+        std::vector<Addr> pcChain;
+
+        int nextId;
+        std::unordered_map<PhysRegIdPtr, std::tuple<Addr, int>> regIdMap;
+      public:
+        IndAccRelation(const std::string& name, std::vector<Addr> pc_chain):
+            _name(name), pcChain(pc_chain), nextId(0)
+        {}
+
+        const std::string name() { return _name; }
+
+        // int trackInst(const DynInstPtr& inst, const std::string& proxy_simobject_name);
+
+        int trackProducer(const DynInstPtr& producer_inst, const std::string& proxy_simobject_name);
+
+        int trackConsumer(const DynInstPtr& consumer_inst, const std::string& proxy_simobject_name);
+    };
+
+    std::unordered_map<Addr, IndAccRelation*> pcRelationMap;
+
+  public:
+    void addProducerConsumerPair(const std::string& relation_name,  std::vector<Addr> pc_chain)
+    {
+        IndAccRelation* relation = new IndAccRelation(relation_name, pc_chain);
+        for (const auto& pc : pc_chain) {
+            pcRelationMap[pc] = relation;
+        }
+    }
+
   public:
     // Typedef of iterator through the list of instructions.
     typedef typename std::list<DynInstPtr>::iterator ListIt;
