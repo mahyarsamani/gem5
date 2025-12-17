@@ -41,19 +41,21 @@
 
 #include "mem/ruby/system/Sequencer.hh"
 
+#include <optional>
+
 #include "arch/x86/ldstflags.hh"
 #include "base/compiler.hh"
 #include "base/logging.hh"
 #include "base/str.hh"
 #include "cpu/testers/rubytest/RubyTester.hh"
-#include "debug/IndirectLoad.hh"
+#include "debug/LatencyBreakdown.hh"
 #include "debug/LLSC.hh"
 #include "debug/MemoryAccess.hh"
-#include "debug/MSDebug.hh"
 #include "debug/ProtocolTrace.hh"
 #include "debug/RubyHitMiss.hh"
 #include "debug/RubySequencer.hh"
 #include "debug/RubyStats.hh"
+#include "debug/Usefulness.hh"
 #include "mem/packet.hh"
 #include "mem/ruby/profiler/Profiler.hh"
 #include "mem/ruby/protocol/PrefetchBit.hh"
@@ -151,11 +153,19 @@ Sequencer::Sequencer(const Params &p)
             m_missTypeMachLatencyHist[i][j]->init(10);
         }
     }
-
+    // MYSTUFF
+    labelCache = new LabelCache(name() + ".label_cache", 4096);
+    invalidLabelCache = new LabelCache(name() + ".invalid_label_cache", 4096);
+    labelCache->setInvalidatedCache(invalidLabelCache);
+    // FFUTSYM
 }
 
 Sequencer::~Sequencer()
 {
+    // MYSTUFF
+    delete labelCache;
+    delete invalidLabelCache;
+    // FFUTSYM
 }
 
 void
@@ -371,6 +381,11 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType primary_type,
 
     Addr line_addr = makeLineAddress(pkt->getAddr());
     // Check if there is any outstanding request for the same cache line.
+    // MYSTUFF
+    if (primary_type == RubyRequestType_LDIND) {
+        line_addr = ((pkt->getAddr() - line_addr) / pkt->getSize()) * 64;
+    }
+    // FFUTSYM
     auto &seq_req_list = m_RequestTable[line_addr];
     // Create a default entry
     seq_req_list.emplace_back(pkt, primary_type,
@@ -551,12 +566,6 @@ Sequencer::writeCallback(Addr address, DataBlock& data,
             hitCallback(&seq_req, data, success, mach, externalHit,
                         initialRequestTime, forwardRequestTime,
                         firstResponseTime, !ruby_request);
-            // size_t byte_offset = seq_req.pkt->getAddr() - address;
-            // size_t range = seq_req.pkt->getSize();
-            // DPRINTF(IndirectLoad, "%s: Servicing a read response for addr: 0x%lx "
-            //                     "with byte_offset: %d, and range: %d.\n",
-            //                     __func__, address, byte_offset, range);
-            // m_dataCache_ptr->setWriteUsefulness(address, byte_offset, range);
             ruby_request = false;
         } else {
             // handle read request
@@ -588,12 +597,18 @@ Sequencer::processReadCallback(SequencerRequest &seq_req,
     if (ruby_request) {
         assert((seq_req.m_type == RubyRequestType_LD) ||
                (seq_req.m_type == RubyRequestType_Load_Linked) ||
-               (seq_req.m_type == RubyRequestType_IFETCH));
+               (seq_req.m_type == RubyRequestType_IFETCH) ||
+               // MYSTUFF
+               (seq_req.m_type == RubyRequestType_LDIND));
+               // FFUTSYM
     }
     if ((seq_req.m_type != RubyRequestType_LD) &&
         (seq_req.m_type != RubyRequestType_Load_Linked) &&
         (seq_req.m_type != RubyRequestType_IFETCH) &&
-        (seq_req.m_type != RubyRequestType_REPLACEMENT)) {
+        (seq_req.m_type != RubyRequestType_REPLACEMENT) &&
+        // MYSTUFF
+        (seq_req.m_type != RubyRequestType_LDIND)) {
+        // FFUTSYM
         // Write request: reissue request to the cache hierarchy
         issueRequest(seq_req.pkt, seq_req.m_second_type);
         return true;
@@ -631,7 +646,10 @@ Sequencer::readCallback(Addr address, DataBlock& data,
         if (ruby_request) {
             assert((seq_req.m_type == RubyRequestType_LD) ||
                    (seq_req.m_type == RubyRequestType_Load_Linked) ||
-                   (seq_req.m_type == RubyRequestType_IFETCH));
+                   (seq_req.m_type == RubyRequestType_IFETCH) ||
+                   // MYSTUFF
+                   (seq_req.m_type == RubyRequestType_LDIND));
+                   // FFUTSYM
         }
         if (ruby_request) {
             recordMissLatency(&seq_req, true, mach, externalHit,
@@ -642,21 +660,6 @@ Sequencer::readCallback(Addr address, DataBlock& data,
         hitCallback(&seq_req, data, true, mach, externalHit,
                     initialRequestTime, forwardRequestTime,
                     firstResponseTime, !ruby_request);
-        // size_t byte_offset = seq_req.pkt->getAddr() - address;
-        // size_t range = seq_req.pkt->getSize();
-        // DPRINTF(IndirectLoad, "%s: Servicing a read response for addr: 0x%lx "
-        //                         "with byte_offset: %d, and range: %d.\n",
-        //                         __func__, address, byte_offset, range);
-        // if (m_sequencer_type == SequencerType::Data) {
-        //     assert(m_instCache_ptr == nullptr);
-        //     m_dataCache_ptr->setReadUsefulness(address, byte_offset, range);
-        // } else if (m_sequencer_type == SequencerType::Inst) {
-        //     assert(m_dataCache_ptr == nullptr);
-        //     m_instCache_ptr->setReadUsefulness(address, byte_offset, range);
-        // } else {
-        //     assert(m_sequencer_type == SequencerType::DMA || m_sequencer_type == SequencerType::Sys);
-        //     assert(m_dataCache_ptr == nullptr && m_instCache_ptr == nullptr);
-        // }
         ruby_request = false;
         seq_req_list.pop_front();
     }
@@ -728,47 +731,60 @@ void
 Sequencer::handleIndArrival(PacketPtr pkt)
 {
     if (prodExitTimes.find(pkt->req) != prodExitTimes.end()) {
-        auto [relation_name, instance_id, exit_time] = prodExitTimes[pkt->req];
+        auto [exit_time, relation_tags] = prodExitTimes[pkt->req];
         prodExitTimes.erase(pkt->req);
-        // warn("%s: Access to producer for relation %s with instance id %d took %d ticks. curTick: %ld, exit_time: %ld\n", name(), relation_name, instance_id, curTick() - exit_time, curTick(), exit_time);
-        if (indRelProdAccLat.find(relation_name) == indRelProdAccLat.end()) {
-            statistics::Histogram* new_stat = new statistics::Histogram(
-                    this,
-                    csprintf("%s.indRelProdAccLat.%s", name(), relation_name).c_str(),
-                    statistics::units::Tick::get(),
-                    "Access latency for the producer of the indirect access.");
-            new_stat->init(16);
-            indRelProdAccLat[relation_name] = new_stat;
+        for (auto [relation_name, instance_id]: relation_tags) {
+            if (indRelProdAccLat.find(relation_name) == indRelProdAccLat.end()) {
+                statistics::Histogram* new_stat = new statistics::Histogram(
+                        this,
+                        csprintf("indRelProdAccLat.%s", relation_name).c_str(),
+                        statistics::units::Tick::get(),
+                        "Access latency for the producer of the indirect access.");
+                new_stat->init(64);
+                indRelProdAccLat[relation_name] = new_stat;
+            }
+            DPRINTF(LatencyBreakdown, "%s: Sampling producer access latency for "
+                    "relation %s with instance id %d at %d ticks.\n",
+                    __func__, relation_name, instance_id, curTick() - exit_time);
+            indRelProdAccLat[relation_name]->sample(curTick() - exit_time);
         }
-        indRelProdAccLat[relation_name]->sample(curTick() - exit_time);
     }
     if (consExitTimes.find(pkt->req) != consExitTimes.end()) {
-        auto [relation_name, instance_id, exit_time] = consExitTimes[pkt->req];
+        auto [exit_time, relation_tags] = consExitTimes[pkt->req];
+        assert(relation_tags.size() == 1);
+        auto [relation_name, instance_id] = relation_tags[0];
         consExitTimes.erase(pkt->req);
-        // warn("%s: Access to consumer for relation %s with instance id %d took %d ticks. curTick: %ld, exit_time: %ld\n", name(), relation_name, instance_id, curTick() - exit_time, curTick(), exit_time);
-        Tick overall_exit_time = indAccExitTimes[relation_name][instance_id];
-        indAccExitTimes[relation_name].erase(instance_id);
-        // warn("%s: Overall access time for relation %s with instance id %d is %d ticks. curTick: %ld, overall_exit_time: %ld\n", name(), relation_name, instance_id, curTick() - overall_exit_time, curTick(), overall_exit_time);
         if (indRelConsAccLat.find(relation_name) == indRelConsAccLat.end()) {
             statistics::Histogram* new_stat = new statistics::Histogram(
                     this,
-                    csprintf("%s.indRelConsAccLat.%s", name(), relation_name).c_str(),
+                    csprintf("indRelConsAccLat.%s", relation_name).c_str(),
                     statistics::units::Tick::get(),
                     "Access latency for the consumer of the indirect access.");
-            new_stat->init(16);
+            new_stat->init(64);
             indRelConsAccLat[relation_name] = new_stat;
         }
+        DPRINTF(LatencyBreakdown, "%s: Sampling consumer access latency for "
+                "relation %s with instance id %d at %d ticks.\n",
+                __func__, relation_name, instance_id, curTick() - exit_time);
         indRelConsAccLat[relation_name]->sample(curTick() - exit_time);
-        if (indRelAccLat.find(relation_name) == indRelAccLat.end()) {
-            statistics::Histogram* new_stat = new statistics::Histogram(
-                    this,
-                    csprintf("%s.indRelAccLat.%s", name(), relation_name).c_str(),
-                    statistics::units::Tick::get(),
-                    "Overall access latency for the indirect access.");
-            new_stat->init(16);
-            indRelAccLat[relation_name] = new_stat;
+        if ((indExitTimes.find(relation_name) != indExitTimes.end()) &&
+            (indExitTimes[relation_name].find(instance_id) != indExitTimes[relation_name].end())) {
+            Tick overall_exit_time = indExitTimes[relation_name][instance_id];
+            indExitTimes[relation_name].erase(instance_id);
+            if (indRelAccLat.find(relation_name) == indRelAccLat.end()) {
+                statistics::Histogram* new_stat = new statistics::Histogram(
+                        this,
+                        csprintf("indRelAccLat.%s", relation_name).c_str(),
+                        statistics::units::Tick::get(),
+                        "Overall access latency for the indirect access.");
+                new_stat->init(64);
+                indRelAccLat[relation_name] = new_stat;
+            }
+            DPRINTF(LatencyBreakdown, "%s: Sampling overall access latency for "
+                    "relation %s with instance id %d at %d ticks.\n",
+                    __func__, relation_name, instance_id, curTick() - overall_exit_time);
+            indRelAccLat[relation_name]->sample(curTick() - overall_exit_time);
         }
-        indRelAccLat[relation_name]->sample(curTick() - overall_exit_time);
     }
 }
 // FFUTSYM
@@ -817,14 +833,18 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
             (type == RubyRequestType_RMW_Read) ||
             (type == RubyRequestType_Locked_RMW_Read) ||
             (type == RubyRequestType_Load_Linked) ||
-            (type == RubyRequestType_ATOMIC_RETURN)) {
+            (type == RubyRequestType_ATOMIC_RETURN) ||
+            // MYSTUFF
+            (type == RubyRequestType_LDIND)
+            // FFUTSYM
+            ) {
             pkt->setData(
                 data.getData(getOffset(request_address), pkt->getSize()));
-            DPRINTF(IndirectLoad, "%s: Setting readUsefulness for addr: "
+            DPRINTF(Usefulness, "%s: Setting readUsefulness for addr: "
                     "0x%lx with offset: %d, len: %d.\n", __func__,
                     makeLineAddress(request_address),
                     getOffset(request_address), pkt->getSize());
-            data.setReadUsefulness(getOffset(request_address), pkt->getSize());
+            data.setReadUsefulness(getOffset(request_address), pkt->getSize(), name(), makeLineAddress(request_address));
 
            if (type == RubyRequestType_ATOMIC_RETURN) {
                DPRINTF(RubySequencer, "ATOMIC RETURN data %s\n", data);
@@ -853,11 +873,11 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
             // Types of stores set the actual data here, apart from
             // failed Store Conditional requests
             data.setData(pkt);
-            DPRINTF(IndirectLoad, "%s: Setting writeUsefulness for addr: "
+            DPRINTF(Usefulness, "%s: Setting writeUsefulness for addr: "
                 "0x%lx with offset: %d, len: %d.\n", __func__,
                 makeLineAddress(request_address),
                 getOffset(request_address), pkt->getSize());
-            data.setWriteUsefulness(getOffset(request_address), pkt->getSize());
+            data.setWriteUsefulness(getOffset(request_address), pkt->getSize(), name(), makeLineAddress(request_address));
             DPRINTF(RubySequencer, "set data %s\n", data);
         }
     }
@@ -1186,18 +1206,30 @@ Sequencer::handleIndExit(PacketPtr pkt)
 {
     std::shared_ptr<IndAccProd> ind_acc_prod = pkt->req->getExtension<IndAccProd>();
     if (ind_acc_prod != nullptr) {
-        std::string relation_name = ind_acc_prod->relationName();
-        int instance_id = ind_acc_prod->relationInstanceId();
+        Tick exit_tick = curTick();
+        std::vector<std::tuple<std::string, int>> relation_tags = ind_acc_prod->getIndRelationIds();
         pkt->req->removeExtension<IndAccProd>();
-        prodExitTimes[pkt->req] = std::make_tuple(relation_name, instance_id, curTick());
-        indAccExitTimes[relation_name][instance_id] = curTick();
+        prodExitTimes[pkt->req] = std::make_tuple(exit_tick, relation_tags);
+        for (auto [relation_name, instance_id] : relation_tags) {
+            indExitTimes[relation_name][instance_id] = exit_tick;
+            DPRINTF(LatencyBreakdown, "%s: Recording producer exit for addr %#lx at "
+                    "tick %d for relation %s with instance id %d.\n", __func__,
+                    pkt->getAddr(), exit_tick, relation_name, instance_id);
+        }
     }
     std::shared_ptr<IndAccCons> ind_acc_cons = pkt->req->getExtension<IndAccCons>();
     if (ind_acc_cons != nullptr) {
-        std::string relation_name = ind_acc_cons->relationName();
-        int instance_id = ind_acc_cons->relationInstanceId();
+        Tick exit_tick = curTick();
+        std::vector<std::tuple<std::string, int>> relation_tags = ind_acc_cons->getIndRelationIds();
+        assert(relation_tags.size() == 1);
         pkt->req->removeExtension<IndAccCons>();
-        consExitTimes[pkt->req] = std::make_tuple(relation_name, instance_id, curTick());
+        consExitTimes[pkt->req] = std::make_tuple(exit_tick, relation_tags);
+        DPRINTF(LatencyBreakdown, "%s: Recording consumer exit for addr %#lx at "
+                    "tick %d for relation %s with instance id %d.\n", __func__,
+                    pkt->getAddr(), exit_tick,
+                    std::get<0>(relation_tags[0]),
+                    std::get<1>(relation_tags[0])
+                );
     }
 }
 // FFUTSYM
@@ -1284,13 +1316,37 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
         msg->m_htmTransactionUid = pkt->getHtmTransactionUid();
     }
 
+    // MYSTUFF
     RequestPtr request = msg->getRequestPtr();
     assert(request == pkt->req);
-    if (sparse_pcs.find(pc) != sparse_pcs.end()) {
-        DPRINTF(MSDebug, "Sparse PC %#lx\n", pc);
-        std::shared_ptr<SparseID> sparse_id = std::make_shared<SparseID>();
-        request->setExtension<SparseID>(sparse_id);
+    if (m_sequencer_type == SequencerType::Data) {
+        std::optional<std::string> label = labelCache->lookup(request->getPaddr());
+        std::shared_ptr<MemAccessName> from_cpu = request->getExtension<MemAccessName>();
+        if (label) {
+            DPRINTF(Usefulness, "%s: Mem access name %s from label cache for addr %#lx.\n", __func__, label.value(), request->getPaddr());
+            if (from_cpu != nullptr && from_cpu->name() != label.value()) {
+                warn("%s: %s: Label mismatch between label cache (%s) and "
+                     "from CPU (%s) for addr %#lx. This does not influence the"
+                     " current access name. However, it does influence those "
+                     "accesses that rely solely on the label cache for their names.\n",
+                     name(),__func__, label.value(), from_cpu->name(), request->getPaddr());
+            }
+
+            if (from_cpu == nullptr) {
+                std::shared_ptr<MemAccessName> mem_access_name =
+                    std::make_shared<MemAccessName>(label.value());
+                request->setExtension<MemAccessName>(mem_access_name);
+            }
+        }
+
+        // NOTE: Have a label but it's not cached. So we cache it.
+        if (!label && from_cpu != nullptr) {
+            DPRINTF(Usefulness, "%s: Caching access name %s for addr %#lx.\n",
+                    __func__, from_cpu->name(), request->getPaddr());
+            labelCache->onFirstTouch(from_cpu->name(), request->getPaddr());
+        }
     }
+    // FFUTSYM
 
     Tick latency = cyclesToTicks(
                         m_controller->mandatoryQueueLatency(secondary_type));

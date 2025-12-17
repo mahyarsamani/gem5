@@ -153,6 +153,10 @@ class MemCmd
         ReadIndResp,
         WriteIndReq,
         WriteIndResp,
+        ReadIndCompReq,
+        ReadIndCompResp,
+        WriteIndCompReq,
+        WriteIndCompResp,
         NUM_MEM_CMDS
     };
 
@@ -165,6 +169,7 @@ class MemCmd
         IsRead,         //!< Data flows from responder to requester
         IsWrite,        //!< Data flows from requester to responder
         IsIndirect,
+        IsCompact,
         IsUpgrade,
         IsInvalidate,
         IsClean,        //!< Cleans any existing dirty blocks
@@ -231,7 +236,10 @@ class MemCmd
 
     bool isRead() const            { return testCmdAttrib(IsRead); }
     bool isWrite() const           { return testCmdAttrib(IsWrite); }
+    // MYSTUFF
     bool isIndirect() const        { return testCmdAttrib(IsIndirect); }
+    bool isCompact() const         { return testCmdAttrib(IsCompact); }
+    // FFUTSYM
     bool isUpgrade() const         { return testCmdAttrib(IsUpgrade); }
     bool isRequest() const         { return testCmdAttrib(IsRequest); }
     bool isResponse() const        { return testCmdAttrib(IsResponse); }
@@ -599,6 +607,7 @@ class Packet : public Printable, public Extensible<Packet>
     bool isRead() const              { return cmd.isRead(); }
     bool isWrite() const             { return cmd.isWrite(); }
     bool isIndirect() const          { return cmd.isIndirect(); }
+    bool isCompact() const           { return cmd.isCompact(); }
     bool isDemand() const            { return cmd.isDemand(); }
     bool isUpgrade()  const          { return cmd.isUpgrade(); }
     bool isRequest() const           { return cmd.isRequest(); }

@@ -162,6 +162,10 @@ structure (Sequencer, external = "yes") {
 
   void recordRequestType(SequencerRequestType);
   bool checkResourceAvailable(CacheResourceType, Addr);
+
+  // MYSTUFF
+  bool canOverride(std::string name);
+  // FFUTSYM
 }
 
 structure (HTMSequencer, interface="Sequencer", external = "yes") {

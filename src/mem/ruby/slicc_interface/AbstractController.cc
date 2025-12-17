@@ -73,6 +73,7 @@ AbstractController::AbstractController(const Params &p)
         // of this particular type.
         statistics::registerDumpCallback([this]() { collateStats(); });
     }
+    upstreamSequencers = p.upstream_sequencers;
 }
 
 void
@@ -522,6 +523,24 @@ AbstractController::machineCount(MachineType machType)
     assert(m_ruby_system != nullptr);
     return m_ruby_system->MachineType_base_count(machType);
 }
+
+// MYSTUFF
+bool
+AbstractController::canOverride(std::string label, Addr address)
+{
+    if (upstreamSequencers.size() == 0) {
+        // If there is only one sequencer, it is a private cache controller
+        // and the label cannot be overridden.
+        return true;
+    } else {
+        bool ret = false;
+        for (auto sequencer : upstreamSequencers) {
+            ret |= sequencer->canOverride(label, address);
+        }
+        return ret;
+    }
+}
+// FFUTSYM
 
 bool
 AbstractController::MemoryPort::recvTimingResp(PacketPtr pkt)

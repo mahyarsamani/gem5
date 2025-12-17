@@ -39,6 +39,7 @@
 from m5.objects.ClockedObject import ClockedObject
 from m5.params import *
 from m5.proxy import *
+from m5.util.pybind import PyBindMethod
 
 
 class RubyController(ClockedObject):
@@ -89,3 +90,10 @@ class RubyController(ClockedObject):
     downstream_destinations = VectorParam.RubyController(
         [], "Possible destinations for requests sent towards memory"
     )
+
+    # MYSTUFF
+    # NOTE: This is used to see if a label for a DataBlock can be overriden.
+    upstream_sequencers = VectorParam.RubySequencer(
+        [], "All the sequencers that this controller is downstream to."
+    )
+    # FFUTSYM

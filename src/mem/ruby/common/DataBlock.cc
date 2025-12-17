@@ -41,10 +41,10 @@
 #include "mem/ruby/common/DataBlock.hh"
 
 #include "base/trace.hh"
-#include "debug/MSDebug.hh"
+#include "debug/Usefulness.hh"
 #include "mem/ruby/common/Address.hh"
 #include "mem/ruby/common/WriteMask.hh"
-
+#include "mem/ruby/system/Sequencer.hh"
 namespace gem5
 {
 
@@ -254,61 +254,115 @@ DataBlock::setData(PacketPtr pkt)
     pkt->writeData(&m_data[offset]);
 }
 
+// MYSTUFF
 void
-DataBlock::copyReadUsefulness(WriteMask read_usefulness)
+DataBlock::setAccessName(std::string name, bool can_override, std::string proxy_simobject_name, Addr addr)
+{
+    DPRINTFR(Usefulness,
+        "%s: %s: Setting access name for address %#lx from %s to %s.\n",
+        proxy_simobject_name, __func__, addr, accessName, name);
+
+
+    if (name == "reset") {
+        // NOTE: Just to make sure accessName is not random when initialized.
+        // reset is passed in from CheckCacheFill only. We use special name
+        // "reset" to differentiate from accesses with name "".
+        accessName = "";
+    } else if (accessName == "" || accessName == "prefetch") {
+        // NOTE: Overridables
+        accessName = name;
+    } else if (can_override) {
+        // NOTE: Just in case a physical address is reused, e.g. for local
+        // variables of two functions before a labeled block is evicted.
+        accessName = name;
+        warn("%s: %s: Overriding access name %s (overridable) with %s for addr %#lx.\n",
+                proxy_simobject_name, __func__, accessName, name, addr);
+    } else if (accessName != name) {
+            warn("%s: %s: Attempt to override access "
+                "name %s with %s. Ignoring it!\n",
+                proxy_simobject_name, __func__, accessName, name);
+    } else {
+        assert(accessName == name);
+    }
+}
+
+
+void
+DataBlock::copyReadUsefulness(WriteMask read_usefulness, std::string proxy_simobject_name, Addr addr)
 {
     assert(m_alloc);
     assert(m_block_size > 0);
     readUsefulness->clear();
     readUsefulness->orMask(read_usefulness);
+    DPRINTFR(Usefulness,
+            "%s: %s: Copying read usefulness for address %#lx (accessName: %s) with popCount %d.\n",
+            proxy_simobject_name, __func__, addr, accessName, read_usefulness.count());
 }
 
 void
-DataBlock::copyWriteUsefulness(WriteMask write_usefulness)
+DataBlock::copyWriteUsefulness(WriteMask write_usefulness, std::string proxy_simobject_name, Addr addr)
 {
     assert(m_alloc);
     assert(m_block_size > 0);
     writeUsefulness->clear();
     writeUsefulness->orMask(write_usefulness);
+    DPRINTFR(Usefulness,
+            "%s: %s: Copying write usefulness for address %#lx (accessName: %s) with popCount %d.\n",
+            proxy_simobject_name, __func__, addr, accessName, write_usefulness.count());
 }
 
 void
-DataBlock::setReadUsefulness(int offset, int len)
+DataBlock::setReadUsefulness(int offset, int len, std::string proxy_simobject_name, Addr addr)
 {
     assert(m_alloc);
     assert(m_block_size > 0);
     readUsefulness->setMask(offset, len);
+    DPRINTFR(Usefulness,
+            "%s: %s: Setting read usefulness for address %#lx (accessName: %s) with offset %d and len %d.\n",
+            proxy_simobject_name, __func__, addr, accessName, offset, len);
 }
 
 void
-DataBlock::setWriteUsefulness(int offset, int len)
+DataBlock::setWriteUsefulness(int offset, int len, std::string proxy_simobject_name, Addr addr)
 {
     assert(m_alloc);
     assert(m_block_size > 0);
     writeUsefulness->setMask(offset, len);
+    DPRINTFR(Usefulness,
+            "%s: %s: Setting write usefulness for address %#lx (accessName: %s) with offset %d and len %d.\n",
+            proxy_simobject_name, __func__, addr, accessName, offset, len);
 }
 
 void
-DataBlock::reduceUsefulness(const WriteMask read_usefulness,
-        const WriteMask write_usefulness)
+DataBlock::reduceUsefulness(const WriteMask read_usefulness, const WriteMask write_usefulness, std::string proxy_simobject_name, Addr addr)
 {
     assert(m_alloc);
     assert(m_block_size > 0);
     readUsefulness->orMask(read_usefulness);
     writeUsefulness->orMask(write_usefulness);
+    DPRINTFR(Usefulness,
+            "%s: %s: Reducing usefulness for address %#lx (accessName: %s) with read popCount %d and write popCount %d.\n",
+            proxy_simobject_name, __func__, addr, accessName, read_usefulness.count(), write_usefulness.count());
 }
 
 WriteMask
-DataBlock::getReadUsefulness() const
+DataBlock::getReadUsefulness(std::string proxy_simobject_name, Addr addr) const
 {
+    DPRINTFR(Usefulness,
+            "%s: %s: Getting read usefulness for address %#lx (accessName: %s).\n",
+            proxy_simobject_name, __func__, addr, accessName);
     return *readUsefulness;
 }
 
 WriteMask
-DataBlock::getWriteUsefulness() const
+DataBlock::getWriteUsefulness(std::string proxy_simobject_name, Addr addr) const
 {
+    DPRINTFR(Usefulness,
+            "%s: %s: Getting write usefulness for address %#lx (accessName: %s).\n",
+            proxy_simobject_name, __func__, addr, accessName);
     return *writeUsefulness;
 }
+// FFUTSYM
 
 DataBlock &
 DataBlock::operator=(const DataBlock & obj)
@@ -318,7 +372,7 @@ DataBlock::operator=(const DataBlock & obj)
         delete [] m_data;
         delete readUsefulness;
         delete writeUsefulness;
-        DPRINTF(MSDebug, "%s: Reallocating data block and usefulness "
+        DPRINTFR(Usefulness, "%s: Reallocating data block and usefulness "
                 "due to different blocksize in rhs and lhs.\n", __func__);
         m_block_size = obj.getBlockSize();
         alloc();
@@ -329,7 +383,9 @@ DataBlock::operator=(const DataBlock & obj)
         alloc();
         // Assume this will be realloc'd later if zero.
         if (m_block_size == 0) {
-            DPRINTF(MSDebug, "%s: Returning a data block with zero blocksize.\n", __func__);
+            // MYSTUFF
+            warn("%s: Returning a data block with zero blocksize.\n", __func__);
+            // FFUTSYM
             return *this;
         }
     } else {

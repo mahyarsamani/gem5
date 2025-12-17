@@ -61,10 +61,11 @@ Addr makeNextStrideAddress(Addr addr, int stride);
 structure(BoolVec, external="yes") {
 }
 int countBoolVec(BoolVec bVec);
+RequestorID getRequestorID(RequestPtr req);
 // MYSTUFF:
 bool isSparse(RequestPtr req);
-RequestorID getRequestorID(RequestPtr req);
 Addr getNextAddr(RequestPtr req);
 int getNextSize(RequestPtr req);
 bool isInvalid(MachineID mid);
+std::string getMemAccessName(RequestPtr req);
 // FFUTSYM:

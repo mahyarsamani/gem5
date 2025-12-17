@@ -56,6 +56,7 @@ class AssignStatementAST(StatementAST):
             # Destination 'Set class' to migrate to the new Message Destination
             # 'NetDest class'
             if str(ltype) != "NetDest" and str(rtype) != "Set":
+                print(self.__repr__())
                 self.error(
                     "Assignment type mismatch '%s' and '%s'", ltype, rtype
                 )

@@ -124,8 +124,6 @@ class RubySequencer(RubyPort):
     # 99 is the dummy default value
     coreid = Param.Int(99, "CorePair core id")
 
-    cxx_exports = [PyBindMethod("addSparsePC")]
-
     def connectCpuPorts(self, cpu):
         """
         Helper for connecting all cpu memory request output ports to this

@@ -130,6 +130,7 @@ class StateMachine(Symbol):
         self.debug_flags = set()
         self.debug_flags.add("RubyGenerated")
         self.debug_flags.add("RubySlicc")
+        self.debug_flags.add("ProtocolTraceAction")
 
     def __repr__(self):
         return f"[StateMachine: {self.ident}]"
@@ -1319,6 +1320,7 @@ void
 $c_ident::${{action.ident}}(${{self.TBEType.c_ident}}*& m_tbe_ptr, ${{self.EntryType.c_ident}}*& m_cache_entry_ptr, Addr addr)
 {
     DPRINTF(RubyGenerated, "executing ${{action.ident}}\\n");
+    DPRINTF(ProtocolTraceAction, "executing ${{action.ident}}\\n");
     try {
        ${{action["c_code"]}}
     } catch (const RejectException & e) {
@@ -1342,6 +1344,7 @@ void
 $c_ident::${{action.ident}}(${{self.TBEType.c_ident}}*& m_tbe_ptr, Addr addr)
 {
     DPRINTF(RubyGenerated, "executing ${{action.ident}}\\n");
+    DPRINTF(ProtocolTraceAction, "executing ${{action.ident}}\\n");
     ${{action["c_code"]}}
 }
 
@@ -1359,6 +1362,7 @@ void
 $c_ident::${{action.ident}}(${{self.EntryType.c_ident}}*& m_cache_entry_ptr, Addr addr)
 {
     DPRINTF(RubyGenerated, "executing ${{action.ident}}\\n");
+    DPRINTF(ProtocolTraceAction, "executing ${{action.ident}}\\n");
     ${{action["c_code"]}}
 }
 
@@ -1376,6 +1380,7 @@ void
 $c_ident::${{action.ident}}(Addr addr)
 {
     DPRINTF(RubyGenerated, "executing ${{action.ident}}\\n");
+    DPRINTF(ProtocolTraceAction, "executing ${{action.ident}}\\n");
     ${{action["c_code"]}}
 }
 

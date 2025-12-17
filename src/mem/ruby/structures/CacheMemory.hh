@@ -185,8 +185,6 @@ class CacheMemory : public SimObject
 
     void setRubySystem(RubySystem* rs);
 
-    virtual void regStats() override;
-
   public:
     int getCacheSize() const { return m_cache_size; }
     int getCacheAssoc() const { return m_cache_assoc; }
@@ -293,27 +291,19 @@ class CacheMemory : public SimObject
 
         statistics::Vector m_accessModeType;
 
-        statistics::Histogram usefulBytes;
-        statistics::Histogram readUsefulBytes;
-        statistics::Histogram writeUsefulBytes;
-
-        statistics::Histogram indexUsefulBytes;
-        statistics::Histogram indexReadUsefulBytes;
-        statistics::Histogram indexWriteUsefulBytes;
-
-        statistics::Histogram valueUsefulBytes;
-        statistics::Histogram valueReadUsefulBytes;
-        statistics::Histogram valueWriteUsefulBytes;
-
         statistics::Scalar uselessBlocksNotExplainedbyPrefetch;
     } cacheMemoryStats;
+
+    std::unordered_map<std::string, statistics::Histogram*> usefulBytes;
+    std::unordered_map<std::string, statistics::Histogram*> readUsefulBytes;
+    std::unordered_map<std::string, statistics::Histogram*> writeUsefulBytes;
 
     public:
       void resetStats() override;
       // These function increment the number of demand hits/misses by one
       // each time they are called
       // TODO: Implement this function.
-      void profileUsefulness(Addr line_addr, bool is_prefetched, std::string type, const WriteMask read_usefulness, const WriteMask write_usefulness);
+      void profileUsefulness(Addr line_addr, bool is_prefetched, std::string access_name, const WriteMask read_usefulness, const WriteMask write_usefulness);
       void profileUnexplainedUselessness(Addr line_addr);
       void profileDemandHit();
       void profileDemandMiss();

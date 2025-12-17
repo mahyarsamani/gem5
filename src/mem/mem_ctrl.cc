@@ -44,11 +44,13 @@
 #include "debug/DRAM.hh"
 #include "debug/Drain.hh"
 #include "debug/MemCtrl.hh"
+#include "debug/MSDebug.hh"
 #include "debug/NVM.hh"
 #include "debug/QOS.hh"
 #include "mem/dram_interface.hh"
 #include "mem/mem_interface.hh"
 #include "mem/nvm_interface.hh"
+#include "mem/packet_access.hh"
 #include "sim/system.hh"
 
 namespace gem5
@@ -440,6 +442,7 @@ MemCtrl::recvTimingReq(PacketPtr pkt)
 
     // check local buffers and do not accept if full
     if (pkt->isWrite()) {
+        DPRINTF(MSDebug, "%s: data[%#lx]: %d.\n", __func__, pkt->getAddr(), pkt->getLE<int>());
         assert(size != 0);
         if (writeQueueFull(pkt_count)) {
             DPRINTF(MemCtrl, "Write queue full, not accepting\n");

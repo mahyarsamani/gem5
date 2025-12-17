@@ -52,6 +52,7 @@
 #include "mem/ruby/protocol/RubyRequestType.hh"
 #include "mem/ruby/protocol/SequencerRequestType.hh"
 #include "mem/ruby/structures/CacheMemory.hh"
+#include "mem/ruby/structures/LabelCache.hh"
 #include "mem/ruby/system/RubyPort.hh"
 #include "params/RubySequencer.hh"
 
@@ -258,12 +259,24 @@ class Sequencer : public RubyPort
 
     RubySystem *m_ruby_system;
 
-  private:
-    std::set<Addr> sparse_pcs;
+  public:
+    // MYSTUFF
+    void invalidateLabel(std::string label)
+    {
+        labelCache->invalidateLabel(label);
+    }
 
-    std::unordered_map<RequestPtr, std::tuple<std::string, int, Tick>> prodExitTimes;
-    std::unordered_map<RequestPtr, std::tuple<std::string, int, Tick>> consExitTimes;
-    std::unordered_map<std::string, std::unordered_map<int, Tick>> indAccExitTimes;
+    bool canOverride(std::string label, uint64_t address)
+    {
+        return labelCache->canOverride(label, address);
+    }
+
+  private:
+    LabelCache *labelCache, *invalidLabelCache;
+
+    std::unordered_map<RequestPtr, std::tuple<Tick, std::vector<std::tuple<std::string, int>>>> prodExitTimes;
+    std::unordered_map<RequestPtr, std::tuple<Tick, std::vector<std::tuple<std::string, int>>>> consExitTimes;
+    std::unordered_map<std::string, std::unordered_map<int, Tick>> indExitTimes;
 
     std::unordered_map<std::string, statistics::Histogram*> indRelProdAccLat;
     std::unordered_map<std::string, statistics::Histogram*> indRelConsAccLat;
@@ -271,6 +284,7 @@ class Sequencer : public RubyPort
 
     void handleIndExit(PacketPtr pkt);
     void handleIndArrival(PacketPtr pkt);
+    // FFUTSYM
 
     SequencerType m_sequencer_type;
 
@@ -388,11 +402,6 @@ class Sequencer : public RubyPort
      * This is independent of this Sequencer object's version id.
      */
     void llscClearLocalMonitor();
-
-    void addSparsePC(Addr pc)
-    {
-        sparse_pcs.insert(pc);
-    }
 };
 
 inline std::ostream&

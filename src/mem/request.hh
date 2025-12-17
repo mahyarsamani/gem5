@@ -1141,6 +1141,7 @@ class Request : public Extensible<Request>
     }
 };
 
+// DEPRECATED
 class SparseID: public Extension<Request, SparseID>
 {
   public:
@@ -1155,14 +1156,11 @@ class SparseID: public Extension<Request, SparseID>
 class IndAccProd: public Extension<Request, IndAccProd>
 {
   private:
-    std::string _relationName;
-    int _relationInstanceId;
+    std::vector<std::tuple<std::string, int>> _indRelationIds;
 
   public:
-    IndAccProd(std::string relation_name, int instance_id):
-        Extension<Request, IndAccProd>(),
-        _relationName(relation_name),
-        _relationInstanceId(instance_id)
+    IndAccProd(std::vector<std::tuple<std::string, int>> relation_ids):
+        Extension<Request, IndAccProd>(), _indRelationIds(relation_ids)
     {}
 
     virtual std::unique_ptr<ExtensionBase> clone() const override
@@ -1170,30 +1168,69 @@ class IndAccProd: public Extension<Request, IndAccProd>
         return std::make_unique<IndAccProd>(*this);
     }
 
-    std::string relationName() const { return _relationName; }
-    int relationInstanceId() const { return _relationInstanceId; }
+    std::vector<std::tuple<std::string, int>> getIndRelationIds() const
+    {
+        return _indRelationIds;
+    }
 };
 
 class IndAccCons: public Extension<Request, IndAccCons>
 {
   private:
-    std::string _relationName;
-    int _relationInstanceId;
+    std::vector<std::tuple<std::string, int>> _indRelationIds;
 
   public:
-    IndAccCons(std::string relation_name, int instance_id):
-        Extension<Request, IndAccCons>(),
-        _relationName(relation_name),
-        _relationInstanceId(instance_id)
-    {}
+    IndAccCons(std::vector<std::tuple<std::string, int>> relation_ids):
+        Extension<Request, IndAccCons>(), _indRelationIds(relation_ids)
+    {
+        assert(relation_ids.size() == 1);
+    }
 
     virtual std::unique_ptr<ExtensionBase> clone() const override
     {
         return std::make_unique<IndAccCons>(*this);
     }
 
-    std::string relationName() const { return _relationName; }
-    int relationInstanceId() const { return _relationInstanceId; }
+    std::vector<std::tuple<std::string, int>> getIndRelationIds() const
+    {
+        return _indRelationIds;
+    }
+};
+
+
+class MemAccessName: public Extension<Request, MemAccessName>
+{
+  private:
+    std::string _name;
+
+  public:
+    MemAccessName(std::string name):
+        Extension<Request, MemAccessName>(), _name(name)
+    {}
+
+    virtual std::unique_ptr<ExtensionBase> clone() const override
+    {
+        return std::make_unique<MemAccessName>(*this);
+    }
+
+    std::string name() const { return _name; }
+};
+
+class IndirectHeader: public Extension<Request, IndirectHeader>
+{
+  private:
+    Addr _baseValueAddr;
+    Addr _valueElemSize;
+    Addr _aliasAddr;
+
+  public:
+    IndirectHeader(Addr base_value_addr, Addr value_elem_size, Addr alias_addr):
+        _baseValueAddr(base_value_addr), _valueElemSize(value_elem_size), _aliasAddr(alias_addr)
+    {}
+
+    Addr baseValueAddr() { return _baseValueAddr; }
+    Addr valueElemSize() { return _valueElemSize; }
+    Addr aliasAddr() { return _aliasAddr; }
 };
 
 } // namespace gem5

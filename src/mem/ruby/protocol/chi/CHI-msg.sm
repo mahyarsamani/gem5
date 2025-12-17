@@ -99,10 +99,10 @@ enumeration(CHIRequestType, desc="") {
 
   // MYSTUFF:
   ReadIndirect;
-  StoreIndirect;
-  ReadIndex;
-  ReadValueAddrNotif;
-  StoreValueAddrNotif;
+  WriteIndirect;
+
+  ReadValue;
+  WriteValue;
 
   null;
 }
@@ -139,14 +139,20 @@ structure(CHIRequestMsg, desc="", interface="Message") {
   bool functionalWrite(Packet *pkt) { return false; }
 
   // MYSTUFF:
-  WriteMask read_usefulness,     desc="Mask denoting bytes that were useful for read";
-  WriteMask write_usefulness,    desc="Mask denoting bytes that were useful for write";
+  Addr value_base,                default="0", desc="Base address for the value array being accessed";
+  Addr value_size,                default="0", desc="Size of each value element";
+  Addr alias,                    default="0", desct="Alias";
 
-  MachineID compactCacheID,      desc="MachineID of the compact cache for an indirect request";
-  MachineID valueCacheID,        desc="MachineID of the value cache for an indirect request";
-  MachineID indexCacheID,        desc="MachineID of the index cache for an indirect request";
+  MachineID compact_cache_id,      desc="MachineID of the compact cache for an indirect request";
+  MachineID value_cache_id,        desc="MachineID of the value cache for an indirect request";
+  MachineID index_cache_id,        desc="MachineID of the index cache for an indirect request";
 
   CHIRequestType secondType,     desc="Secondary type of request for an indirect request";
+
+  WriteMask read_usefulness,     desc="Mask denoting bytes that were useful for read.";
+  WriteMask write_usefulness,    desc="Mask denoting bytes that were useful for write.";
+
+  std::string access_name,       desc="Name of the access from high level program.";
   // DEPRECATED
   bool is_sparse;
   // FFUTSYM:

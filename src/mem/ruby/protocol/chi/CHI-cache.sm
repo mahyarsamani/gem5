@@ -226,14 +226,18 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   // NOTE: Maybe the index cache doesn't need to allocate for index either.
   // We can answer whether it is useful to cache or not cache index
   // by counting the number of useful bytes in index cache blocks.
-  bool alloc_for_ind_index;
-  bool alloc_for_ind_value;
-  bool alloc_for_compact;
+  bool gather_cache;
+  bool value_cache;
+  bool compact_cache;
 
   bool compact_with_sparsity;
 
   Cycles send_value_delay := 1;
   Cycles fwd_ind_acc_delay := 1;
+
+  bool profile_usefulness := "True";
+  bool notify_coalesced := "True";
+  // FFUTSYM
 {
 
   ////////////////////////////////////////////////////////////////////////////
@@ -353,8 +357,6 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     StashOnceShared,             desc="", in_trans="yes"; // Just discarding the hint
     StashOnceUnique,             desc="", in_trans="yes"; // Just discarding the hint
     // MYSTUFF:
-    ReadIndirect,                desc="", in_trans="yes";
-    EnqueueReadIndex,            desc="", in_trans="yes";
     FwdReadIndirect,             desc="", in_trans="yes";
 
     // DVM sequencer requests
@@ -599,8 +601,6 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     DataBlock DataBlk,  desc="data for the block";
     bool HWPrefetched,  default="false", desc="Set if this cache entry was prefetched";
     RequestorID requestor,  desc="First requestor to fill this block";
-    bool isFloatingPoint, default="false", desc="Whether the entry holds floating point data.";
-    bool isAtomic, default="false", desc="Whether the entry holds atomic data.";
   }
 
   // Directory entry
@@ -786,17 +786,21 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     bool wakeup_pending_tgr;
 
     // MYSTUFF:
-    WriteMask read_usefulness,  desc="Read usefulness bits for the respective cache line";
-    WriteMask write_usefulness, desc="Write usefulness bits for the respective cache line";
+    Addr value_base,                default="0", desc="Base address for the value array being accessed";
+    Addr value_size,                default="0", desc="Size of each value element";
+    Addr alias,                    default="0", desct="Alias";
 
-    MachineID compactCacheID;
-    MachineID valueCacheID;
-    MachineID indexCacheID;
+    MachineID compact_cache_id,      desc="MachineID of the compact cache for an indirect request";
+    MachineID value_cache_id,        desc="MachineID of the value cache for an indirect request";
+    MachineID index_cache_id,        desc="MachineID of the index cache for an indirect request";
 
-    CHIRequestType secondType;
-    bool no_fwd_data_upstream, desc="Set if we don't want to forward data upstream";
+    CHIRequestType secondType,     desc="Secondary type of request for an indirect request";
 
-    // NOTE: Deprecated but too lazy to remove.
+    WriteMask read_usefulness,     desc="Mask denoting bytes that were useful for read.";
+    WriteMask write_usefulness,    desc="Mask denoting bytes that were useful for write.";
+
+    std::string access_name,       desc="Name of the access from high level program.";
+    // DEPRECATED
     bool is_sparse;
     // FFUTSYM:
   }

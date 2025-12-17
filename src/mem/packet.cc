@@ -239,8 +239,12 @@ MemCmd::commandInfo[] =
     { {IsRequest}, InvalidCmd, "TlbiExtSync" },
     { {IsRead, IsIndirect, IsRequest, NeedsResponse}, ReadIndResp, "ReadIndReq"},
     { {IsRead, IsIndirect, IsResponse, HasData}, InvalidCmd, "ReadIndResp"},
-    { {IsRead, IsIndirect, IsRequest, NeedsResponse, HasData}, WriteIndResp, "WriteIndReq"},
-    { {IsRead, IsIndirect, IsResponse}, InvalidCmd, "WriteIndResp"},
+    { {IsWrite, IsIndirect, IsRequest, NeedsResponse, HasData}, WriteIndResp, "WriteIndReq"},
+    { {IsWrite, IsIndirect, IsResponse}, InvalidCmd, "WriteIndResp"},
+    { {IsRead, IsIndirect, IsCompact, IsRequest, NeedsResponse}, ReadIndCompResp, "ReadIndCompReq"},
+    { {IsRead, IsIndirect, IsCompact, IsResponse, HasData}, InvalidCmd, "ReadIndCompResp"},
+    { {IsWrite, IsIndirect, IsCompact, IsRequest, NeedsResponse, HasData}, WriteIndCompResp, "WriteIndCompReq"},
+    { {IsWrite, IsIndirect, IsCompact, IsResponse}, InvalidCmd, "WriteIndCompResp"}
 };
 
 AddrRange

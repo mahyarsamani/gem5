@@ -86,16 +86,19 @@ structure(DataBlock, external = "yes", desc="..."){
   bool isAlloc();
 
   // MYSTUFF:
-  void setIsPrefetched(bool);
-  bool getIsPrefetched();
+  void setIsPrefetched(bool, std::string, Addr);
+  bool getIsPrefetched(std::string, Addr);
 
-  void copyReadUsefulness(WriteMask);
-  void copyWriteUsefulness(WriteMask);
+  void copyReadUsefulness(WriteMask, std::string, Addr);
+  void copyWriteUsefulness(WriteMask, std::string, Addr);
 
-  void reduceUsefulness(WriteMask, WriteMask);
+  void reduceUsefulness(WriteMask, WriteMask, std::string, Addr);
 
-  WriteMask getReadUsefulness();
-  WriteMask getWriteUsefulness();
+  WriteMask getReadUsefulness(std::string, Addr);
+  WriteMask getWriteUsefulness(std::string, Addr);
+
+  void setAccessName(std::string name, bool can_override, std::string obj_name, Addr addr);
+  std::string getAccessName(std::string, Addr);
   // FFUTSYM:
 
   int numAtomicLogEntries();
@@ -214,6 +217,8 @@ enumeration(RubyRequestType, desc="...", default="RubyRequestType_NULL") {
   hasNoAddr,        desc="Request for timing purposes in VIPERSequencer hitCallback and processReadCallback but reads no address";
   LDIND,             desc="Indirect Load";
   STIND,            desc="Indirect Store";
+  LDINDCOMP,        desc="Indirect Load Compacted";
+  STINDCOMP,        desc="Indirect Store Compacted";
 }
 
 bool isWriteRequest(RubyRequestType type);

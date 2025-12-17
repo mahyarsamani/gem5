@@ -58,6 +58,8 @@ namespace ruby
 
 class WriteMask;
 
+class Sequencer;
+
 class DataBlock
 {
   public:
@@ -97,21 +99,24 @@ class DataBlock
     bool isAlloc() const { return m_alloc; }
     void realloc(int blk_size);
 
-    // MYSTUFF:
-    void setIsPrefetched(bool is_prefetched) { isPrefetched = is_prefetched; }
-    bool getIsPrefetched() const { return isPrefetched; }
+    // MYSTUFF
+    void setIsPrefetched(bool is_prefetched, std::string proxy_simobject_name, Addr addr) { isPrefetched = is_prefetched; }
+    bool getIsPrefetched(std::string proxy_simobject_name, Addr addr) const { return isPrefetched; }
 
-    void setReadUsefulness(int offset, int len);
-    void setWriteUsefulness(int offset, int len);
+    void setReadUsefulness(int offset, int len, std::string proxy_simobject_name, Addr addr);
+    void setWriteUsefulness(int offset, int len, std::string proxy_simobject_name, Addr addr);
 
-    void copyReadUsefulness(WriteMask read_usefulness);
-    void copyWriteUsefulness(WriteMask write_usefulness);
+    void copyReadUsefulness(WriteMask read_usefulness, std::string proxy_simobject_name, Addr addr);
+    void copyWriteUsefulness(WriteMask write_usefulness, std::string proxy_simobject_name, Addr addr);
 
-    void reduceUsefulness(const WriteMask read_usefulness, const WriteMask write_usefulness);
+    void reduceUsefulness(const WriteMask read_usefulness, const WriteMask write_usefulness, std::string proxy_simobject_name, Addr addr);
 
-    WriteMask getReadUsefulness() const;
-    WriteMask getWriteUsefulness() const;
-    // FFUTSYM:
+    WriteMask getReadUsefulness(std::string proxy_simobject_name, Addr addr) const;
+    WriteMask getWriteUsefulness(std::string proxy_simobject_name, Addr addr) const;
+
+    void setAccessName(std::string name, bool can_override, std::string proxy_simobject_name, Addr addr);
+    std::string getAccessName(std::string proxy_simobject_name, Addr addr) { return accessName; }
+    // FFUTSYM
 
   private:
     void alloc();
@@ -123,6 +128,8 @@ class DataBlock
     bool isPrefetched;
     WriteMask* readUsefulness;
     WriteMask* writeUsefulness;
+
+    std::string accessName;
     // FFUTSYM:
 
     // Tracks block changes when atomic ops are applied

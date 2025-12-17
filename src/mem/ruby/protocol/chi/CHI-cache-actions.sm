@@ -51,6 +51,10 @@ action(AllocateTBE_Request, desc="") {
         assert(in_msg.addr == address);
         assert(in_msg.is_local_pf == false);
         out_msg := in_msg;
+        // MYSTUFF
+        out_msg.type := manipulateType(in_msg);
+        out_msg.secondType := manipulateSecondType(in_msg);
+        // MYSTUFF
       }
     }
 
@@ -148,11 +152,6 @@ action(AllocateTBE_SeqRequest, desc="") {
       out_msg.is_remote_pf := false;
       out_msg.txnId := max_outstanding_transactions;
       out_msg.ns := !in_msg.isSecure;
-      // MYSTUFF:
-      out_msg.secondType := CHIRequestType:null;
-      out_msg.is_sparse := isSparse(in_msg.getRequestPtr());
-      // FFUTSYM:
-
       out_msg.atomic_op.clear();
       out_msg.atomic_op.orMask(in_msg.writeMask);
 
@@ -167,10 +166,8 @@ action(AllocateTBE_SeqRequest, desc="") {
         }
       } else if (in_msg.Type == RubyRequestType:LDIND) {
         out_msg.type := CHIRequestType:ReadIndirect;
-        out_msg.secondType := CHIRequestType:ReadIndirect;
       } else if (in_msg.Type == RubyRequestType:STIND) {
-        out_msg.type := CHIRequestType:StoreIndirect;
-        out_msg.secondType := CHIRequestType:StoreIndirect;
+        out_msg.type := CHIRequestType:WriteIndirect;
       } else if (in_msg.Type == RubyRequestType:ATOMIC_RETURN) {
         out_msg.type := CHIRequestType:AtomicLoad;
       } else if (in_msg.Type == RubyRequestType:ATOMIC_NO_RETURN){
@@ -178,6 +175,22 @@ action(AllocateTBE_SeqRequest, desc="") {
       } else {
         error("Invalid RubyRequestType");
       }
+
+      // MYSTUFF NOTE: If you compare these call to manipulateType
+      // and manipulateSecondType, you'll see that there in_msg is used
+      // and here out_msg is used. It's because that we want a message
+      // that is CHIRequestMsg. The right way to do it is to pass in_msg.
+      // However, we really don't have a choice here. It's ok only when
+      // translating sequencer
+      out_msg.type := manipulateType(out_msg);
+      out_msg.secondType := manipulateSecondType(out_msg);
+
+      out_msg.is_sparse := isSparse(in_msg.getRequestPtr());
+      out_msg.access_name := getMemAccessName(in_msg.getRequestPtr());
+
+      out_msg.alias := ((in_msg.PhysicalAddress - in_msg.LineAddress) / in_msg.Size) * 64;
+      DPRINTF(Usefulness, "Setting access name for addr %#lx to %s.\n", out_msg.addr, out_msg.access_name);
+      // MYSTUFF
     }
   }
   seqInPort.dequeue(clockEdge());
@@ -248,7 +261,10 @@ action(AllocateTBE_PfRequest, desc="Allocate TBE for prefetch request") {
       out_msg.is_local_pf := true;
       out_msg.is_remote_pf := false;
       out_msg.txnId := max_outstanding_transactions;
-
+      // MYSTUFF
+      out_msg.secondType := CHIRequestType:null;
+      out_msg.access_name := "prefetch";
+      // FFUTSYM
       if (in_msg.Type == RubyRequestType:LD) {
         out_msg.type := CHIRequestType:Load;
       } else if (in_msg.Type == RubyRequestType:ST) {
@@ -270,29 +286,24 @@ action(Initiate_Request, desc="") {
   bool was_retried := false;
   // MYSTUFF:
   bool reduce_usefulness := false;
+
   WriteMask read_usefulness;
   WriteMask write_usefulness;
-  MachineID compactCacheID;
-  MachineID valueCacheID;
-  MachineID indexCacheID;
   // FFUTSYM:
 
   peek(reqRdyPort, CHIRequestMsg) {
     set_tbe(allocateRequestTBE(address, in_msg));
     // only a msg that was already retried doesn't allow a retry
     was_retried := in_msg.allowRetry == false;
-    // MYSTUFF:
+    // MYSTUFF
     if (isConsideredEvict(in_msg.type)) {
         read_usefulness := in_msg.read_usefulness;
         write_usefulness := in_msg.write_usefulness;
         reduce_usefulness := true;
-        DPRINTF(IndirectLoad, "Got read usefulness with count %d from message.\n", read_usefulness.count());
-        DPRINTF(IndirectLoad, "Got write usefulness with count %d from message.\n", write_usefulness.count());
+        DPRINTF(Usefulness, "Got read usefulness for name %s with count %d from message.\n", in_msg.access_name, read_usefulness.count());
+        DPRINTF(Usefulness, "Got write usefulness for name %s with count %d from message.\n", in_msg.access_name, write_usefulness.count());
     }
-    compactCacheID := in_msg.compactCacheID;
-    valueCacheID := in_msg.valueCacheID;
-    indexCacheID := in_msg.indexCacheID;
-    // FFUTSYM:
+    // FFUTSYM
   }
   DirEntry dir_entry := getDirEntry(address);
   copyCacheAndDir(cache_entry, dir_entry, tbe, initial);
@@ -306,9 +317,9 @@ action(Initiate_Request, desc="") {
   bool dealloc_entry := needDeallocCacheEntry(tbe.reqType);
   assert((alloc_entry && dealloc_entry) == false);
 
-  // MYSTUFF:
+  // MYSTUFF
   if (reduce_usefulness && is_valid(cache_entry) && cache_entry.DataBlk.isAlloc()) {
-    // FUTUREME: You might ask yourself why not reduce into cache_entryc.dataBlk.*Usefulness?
+    // FUTUREME: You might ask yourself why not reduce into cache_entry.dataBlk.*Usefulness?
     // I made this implementation decision becuase, the sequencer on load/store hit call back
     // will update the data block in the tbe and then in Finalize_UpdateCacheFromTBE
     // the dataBlk from the tbe will be copied into the cache_entry. Becuase of this, I
@@ -320,37 +331,36 @@ action(Initiate_Request, desc="") {
     // future it will override the usefulness with zeroes. So, I make sure to store the correct
     // usefulness in the tbe regardless of whether it's explicit like in callbacks to sequencer
     // or implicit like in here. I think this is enough documentation for now. Let's hope
-    // this fixes all the zero usefulness I'm seeing at the L2 cache.
-    tbe.dataBlk.copyReadUsefulness(cache_entry.DataBlk.getReadUsefulness());
-    tbe.dataBlk.copyWriteUsefulness(cache_entry.DataBlk.getWriteUsefulness());
-    tbe.dataBlk.reduceUsefulness(read_usefulness, write_usefulness);
+    // this fixes all the zero usefulness I'm seeing at the L2 cache.\
+    DPRINTF(Usefulness, "Inside Initiate_Request. Before calling functions from DataBlock.\n");
+    tbe.dataBlk.copyReadUsefulness(cache_entry.DataBlk.getReadUsefulness(getName(), address), getName(), address);
+    tbe.dataBlk.copyWriteUsefulness(cache_entry.DataBlk.getWriteUsefulness(getName(), address), getName(), address);
+    tbe.dataBlk.reduceUsefulness(read_usefulness, write_usefulness, getName(), address);
+    DPRINTF(Usefulness, "Inside Initiate_Request. After calling functions from DataBlock.\n");
   }
-  tbe.compactCacheID := compactCacheID;
-  tbe.valueCacheID := valueCacheID;
-  tbe.indexCacheID := indexCacheID;
-  if (tbe.secondType == CHIRequestType:ReadIndirect) {
-    if (alloc_for_compact && isInvalid(tbe.compactCacheID)) {
+  if (isIndirect(tbe.reqType, tbe.secondType)) {
+    if (compact_cache && isInvalid(tbe.compact_cache_id)) {
         // NOTE: We should see the compact cache before we see the value cache.
         // In other words, the compact cache is upstream of the value cache.
         // They can be the same cache too.
-        assert(isInvalid(tbe.valueCacheID));
-        // NOTE: We are the value cache. Set the valueCacheID in
+        assert(isInvalid(tbe.value_cache_id));
+        // NOTE: We are the value cache. Set the value_cache_id in
         // tbe so that we can use it when we send a message out.
-        tbe.compactCacheID := machineID;
+        tbe.compact_cache_id := machineID;
+    }
+    if (gather_cache && isInvalid(tbe.index_cache_id)) {
+        // NOTE: We are the index cache. Set the index_cache_id in
+        // tbe so that we can use it when we send a message out.
+        tbe.index_cache_id := machineID;
     }
     // NOTE: Check to see if we have seen the value cache yet.
-    if (alloc_for_ind_value && isInvalid(tbe.valueCacheID)) {
-        // NOTE: We are the value cache. Set the valueCacheID in
+    if (value_cache && isInvalid(tbe.value_cache_id)) {
+        // NOTE: We are the value cache. Set the value_cache_id in
         // tbe so that we can use it when we send a message out.
-        tbe.valueCacheID := machineID;
-    }
-    if (alloc_for_ind_index && isInvalid(tbe.indexCacheID)) {
-        // NOTE: We are the index cache. Set the indexCacheID in
-        // tbe so that we can use it when we send a message out.
-        tbe.indexCacheID := machineID;
+        tbe.value_cache_id := machineID;
     }
   }
-  // FFUTSYM:
+  // FFUTSYM
 
   // always drops any data when not caching it or when this transaction
   // requires deallocation
@@ -475,14 +485,21 @@ action(RestoreFromHazard, desc="") {
 action(Initiate_Replacement, desc="") {
   assert(is_invalid(tbe));
 
-  WriteMask read_usefulness := cache_entry.DataBlk.getReadUsefulness();
-  WriteMask write_usefulness := cache_entry.DataBlk.getWriteUsefulness();
-  bool is_prefetched := cache_entry.DataBlk.getIsPrefetched();
-  cache.profileUsefulness(address, is_prefetched, "any", read_usefulness, write_usefulness);
+  // MYSTUFF
+  DPRINTF(Usefulness, "Inside Initiate_Replacement. Before calling functions from DataBlock.\n");
+  WriteMask read_usefulness := cache_entry.DataBlk.getReadUsefulness(getName(), address);
+  WriteMask write_usefulness := cache_entry.DataBlk.getWriteUsefulness(getName(), address);
+  std::string access_name := cache_entry.DataBlk.getAccessName(getName(), address);
+  bool is_prefetched := cache_entry.DataBlk.getIsPrefetched(getName(), address);
+  if (profile_usefulness) {
+    DPRINTF(Usefulness, "Sampling usefulness for address %#lx with access_name %s.\n", address, access_name);
+    cache.profileUsefulness(address, is_prefetched, access_name, read_usefulness, write_usefulness);
+  }
+  DPRINTF(Usefulness, "Inside Initiate_Replacement. After calling functions from DataBlock.\n");
+  // FFUTSYM
 
   State initial := getState(tbe, cache_entry, address);
 
-  DPRINTF(IndirectLoad, "Initiate_Replacement action, address: 0x%lx.\n", address);
   if (unify_repl_TBEs) {
     peek(replTriggerInPort, ReplacementMsg) {
       set_tbe(allocateReplacementTBEOnSlot(address, in_msg.slot));
@@ -492,9 +509,12 @@ action(Initiate_Replacement, desc="") {
     set_tbe(allocateReplacementTBE(address));
     DPRINTF(RubySlicc, "Allocated replacement TBE on new slot %d\n", tbe.storSlot);
   }
+  // MYSTUFF
   tbe.read_usefulness := read_usefulness;
   tbe.write_usefulness := write_usefulness;
+  tbe.access_name := access_name;
   tbe.is_sparse := cache_entry.isSparse();
+  // FFUTSYM
 
   copyCacheAndDir(cache_entry, getDirEntry(address), tbe, initial);
 
@@ -3469,9 +3489,14 @@ action(Finalize_UpdateCacheFromTBE, desc="") {
     assert(tbe.dataValid);
     assert(is_valid(cache_entry));
     cache_entry.DataBlk := tbe.dataBlk;
-    cache_entry.DataBlk.copyReadUsefulness(tbe.dataBlk.getReadUsefulness());
-    cache_entry.DataBlk.copyWriteUsefulness(tbe.dataBlk.getWriteUsefulness());
-    cache_entry.DataBlk.setIsPrefetched(tbe.is_local_pf || tbe.is_remote_pf);
+    DPRINTF(Usefulness, "Inside Finalize_UpdateCacheFromTBE. Before calling functions from DataBlock.\n");
+    // cache_entry.DataBlk.copyReadUsefulness(tbe.dataBlk.getReadUsefulness(getName(), address), getName(), address);
+    // cache_entry.DataBlk.copyWriteUsefulness(tbe.dataBlk.getWriteUsefulness(getName(), address), getName(), address);
+    cache_entry.DataBlk.reduceUsefulness(tbe.dataBlk.getReadUsefulness(getName(), address), tbe.dataBlk.getWriteUsefulness(getName(), address), getName(), address);
+    cache_entry.DataBlk.setIsPrefetched(tbe.is_local_pf || tbe.is_remote_pf, getName(), address);
+    cache_entry.DataBlk.setAccessName(tbe.access_name, canOverride(cache_entry.DataBlk.getAccessName(getName(), address), address), getName(), address);
+    DPRINTF(Usefulness, "Inside Finalize_UpdateCacheFromTBE. After calling functions from DataBlock.\n");
+
     DPRINTF(RubySlicc, "Cached data %s pfb %s\n", tbe.dataBlk, cache_entry.HWPrefetched);
   } else {
     // make sure only deallocate the cache entry if data is invalid
@@ -3479,7 +3504,7 @@ action(Finalize_UpdateCacheFromTBE, desc="") {
     if (is_valid(cache_entry)) {
       // MYSTUFF:
     //   cache.deallocate(address);
-        deallocate(address);
+       deallocate(address);
       // FFUTSYM:
       unset_cache_entry();
     }
@@ -3549,6 +3574,9 @@ action(CheckCacheFill, desc="") {
     // MYSTUFF:
     // set_cache_entry(cache.allocate(address, new CacheEntry));
     set_cache_entry(allocate(address, new CacheEntry, is_sparse));
+    DPRINTF(Usefulness, "Inside CheckCacheFill. Before calling functions from DataBlock.\n");
+    cache_entry.DataBlk.setAccessName("reset", true, getName(), address);
+    DPRINTF(Usefulness, "Inside CheckCacheFill. After calling functions from DataBlock.\n");
     // FFUTSYM:
     tbe.actions.pushFront(Event:DataArrayWriteOnFill);
     tbe.actions.pushFront(Event:FillPipe);
@@ -3768,14 +3796,24 @@ action(Callback_ExpressPrefetchHit, desc="") {
 // NOTE: should create a separate trigger for this callback ?
 action(Callback_Miss, desc="") {
   assert(is_valid(tbe));
-  if (tbe.dataValid && tbe.is_local_pf) {
+  // MYSTUFF
+  if (isIndirect(tbe.reqType, tbe.secondType)) {
+    if (tbe.dataValid && (tbe.reqType == CHIRequestType:Load)) {
+        // NOTE: Could be index load or value load
+        DPRINTF(IndirectAccess, "Finished servicing a miss for a load to addr %#lx.\n", tbe.addr);
+        if (tbe.secondType == CHIRequestType:ReadValue) {
+            DPRINTF(IndirectAccess, "Load to addr %#lx was to a value.\n", tbe.addr);
+            sequencer.readCallback(tbe.alias, tbe.dataBlk, true);
+        }
+    }
+//   if (tbe.dataValid && tbe.is_local_pf) {
+  // FFUTSYM
+  } else if (tbe.dataValid && tbe.is_local_pf) {
     assert(use_prefetcher);
     pfProxy.completePrefetch(tbe.addr);
-
   } else if (tbe.dataValid && (tbe.reqType == CHIRequestType:Load)) {
-    DPRINTF(RubySlicc, "Read data %s\n", tbe.dataBlk);
-    sequencer.readCallback(tbe.addr, tbe.dataBlk, true);
-
+        DPRINTF(RubySlicc, "Read data %s\n", tbe.dataBlk);
+        sequencer.readCallback(tbe.addr, tbe.dataBlk, true);
   } else if (tbe.dataValid && ((tbe.reqType == CHIRequestType:Store) ||
                                (tbe.reqType == CHIRequestType:StoreLine))) {
     DPRINTF(RubySlicc, "Write before %s\n", tbe.dataBlk);
@@ -4223,31 +4261,7 @@ action(Profile_OutgoingEnd_DVM, desc="") {
   outgoingTransactionEnd(address, tbe.rcvdRetryAck, false);
 }
 
-// MYSTUFF:
-action(Initiate_ReadIndirectMiss, desc="Start ReadIndex or Fwd ReadIndirect") {
-    assert(is_valid(tbe));
-    assert(tbe.reqType == CHIRequestType:ReadIndirect);
-    // NOTE: within this scope (Initiate_ReadIndirectMiss) tbe.doCacheFill
-    // is true only if alloc_for_ind_index is true.
-    if (tbe.doCacheFill) {
-        tbe.actions.push(Event:EnqueueReadIndex);
-    } else {
-        tbe.actions.push(Event:FwdReadIndirect);
-    }
-}
-
-action(Enqueue_ReadIndex, desc="Read Index") {
-    // NOTE: By this time we should have seen the value cache.
-    enqueue(reqRdyOutPort, CHIRequestMsg, request_latency) {
-        prepareRequest(tbe, CHIRequestType:ReadIndex, out_msg);
-
-        out_msg.Destination.clear();
-        out_msg.Destination.add(machineID);
-
-        allowRequestRetry(tbe, out_msg);
-    }
-}
-
+// // MYSTUFF
 action(delayFwdIndirect, desc="Model the delay to fwd ReadIndirect") {
     assert(is_valid(tbe));
     tbe.delayNextAction := curTick() + cyclesToTicks(fwd_ind_acc_delay);
@@ -4255,7 +4269,7 @@ action(delayFwdIndirect, desc="Model the delay to fwd ReadIndirect") {
 
 action(Fwd_ReadIndirect, desc="Forward ReadIndirect") {
   // NOTE: Does it make sense to add the following assert?
-  // What if we don't want to cache them at all? Or what if we want to cache
+  // What if we don't want to cache them at all? Or wsehat if we want to cache
   // them at the memory controller.
   // assert(is_HN == false);
   assert(tbe.dataValid == false);
@@ -4270,81 +4284,55 @@ action(Fwd_ReadIndirect, desc="Forward ReadIndirect") {
   }
 }
 
-action(Enqueue_AccessValue, desc="Notify Value Cache") {
-    // NOTE: This is called when we are the value cache.
-    assert(is_valid(tbe));
+action(Initiate_Dependent_Requests, desc="Start accesses that are dependent on this access")
+{
+    if (gather_cache && tbe.secondType == CHIRequestType:ReadIndirect) {
+        enqueue(reqOutPort, CHIRequestMsg, request_latency) {
+            indirectDependentBoilerPlate(out_msg);
+            Addr next_acc_addr := getNextAddr(tbe.seqReq);
+            Addr next_addr := makeLineAddress(next_acc_addr);
+            out_msg.addr := next_addr;
+            out_msg.accAddr := next_acc_addr;
+            out_msg.accSize := getNextSize(tbe.seqReq);
+            out_msg.type := CHIRequestType:ReadValue;
+            out_msg.compact_cache_id := tbe.compact_cache_id;
+            out_msg.value_cache_id := tbe.value_cache_id;
+            out_msg.index_cache_id := tbe.index_cache_id;
 
-    // TODO: This is for now only compatible with SpatterAccess.
-    // We should use the value stored in the dataBlk to calculate
-    // the next address. FIXME: No_Spatter_Access
-    enqueue(reqOutPort, CHIRequestMsg, request_latency) {
-        out_msg.addr := makeLineAddress(getNextAddr(tbe.seqReq));
-        out_msg.accAddr := getNextAddr(tbe.seqReq);
-        out_msg.accSize := getNextSize(tbe.seqReq);
+            if (isInvalid(tbe.compact_cache_id)) {
+                DPRINTF(IndirectAccess, "Compact cache id not set yet. Sending ReadValue downstream.\n");
+                out_msg.Destination.add(mapAddressToDownstreamMachine(next_addr));
+            } else {
+                DPRINTF(IndirectAccess, "Compact cache id set. Sending ReadValue upstream.\n");
+                out_msg.Destination.add(tbe.compact_cache_id);
+            }
+        }
+        DPRINTF(IndirectAccess, "Need subsequent access to addr: %#lx.\n", getNextAddr(tbe.seqReq));
+    }
 
-        out_msg.type := CHIRequestType:ReadValueAddrNotif;
+    if (gather_cache && tbe.secondType == CHIRequestType:WriteIndirect) {
+        enqueue(reqOutPort, CHIRequestMsg, request_latency) {
+            indirectDependentBoilerPlate(out_msg);
+            Addr next_acc_addr := getNextAddr(tbe.seqReq);
+            Addr next_addr := makeLineAddress(next_acc_addr);
+            out_msg.addr := next_addr;
+            out_msg.accAddr := next_acc_addr;
+            out_msg.accSize := getNextSize(tbe.seqReq);
+            out_msg.type := CHIRequestType:WriteValue;
+            out_msg.compact_cache_id := tbe.compact_cache_id;
+            out_msg.value_cache_id := tbe.value_cache_id;
+            out_msg.index_cache_id := tbe.index_cache_id;
 
-        out_msg.Destination.clear();
-        out_msg.Destination.add(tbe.valueCacheID);
-
-        allowRequestRetry(tbe, out_msg);
+            if (isInvalid(tbe.compact_cache_id)) {
+                DPRINTF(IndirectAccess, "Compact cache id not set yet. Sending ReadValue downstream.\n");
+                out_msg.Destination.add(mapAddressToDownstreamMachine(next_addr));
+            } else {
+                DPRINTF(IndirectAccess, "Compact cache id set. Sending ReadValue upstream.\n");
+                out_msg.Destination.add(tbe.compact_cache_id);
+            }
+        }
+        DPRINTF(IndirectAccess, "Need subsequent access to addr: %#lx.\n", getNextAddr(tbe.seqReq));
     }
 }
 
-// action(Initiate_ReadValue_Miss, desc="") {
-//   tbe.actions.push(Event:ReadMissPipe);
-//   if (is_HN && tbe.use_DMT) {
-//     tbe.requestorToBeExclusiveOwner := true;
-//     tbe.dataMaybeDirtyUpstream := true; // SNF always replies with CompData_UC
-//     if (tbe.valueCacheID != machineID) {
-//         if (enable_DMT_early_dealloc) {
-//         tbe.actions.push(Event:SendRespSepData);
-//         }
-//         tbe.actions.push(Event:WaitCompAck);
-//         tbe.actions.pushNB(Event:SendReadNoSnpDMT);
-//     }
-//   } else if (is_HN) {
-//     tbe.actions.push(Event:SendReadNoSnp);
-//     if (tbe.valueCacheID != machineID) {
-//         tbe.actions.push(Event:WaitCompAck);
-//         tbe.actions.pushNB(Event:SendCompData);
-//     }
-//   } else {
-//     tbe.actions.push(Event:SendReadValue);
-//     if (tbe.valueCacheID != machineID) {
-//         tbe.actions.push(Event:WaitCompAck);
-//         tbe.actions.pushNB(Event:SendCompData);
-//     }
-//   }
-//   tbe.actions.push(Event:CheckCacheFill);
-//   tbe.actions.push(Event:TagArrayWrite);
-
-//   // NOTE: We need to add something like this here.
-//   // if (tbe.valueCacheID == machineID && isValid(tbe.compactCacheID)) {
-//   //   tbe.actions.push(Event:EnqueueCompact);
-//   // }
-// }
-
-// action(Send_ReadValue, desc="") {
-//   assert(is_HN == false);
-//   assert(tbe.dataValid == false);
-
-//   clearExpectedReqResp(tbe);
-//   tbe.expected_req_resp.addExpectedDataType(CHIDataType:DataSepResp_UC);
-//   tbe.expected_req_resp.addExpectedDataType(CHIDataType:CompData_UC);
-//   tbe.expected_req_resp.addExpectedDataType(CHIDataType:CompData_UD_PD);
-//   tbe.expected_req_resp.addExpectedDataType(CHIDataType:CompData_SC);
-//   // NOTE: the first CompData received counts as RespSepData
-//   tbe.expected_req_resp.addExpectedRespType(CHIResponseType:RespSepData);
-//   tbe.expected_req_resp.setExpectedCount(2);
-//   tbe.dataBlkValid.clear();
-
-//   enqueue(reqOutPort, CHIRequestMsg, request_latency) {
-//     prepareRequest(tbe, CHIRequestType:ReadValue, out_msg);
-//     out_msg.Destination.add(mapAddressToDownstreamMachine(tbe.addr));
-//     out_msg.dataToFwdRequestor := false;
-//     allowRequestRetry(tbe, out_msg);
-//   }
-// }
-
-// FFUTSYM:
+// FFUTSYM

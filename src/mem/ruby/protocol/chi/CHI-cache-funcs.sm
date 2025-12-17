@@ -198,7 +198,7 @@ void setAccessPermission(CacheEntry cache_entry, Addr addr, State state) {
   }
 }
 
-
+// MYSTUFF
 bool isConsideredEvict(CHIRequestType type)
 {
   if (type == CHIRequestType:Evict ||
@@ -212,7 +212,7 @@ bool isConsideredEvict(CHIRequestType type)
   }
   return false;
 }
-
+// FFUTSYM
 
 void functionalRead(Addr addr, Packet *pkt, WriteMask &mask) {
   // read if bitmask has bytes not in mask or if data is dirty
@@ -375,7 +375,7 @@ void notifyCoalesced(Addr addr, RubyRequestType type, RequestPtr req,
   } else {
     cache.profileDemandHit();
   }
-  if (use_prefetcher) {
+  if (use_prefetcher && notify_coalesced) {
     bool is_read := (type == RubyRequestType:LD) ||
                     (type == RubyRequestType:Load_Linked) ||
                     (type == RubyRequestType:IFETCH);
@@ -437,16 +437,6 @@ void initializeTBE(TBE tbe, Addr addr, int storSlot) {
   tbe.is_stale := false;
 }
 
-CHIRequestType msgTypeToTBEType(CHIRequestType type)
-{
-    if (type == CHIRequestType:ReadValueAddrNotif) {
-        return CHIRequestType:Load;
-    } else if (type == CHIRequestType:StoreValueAddrNotif) {
-        return CHIRequestType:Store;
-    } else {
-        return type;
-    }
-}
 
 TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes" {
   // We must have reserved resources for this allocation
@@ -475,9 +465,9 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   tbe.accSize := in_msg.accSize;
   tbe.requestor := in_msg.requestor;
 // MYSTUFF
-//   tbe.reqType := in_msg.type;
-  tbe.reqType := msgTypeToTBEType(in_msg.type);
+  tbe.reqType := in_msg.type;
   tbe.secondType := in_msg.secondType;
+//   tbe.access_name := in_msg.access_name;
 // FFUTSYM
 
   tbe.isSeqReqValid := in_msg.isSeqReqValid;
@@ -494,8 +484,21 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   tbe.use_DCT := false;
 
   tbe.hasUseTimeout := false;
-  tbe.is_sparse := in_msg.is_sparse;
 
+  // MYSTUFF
+  tbe.value_base := in_msg.value_base;
+  tbe.value_size := in_msg.value_size;
+  tbe.alias := in_msg.alias;
+
+  tbe.compact_cache_id := in_msg.compact_cache_id;
+  tbe.value_cache_id := in_msg.value_cache_id;
+  tbe.index_cache_id := in_msg.index_cache_id;
+
+  DPRINTF(Usefulness, "Setting access_name for tbe for addr: %#lx from %s to %s.\n", addr, tbe.access_name, in_msg.access_name);
+  tbe.access_name := in_msg.access_name;
+
+  tbe.is_sparse := in_msg.is_sparse;
+  // FFUTSYM
   return tbe;
 }
 
@@ -706,19 +709,24 @@ void prepareRequest(TBE tbe, CHIRequestType type, CHIRequestMsg & out_msg) {
   out_msg.txnId := tbe.txnId;
   out_msg.is_sparse := tbe.is_sparse;
 
-  // MYSTUFF:
+  // MYSTUFF
   out_msg.read_usefulness := tbe.read_usefulness;
   out_msg.write_usefulness := tbe.write_usefulness;
+  out_msg.access_name := tbe.access_name;
   if (isConsideredEvict(out_msg.type)) {
-    DPRINTF(IndirectLoad, "Sending read usefulness mask with count %d with message.\n", out_msg.read_usefulness.count());
-    DPRINTF(IndirectLoad, "Sending write usefulness mask with count %d with message.\n", out_msg.write_usefulness.count());
+    DPRINTF(Usefulness, "Sending read usefulness mask for name %s with count %d with evict message.\n", out_msg.access_name, out_msg.read_usefulness.count());
+    DPRINTF(Usefulness, "Sending write usefulness mask for name %s with count %d with evict message.\n", out_msg.access_name, out_msg.write_usefulness.count());
   }
+  out_msg.value_base := tbe.value_base;
+  out_msg.value_size := tbe.value_size;
+  out_msg.alias := tbe.alias;
 
-  out_msg.compactCacheID := tbe.compactCacheID;
-  out_msg.valueCacheID := tbe.valueCacheID;
-  out_msg.indexCacheID := tbe.indexCacheID;
+  out_msg.compact_cache_id := tbe.compact_cache_id;
+  out_msg.value_cache_id := tbe.value_cache_id;
+  out_msg.index_cache_id := tbe.index_cache_id;
+
   out_msg.secondType := tbe.secondType;
-  // FFUTSYM:
+  // FFUTSYM
 
   assert(tbe.txnId != static_cast(Addr, "value", -1));
 }
@@ -764,6 +772,20 @@ void prepareRequestRetry(TBE tbe, CHIRequestMsg & out_msg) {
   out_msg.is_remote_pf := tbe.is_local_pf || tbe.is_remote_pf;
   out_msg.atomic_op.clear();
   out_msg.atomic_op.orMask(tbe.atomic_op);
+
+  // MYSTUFF:
+  if (isConsideredEvict(out_msg.type)) {
+    DPRINTF(Usefulness, "Sending read usefulness mask for name %s with count %d with evict message.\n", out_msg.access_name, out_msg.read_usefulness.count());
+    DPRINTF(Usefulness, "Sending write usefulness mask for name %s with count %d with evict message.\n", out_msg.access_name, out_msg.write_usefulness.count());
+  }
+  out_msg.read_usefulness := tbe.read_usefulness;
+  out_msg.write_usefulness := tbe.write_usefulness;
+  out_msg.access_name := tbe.access_name;
+  out_msg.compact_cache_id := tbe.compact_cache_id;
+  out_msg.value_cache_id := tbe.value_cache_id;
+  out_msg.index_cache_id := tbe.index_cache_id;
+  out_msg.secondType := tbe.secondType;
+  // FFUTSYM:
 }
 
 void prepareRequestRetryDVM(TBE tbe, CHIRequestMsg & out_msg) {
@@ -849,10 +871,13 @@ bool needCacheEntry(CHIRequestType req_type, CHIRequestType second_type,
   // - if using DMT; the request is a Read*; and dir entry is invalid
   // oterwise follow config params
   if (second_type != CHIRequestType:null) {
+    // MYSTUFF
     // TODO: Need to figure out what we need to do later.
-    return  (alloc_for_ind_index && (second_type == CHIRequestType:ReadIndex)) ||
-            (alloc_for_ind_value && (second_type == CHIRequestType:ReadValueAddrNotif)) ||
-            (alloc_for_ind_value && (second_type == CHIRequestType:StoreValueAddrNotif));
+    return  (gather_cache && (second_type == CHIRequestType:ReadIndirect)) ||
+            (gather_cache && (second_type == CHIRequestType:WriteIndirect)) ||
+            (value_cache && (second_type == CHIRequestType:ReadValue)) ||
+            (value_cache && (second_type == CHIRequestType:WriteValue));
+    // FFUTSYM
   } else if (is_valid(cache_entry) ||
       (enable_DMT && is_invalid(dir_entry) &&
        ((req_type == CHIRequestType:ReadShared) ||
@@ -877,8 +902,7 @@ bool needCacheEntry(CHIRequestType req_type, CHIRequestType second_type,
                                  (req_type == CHIRequestType:AtomicStore))) ||
            (alloc_on_seq_line_write && (req_type == CHIRequestType:StoreLine)) ||
            (alloc_on_atomic && ((req_type == CHIRequestType:AtomicReturn) ||
-                                 (req_type == CHIRequestType:AtomicNoReturn))) ||
-            (alloc_for_ind_index && (req_type == CHIRequestType:ReadIndirect));
+                                 (req_type == CHIRequestType:AtomicNoReturn)));
   }
 }
 
@@ -1358,13 +1382,7 @@ Event reqToEvent(CHIRequestType type, bool is_prefetch) {
       return Event:AtomicNoReturn;
     }
   } else if (type == CHIRequestType:ReadIndirect) {
-    return Event:ReadIndirect;
-  } else if (type == CHIRequestType:ReadIndex) {
-    return Event:Load;
-  } else if (type == CHIRequestType:ReadValueAddrNotif) {
-    return Event:Load;
-  } else if (type == CHIRequestType:StoreValueAddrNotif) {
-    return Event:Store;
+    return Event:FwdReadIndirect;
   } else {
     error("Invalid CHIRequestType");
   }
@@ -1689,12 +1707,13 @@ void replicateTBE(TBE src, TBE dst) {
 
   dst.read_usefulness := src.read_usefulness;
   dst.write_usefulness := src.write_usefulness;
+  dst.access_name := src.access_name;
 
-  dst.compactCacheID := src.compactCacheID;
-  dst.valueCacheID := src.valueCacheID;
-  dst.indexCacheID := src.indexCacheID;
+  dst.compact_cache_id := src.compact_cache_id;
+  dst.value_cache_id := src.value_cache_id;
+  dst.index_cache_id := src.index_cache_id;
   dst.secondType := src.secondType;
-  dst.no_fwd_data_upstream  := src.no_fwd_data_upstream;
+
   dst.is_sparse := src.is_sparse;
 }
 
@@ -1729,4 +1748,73 @@ void deallocate(Addr address) {
     cache.deallocate(address);
 }
 
-// FFUTSYM:
+CHIRequestType manipulateType(CHIRequestMsg msg)
+{
+    if (gather_cache && msg.type == CHIRequestType:ReadIndirect) {
+        return CHIRequestType:Load;
+    } else if (gather_cache && msg.type == CHIRequestType:WriteIndirect) {
+        return CHIRequestType:Load;
+    } else if (compact_cache && msg.type == CHIRequestType:ReadValue) {
+        return CHIRequestType:Load;
+    } else if (compact_cache && msg.type == CHIRequestType:WriteValue) {
+        return CHIRequestType:Store;
+    } else {
+        return msg.type;
+    }
+}
+
+CHIRequestType manipulateSecondType(CHIRequestMsg msg)
+{
+    if (gather_cache && msg.type == CHIRequestType:ReadIndirect) {
+        return CHIRequestType:ReadIndirect;
+    } else if (gather_cache && msg.type == CHIRequestType:WriteIndirect) {
+        return CHIRequestType:WriteIndirect;
+    } else if (compact_cache && msg.type == CHIRequestType:ReadValue) {
+        return CHIRequestType:ReadValue;
+    } else if (compact_cache && msg.type == CHIRequestType:WriteValue) {
+        return CHIRequestType:WriteValue;
+    } else {
+        return CHIRequestType:null;
+    }
+}
+
+void indirectDependentBoilerPlate(CHIRequestMsg &out_msg)
+{
+    out_msg.requestor := machineID;
+
+    out_msg.dataToFwdRequestor := false;
+    // NOTE: I don't know what to set for this right now. Might be able to set
+    // this to true later if we have compaction. I am starting to believe that
+    // I really need a HOVHelper SimObject at this point.
+    // out_msg.fwdRequestor :=
+
+    out_msg.allowRetry := true;
+    out_msg.isSeqReqValid := false;
+    // NOTE: Defaults to nullptr.
+    // out_msg.seqReq := null;
+    out_msg.is_local_pf := false;
+    out_msg.is_remote_pf := false;
+
+    // NOTE: Maybe able to use this for access id;
+    // NOTE: Defaults to false;
+    // out_msg.usesTxnId := false;
+    // NOTE: Defaults to 0;
+    out_msg.txnId := max_outstanding_transactions;
+
+    out_msg.is_sparse := false;
+
+    out_msg.secondType := CHIRequestType:null;
+}
+
+bool isIndirect(CHIRequestType type, CHIRequestType second_type) {
+    return ((type == CHIRequestType:ReadIndirect) ||
+            (type == CHIRequestType:WriteIndirect) ||
+            (type == CHIRequestType:ReadValue) ||
+            (type == CHIRequestType:WriteValue)
+    ) || ((second_type == CHIRequestType:ReadIndirect) ||
+        (second_type == CHIRequestType:WriteIndirect) ||
+        (second_type == CHIRequestType:ReadValue) ||
+        (second_type == CHIRequestType:WriteValue)
+    );
+}
+// FFUTSYM

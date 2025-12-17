@@ -154,7 +154,16 @@ DebugFlag('LLSC')
 DebugFlag('MemCtrl')
 DebugFlag('MMU')
 DebugFlag('MemoryAccess')
+# MYSTUFF
 DebugFlag('MSDebug')
+DebugFlag('IndirectIndex')
+DebugFlag('IndirectRead')
+DebugFlag('IndirectWrite')
+DebugFlag('IndirectAccess')
+DebugFlag('Usefulness')
+DebugFlag('LatencyBreakdown')
+
+# FFUTSYM
 DebugFlag('PacketQueue')
 DebugFlag("PortTrace")
 DebugFlag('ResponsePort')

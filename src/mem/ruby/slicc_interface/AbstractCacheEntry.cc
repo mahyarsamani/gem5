@@ -41,7 +41,6 @@
 #include "mem/ruby/slicc_interface/AbstractCacheEntry.hh"
 
 #include "base/trace.hh"
-#include "debug/IndirectLoad.hh"
 #include "debug/RubyCache.hh"
 
 namespace gem5

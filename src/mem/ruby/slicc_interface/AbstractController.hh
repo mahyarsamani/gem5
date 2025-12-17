@@ -45,6 +45,7 @@
 #include <iostream>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "base/addr_range.hh"
 #include "base/addr_range_map.hh"
@@ -83,6 +84,18 @@ class RejectException: public std::exception
 
 class AbstractController : public ClockedObject, public Consumer
 {
+  protected:
+    // MYSTUFF
+    // NOTE: Pointer to all sequencers that are upstream to this controller.
+    // The list should be of length 1 for a private cache controller, and
+    // of length >= 1 for a shared cache controller.
+    std::vector<Sequencer*> upstreamSequencers;
+
+    bool canOverride(std::string label, Addr address);
+
+    std::string getName() { return name(); }
+  public:
+    // FFUTSYM
   public:
     PARAMS(RubyController);
     AbstractController(const Params &p);

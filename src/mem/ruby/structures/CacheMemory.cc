@@ -45,12 +45,12 @@
 #include "base/intmath.hh"
 #include "base/logging.hh"
 #include "debug/HtmMem.hh"
-#include "debug/IndirectLoad.hh"
-#include "debug/MSDebug.hh"
+// #include "debug/MSDebug.hh"
 #include "debug/RubyCache.hh"
 #include "debug/RubyCacheTrace.hh"
 #include "debug/RubyResourceStalls.hh"
 #include "debug/RubyStats.hh"
+#include "debug/Usefulness.hh"
 #include "mem/cache/replacement_policies/weighted_lru_rp.hh"
 #include "mem/ruby/protocol/AccessPermission.hh"
 #include "mem/ruby/system/RubySystem.hh"
@@ -363,7 +363,7 @@ CacheMemory::allocateWithSparsityInMind(Addr address, AbstractCacheEntry* entry,
     assert(cacheAvailWithSparsityInMind(address, is_sparse));
 
     int access_size = is_sparse ? m_sparse_access_size : m_block_size;
-    DPRINTF(MSDebug, "Allocating address: %#x with size %d.\n", address, access_size);
+    // DPRINTF(MSDebug, "Allocating address: %#x with size %d.\n", address, access_size);
 
     entry->initBlockSize(m_block_size);
     entry->setRubySystem(m_ruby_system);
@@ -402,7 +402,7 @@ CacheMemory::allocateWithSparsityInMind(Addr address, AbstractCacheEntry* entry,
     }
     // MYSTUFF: This block is colmpletely me.
     if (!allocated) {
-        DPRINTF(MSDebug, "%s: Need to extend the associativity of the cache.\n", __func__);
+        // DPRINTF(MSDebug, "%s: Need to extend the associativity of the cache.\n", __func__);
         set.push_back(entry);
         entry->m_Address = address;
         entry->m_Permission = AccessPermission_Invalid;
@@ -691,15 +691,6 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
       ADD_STAT(m_prefetch_accesses, "Number of cache prefetch accesses",
                m_prefetch_hits + m_prefetch_misses),
       ADD_STAT(m_accessModeType, ""),
-      ADD_STAT(usefulBytes, "Number of useful bytes per block."),
-      ADD_STAT(readUsefulBytes, "Number of useful bytes per block for read."),
-      ADD_STAT(writeUsefulBytes, "Number of useful bytes per block for write."),
-      ADD_STAT(indexUsefulBytes, "Number of useful bytes per block for index."),
-      ADD_STAT(indexReadUsefulBytes, "Number of useful bytes per block for read for index."),
-      ADD_STAT(indexWriteUsefulBytes, "Number of useful bytes per block for write for index."),
-      ADD_STAT(valueUsefulBytes, "Number of useful bytes per block for value."),
-      ADD_STAT(valueReadUsefulBytes, "Number of useful bytes per block for read for value."),
-      ADD_STAT(valueWriteUsefulBytes, "Number of useful bytes per block for write for value."),
       ADD_STAT(uselessBlocksNotExplainedbyPrefetch,
                "Number of useless blocks not explained by prefetch")
 {
@@ -768,44 +759,6 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
     }
 }
 
-void
-CacheMemory::regStats()
-{
-    cacheMemoryStats.usefulBytes
-        .init(m_block_size + 1)
-        .flags(statistics::nozero | statistics::nonan);
-
-    cacheMemoryStats.readUsefulBytes
-        .init(m_block_size + 1)
-        .flags(statistics::nozero | statistics::nonan);
-    cacheMemoryStats.writeUsefulBytes
-        .init(m_block_size + 1)
-        .flags(statistics::nozero | statistics::nonan);
-
-    cacheMemoryStats.indexUsefulBytes
-        .init(m_block_size + 1)
-        .flags(statistics::nozero | statistics::nonan);
-
-    cacheMemoryStats.indexReadUsefulBytes
-        .init(m_block_size + 1)
-        .flags(statistics::nozero | statistics::nonan);
-
-    cacheMemoryStats.indexWriteUsefulBytes
-        .init(m_block_size + 1)
-        .flags(statistics::nozero | statistics::nonan);
-
-    cacheMemoryStats.valueUsefulBytes
-        .init(m_block_size + 1)
-        .flags(statistics::nozero | statistics::nonan);
-
-    cacheMemoryStats.valueReadUsefulBytes
-        .init(m_block_size + 1)
-        .flags(statistics::nozero | statistics::nonan);
-
-    cacheMemoryStats.valueWriteUsefulBytes
-        .init(m_block_size + 1)
-        .flags(statistics::nozero | statistics::nonan);
-}
 
 void
 CacheMemory::resetStats()
@@ -971,7 +924,7 @@ CacheMemory::htmCommitTransaction()
 }
 
 void
-CacheMemory::profileUsefulness(Addr line_addr, bool is_prefetched, std::string type, const WriteMask read_usefulness, const WriteMask write_usefulness)
+CacheMemory::profileUsefulness(Addr line_addr, bool is_prefetched, std::string access_name, const WriteMask read_usefulness, const WriteMask write_usefulness)
 {
     WriteMask total_usefulness = read_usefulness;
     total_usefulness.orMask(write_usefulness);
@@ -983,34 +936,48 @@ CacheMemory::profileUsefulness(Addr line_addr, bool is_prefetched, std::string t
     if (read_count == 0 && write_count == 0 && !is_prefetched) {
         profileUnexplainedUselessness(line_addr);
     }
-    if (type == "index") {
-        cacheMemoryStats.indexUsefulBytes.sample(total_count);
-        cacheMemoryStats.indexReadUsefulBytes.sample(read_count);
-        cacheMemoryStats.indexWriteUsefulBytes.sample(write_count);
-        DPRINTF(IndirectLoad, "%s: Sampling int read usefulness for line-addr: 0x%lx with "
-            "count: %d.\n", __func__, line_addr, read_count);
-        DPRINTF(IndirectLoad, "%s: Sampling int write usefulness for line-addr: 0x%lx with "
-            "count: %d.\n", __func__, line_addr, write_count);
-    } else if (type == "value") {
-        cacheMemoryStats.valueUsefulBytes.sample(total_count);
-        cacheMemoryStats.valueReadUsefulBytes.sample(read_count);
-        cacheMemoryStats.valueWriteUsefulBytes.sample(write_count);
-        DPRINTF(IndirectLoad, "%s: Sampling float read usefulness for line-addr: 0x%lx with "
-            "count: %d.\n", __func__, line_addr, read_count);
-        DPRINTF(IndirectLoad, "%s: Sampling float write usefulness for line-addr: 0x%lx with "
-            "count: %d.\n", __func__, line_addr, write_count);
-    } else {
-        assert(type == "any");
-        cacheMemoryStats.usefulBytes.sample(total_count);
-        cacheMemoryStats.readUsefulBytes.sample(read_count);
-        cacheMemoryStats.writeUsefulBytes.sample(write_count);
+
+    std::string eff_acc_name = access_name == "" ? "other" : access_name;
+    if (usefulBytes.find(eff_acc_name) == usefulBytes.end()) {
+        DPRINTF(Usefulness, "%s: Creating usefulness histograms "
+                "for access name: %s.\n", __func__, eff_acc_name);
+        statistics::Histogram* new_stat = new statistics::Histogram(
+                    this,
+                    csprintf("usefulBytes.%s", eff_acc_name).c_str(),
+                    statistics::units::Count::get(),
+                    "Number of bytes used from inserted "
+                    "cache block belonging to this access name.");
+        new_stat->init(m_block_size + 1);
+        usefulBytes[eff_acc_name] = new_stat;
+        assert(readUsefulBytes.find(eff_acc_name) == readUsefulBytes.end());
+        assert(writeUsefulBytes.find(eff_acc_name) == writeUsefulBytes.end());
+        statistics::Histogram* read_stat = new statistics::Histogram(
+                    this,
+                    csprintf("readUsefulBytes.%s", eff_acc_name).c_str(),
+                    statistics::units::Count::get(),
+                    "Number of bytes used from inserted "
+                    "cache block belonging to this access name for reads.");
+        read_stat->init(m_block_size + 1);
+        readUsefulBytes[eff_acc_name] = read_stat;
+        statistics::Histogram* write_stat = new statistics::Histogram(
+                    this,
+                    csprintf("writeUsefulBytes.%s", eff_acc_name).c_str(),
+                    statistics::units::Count::get(),
+                    "Number of bytes used from inserted "
+                    "cache block belonging to this access name for writes.");
+        write_stat->init(m_block_size + 1);
+        writeUsefulBytes[eff_acc_name] = write_stat;
     }
+
+    usefulBytes[eff_acc_name]->sample(total_count);
+    readUsefulBytes[eff_acc_name]->sample(read_count);
+    writeUsefulBytes[eff_acc_name]->sample(write_count);
 }
 
 void
 CacheMemory::profileUnexplainedUselessness(Addr line_addr)
 {
-    DPRINTF(IndirectLoad, "%s: Addr %#x is useless and not prefetched.\n", __func__, line_addr);
+    DPRINTF(Usefulness, "%s: Addr %#x is useless and not prefetched.\n", __func__, line_addr);
     cacheMemoryStats.uselessBlocksNotExplainedbyPrefetch++;
 }
 

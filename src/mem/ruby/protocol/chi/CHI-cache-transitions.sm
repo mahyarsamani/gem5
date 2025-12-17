@@ -1001,54 +1001,16 @@ transition({BUSY_BLKD,BUSY_INTR}, ActionStalledOnHazard) {
 }
 
 
-// MYSTUFF:
-transition(I, ReadIndirect, BUSY_BLKD) {
+// MYSTUFF
+transition(I, FwdReadIndirect, BUSY_BLKD) {
     Initiate_Request;
-    Initiate_ReadIndirectMiss;
-    // TODO: Figure out if this is the right way to measure index misses.
-    // Profile_Miss;
+    delayFwdIndirect;
+    Fwd_ReadIndirect;
     Pop_ReqRdyQueue;
     ProcessNextState;
 }
 
-// NOTE: Send_ReadNoSnp if is_HN and Send_ReadShared if not.
-transition(BUSY_BLKD, EnqueueReadIndex) {
-    Pop_TriggerQueue;
-    Enqueue_ReadIndex;
-    ProcessNextState_ClearPending;
-}
-
-// NOTE: This is nothing specific. We just put the same request
-// on the reqOut message queue.
-transition(BUSY_BLKD, FwdReadIndirect) {
-    Pop_TriggerQueue;
-    delayFwdIndirect;
-    Fwd_ReadIndirect;
-    ProcessNextState_ClearPending;
-}
-
-// TODO: Need to uncomment this.
-// transition(BUSY_INTR, EnqueueAccessValue) {
-//     Pop_TriggerQueue;
-//     Enqueue_AccessValue;
-//     ProcessNextState_ClearPending;
-// }
-
-// transition(I, ReadValue, BUSY_BLKD) {
-//     Initiate_Request;
-//     Initiate_ReadValue_Miss;
-//     Allocate_DirEntry;
-//     // Profile_Miss;
-//     Pop_ReqRdyQueue;
-//     ProcessNextState;
-// }
-
-// transition(BUSY_BLKD, SendReadValue) {
-//     Pop_TriggerQueue;
-//     Send_ReadValue;
-//     Profile_OutgoingStart;
-//     ProcessNextState_ClearPending;
-// }
+// FFUTSYM
 
 // Trigger-specifc transitions
 
@@ -1660,6 +1622,7 @@ transition({BUSY_BLKD,BUSY_INTR}, Final, *) {
   Pop_TriggerQueue;
   Finalize_UpdateCacheFromTBE;
   Finalize_UpdateDirectoryFromTBE;
+  Initiate_Dependent_Requests;
   Finalize_DeallocateRequest;
 }
 

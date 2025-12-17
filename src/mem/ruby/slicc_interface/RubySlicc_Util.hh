@@ -352,6 +352,13 @@ getNextAddr(RequestPtr req)
     }
 }
 
+// inline Addr
+// calculateNextAddr(DataBlock &data, Addr offset, int acc_size, Addr second_base, Addr second_size)
+// {
+//     const uint8_t *index = data.getData(offset, acc_size);
+//     return 0;
+// }
+
 inline int
 getNextSize(RequestPtr req)
 {
@@ -369,6 +376,17 @@ isInvalid(MachineID m_id)
     return !m_id.isValid();
 }
 
+inline std::string
+getMemAccessName(RequestPtr req)
+{
+    std::shared_ptr<MemAccessName> mem_access_name = req->getExtension<MemAccessName>();
+    if (mem_access_name != nullptr) {
+        return mem_access_name->name();
+        req->removeExtension<MemAccessName>();
+    } else {
+        return "";
+    }
+}
 // FFUTSYM:
 
 } // namespace ruby

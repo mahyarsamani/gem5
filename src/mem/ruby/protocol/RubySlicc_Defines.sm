@@ -37,5 +37,9 @@ Cycles recycle_latency;
 // memory controllers.
 void functionalMemoryRead(Packet *pkt);
 bool functionalMemoryWrite(Packet *pkt);
+// MYSTUFF
+std::string getName();
 
+bool canOverride(std::string, Addr);
+// FFUTSYM
 void dequeueMemRespQueue();

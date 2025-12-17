@@ -60,3 +60,5 @@ Source('ALUFreeListArray.cc')
 Source('TBEStorage.cc')
 if env['CONF']['RUBY_PROTOCOL_CHI']:
     Source('MN_TBETable.cc')
+
+Source('LabelCache.cc')
