@@ -113,7 +113,7 @@ validateStatName(const std::string &name)
 
         // The rest of the characters have different rules.
         while (++c != item->end()) {
-            if (!isalnum(*c) && *c != '_')
+            if (!isalnum(*c) && *c != '_' && *c != '[' && *c != ']')
                 return false;
         }
 
