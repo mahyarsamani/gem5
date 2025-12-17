@@ -445,6 +445,8 @@ CPU::startup()
     iew.startupStage();
     rename.startupStage();
     commit.startupStage();
+
+    iew.instQueue.constructIndRelTrees();
 }
 
 void

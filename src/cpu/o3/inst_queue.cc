@@ -49,7 +49,7 @@
 #include "cpu/o3/fu_pool.hh"
 #include "cpu/o3/limits.hh"
 #include "debug/IQ.hh"
-#include "debug/MSDebug.hh"
+// #include "debug/MSDebug.hh"
 #include "enums/OpClass.hh"
 #include "params/BaseO3CPU.hh"
 #include "sim/core.hh"
@@ -560,38 +560,105 @@ InstructionQueue::hasReadyInsts()
     return false;
 }
 
-int
-InstructionQueue::IndAccRelation::trackProducer(const DynInstPtr& producer_inst, const std::string& proxy_simobject_name)
+// MYSTUFF
+void
+InstructionQueue::Producer::process(const DynInstPtr& inst, const std::string& proxy_simobject_name, int override_dst_idx)
 {
-    assert(producer_inst->numDestRegs() == 1);
-    regIdMap[producer_inst->renamedDestIdx(0)] = nextId;
-    DPRINTF(MSDebug, "%s: %s: Tracking program counter %#lx for register %d with id %d.\n", proxy_simobject_name, __func__,
-            producer_inst->pcState().instAddr(), producer_inst->renamedDestIdx(0)->flatIndex(), nextId);
-    nextId++;
-    return nextId - 1;
-}
+    if ((inst->numDestRegs() != 1) && (override_dst_idx == -1)) {
+        warn("%s: %s: PC %#lx (%s) from context %d "
+            "failed one dest register assertion.\n",
+            proxy_simobject_name, __func__, inst->pcState().instAddr(),
+            inst->staticInst->disassemble(inst->pcState().instAddr()),
+            inst->tcBase()->contextId()
+        );
+        return;
+    }
 
-int
-InstructionQueue::IndAccRelation::trackConsumer(const DynInstPtr& consumer_inst, const std::string& proxy_simobject_name)
-{
-    std::string error = "";
-    for (int idx = 0; idx < consumer_inst->numSrcRegs(); ++idx) {
-        PhysRegIdPtr src_reg = consumer_inst->renamedSrcIdx(idx);
-        error += "(" + std::to_string(idx) + ": " + std::to_string(src_reg->flatIndex()) + ") ";
-        auto it = regIdMap.find(src_reg);
-        if (it != regIdMap.end()) {
-            int id = it->second;
-            DPRINTF(MSDebug, "%s: %s: Consumer at program counter %#lx for register %d with id %d.\n",
-                    proxy_simobject_name, __func__, consumer_inst->pcState().instAddr(), it->first->flatIndex(), id);
-            regIdMap.erase(it);
-            return id;
+    int dest_idx = override_dst_idx != -1 ? override_dst_idx : 0;
+    PhysRegIdPtr phys_reg = inst->renamedDestIdx(dest_idx);
+    inst->setProducer();
+    for (auto consumer : consumers) {
+        std::vector<std::tuple<std::string, int>> consumer_tags = consumer->getConsumerTags();
+        for (auto tag: consumer_tags) {
+            consumer->setRegisterToConsume(phys_reg, tag);
+            inst->addIndRelationId(std::get<0>(tag), std::get<1>(tag));
         }
     }
-    DPRINTF(MSDebug, "%s: %s: Problematic program counter %#lx with regs: %s\n",
-            proxy_simobject_name, __func__, consumer_inst->pcState().instAddr(), error);
-    warn("Consumer instruction %s does not have a producer in the relation %s", consumer_inst->pcState(), _name);
-    return -1;
 }
+
+void
+InstructionQueue::Prosumer::process(const DynInstPtr& inst, const std::string& proxy_simobject_name, int override_dst_idx)
+{
+    if ((inst->numDestRegs() != 1) && (override_dst_idx == -1)) {
+        warn("%s: %s: PC %#lx (%s) from context %d "
+            "failed one dest register assertion.\n",
+            proxy_simobject_name, __func__, inst->pcState().instAddr(),
+            inst->staticInst->disassemble(inst->pcState().instAddr()),
+            inst->tcBase()->contextId()
+        );
+        return;
+    }
+
+    int dest_idx = override_dst_idx != -1 ? override_dst_idx : 0;
+    PhysRegIdPtr dst_reg = inst->renamedDestIdx(dest_idx);
+    bool producer_found = false;
+    for (int i = 0; i < inst->numSrcRegs(); i++) {
+        PhysRegIdPtr src_reg = inst->renamedSrcIdx(i);
+        if (regToRelTag.find(src_reg) != regToRelTag.end())
+        {
+            producer_found = true;
+            std::vector<std::tuple<std::string, int>> consumer_tags = regToRelTag[src_reg];
+            for (auto consumer_tag: consumer_tags) {
+                subtreeName[std::get<0>(consumer_tag)]->setRegisterToConsume(dst_reg, consumer_tag);
+            }
+        }
+        if (producer_found) {
+            regToRelTag.erase(src_reg);
+            break;
+        }
+    }
+    if (!producer_found) {
+        warn("%s: %s: PC %#lx (%s) from context %d has no producer.\n",
+            proxy_simobject_name, __func__,
+            inst->pcState().instAddr(),
+            inst->staticInst->disassemble(inst->pcState().instAddr()),
+            inst->tcBase()->contextId()
+        );
+    }
+}
+
+void
+InstructionQueue::Consumer::process(const DynInstPtr& inst, const std::string& proxy_simobject_name, int override_dst_idx)
+{
+    panic_if(override_dst_idx != -1, "Tried to override destination register index for a Consumer.");
+
+
+    bool producer_found = false;
+    for (int i = 0; i < inst->numSrcRegs(); i++)
+    {
+        PhysRegIdPtr src_reg = inst->renamedSrcIdx(i);
+        if (regId.find(src_reg) != regId.end())
+        {
+            producer_found = true;
+            int producer_id = regId[src_reg];
+            inst->setConsumer();
+            inst->addIndRelationId(_relationName, producer_id);
+        }
+        if (producer_found) {
+            regId.erase(src_reg);
+            break;
+        }
+    }
+    if (!producer_found) {
+        warn("%s: %s: PC %#lx (%s) from context %d has no producer.\n",
+            proxy_simobject_name, __func__,
+            inst->pcState().instAddr(),
+            inst->staticInst->disassemble(inst->pcState().instAddr()),
+            inst->tcBase()->contextId()
+        );
+    }
+}
+// MYSTUFF
 
 void
 InstructionQueue::insert(const DynInstPtr &new_inst)
@@ -625,29 +692,23 @@ InstructionQueue::insert(const DynInstPtr &new_inst)
     // register(s).
     addToProducers(new_inst);
 
+    // MYSTUFF
     Addr program_counter = new_inst->pcState().instAddr();
-
-    assert(producerRelationMap.find(program_counter) == producerRelationMap.end() ||
-           consumerRelationMap.find(program_counter) == consumerRelationMap.end());
-
-    if (producerRelationMap.find(program_counter) != producerRelationMap.end()) {
-        IndAccRelation* relation = producerRelationMap[program_counter];
-        int id = relation->trackProducer(new_inst, cpu->name());
-
-        new_inst->setProducer();
-        new_inst->setRelationName(relation->name());
-        new_inst->setRelationInstanceId(id);
-    }
-    if (consumerRelationMap.find(program_counter) != consumerRelationMap.end()) {
-        IndAccRelation* relation = consumerRelationMap[program_counter];
-        int id = relation->trackConsumer(new_inst, cpu->name());
-
-        if (id != -1) {
-            new_inst->setConsumer();
-            new_inst->setRelationName(relation->name());
-            new_inst->setRelationInstanceId(id);
+    if (pcProsumerMap.find(program_counter) != pcProsumerMap.end())
+    {
+        int idx_override = -1;
+        if (pcDstIdxMap.find(program_counter) != pcDstIdxMap.end()) {
+            idx_override = pcDstIdxMap[program_counter];
         }
+        pcProsumerMap[program_counter]->process(new_inst, cpu->name(), idx_override);
     }
+
+    if (pcLabelMap.find(program_counter) != pcLabelMap.end())
+    {
+        new_inst->setHasLabel();
+        new_inst->setLabel(pcLabelMap[program_counter]);
+    }
+    // MYSTUFF
 
     if (new_inst->isMemRef()) {
         memDepUnit[new_inst->threadNumber].insert(new_inst);

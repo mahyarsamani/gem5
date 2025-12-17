@@ -1128,13 +1128,21 @@ LSQ::LSQRequest::addReq(Addr addr, unsigned size,
             );
         }
 
-        if (_inst->isProducer()) {
-            req->setExtension<IndAccProd>(std::make_shared<IndAccProd>(
-                _inst->relationName(), _inst->relationInstanceId()));
+        if (_reqs.size() == 0) {
+            if (_inst->isProducer()) {
+                req->setExtension<IndAccProd>(
+                    std::make_shared<IndAccProd>(_inst->getIndRelationIds())
+                );
+            }
+            if (_inst->isConsumer()) {
+                req->setExtension<IndAccCons>(
+                    std::make_shared<IndAccCons>(_inst->getIndRelationIds())
+                );
+            }
         }
-        if (_inst->isConsumer()) {
-            req->setExtension<IndAccCons>(std::make_shared<IndAccCons>(
-                _inst->relationName(), _inst->relationInstanceId()));
+
+        if (_inst->hasLabel()) {
+            req->setExtension<MemAccessName>(std::make_shared<MemAccessName>(_inst->label()));
         }
         _reqs.push_back(req);
     }

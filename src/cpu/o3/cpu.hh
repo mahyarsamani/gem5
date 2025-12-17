@@ -67,6 +67,8 @@
 #include "cpu/base.hh"
 #include "cpu/simple_thread.hh"
 #include "cpu/timebuf.hh"
+// #include "mem/ruby/structures/LabelCache.hh"
+#include "mem/ruby/system/Sequencer.hh"
 #include "params/BaseO3CPU.hh"
 #include "sim/process.hh"
 
@@ -92,6 +94,33 @@ class ThreadContext;
  */
 class CPU : public BaseCPU
 {
+  // MYSTUFF
+  public:
+    void addProducerConsumerChain(const std::string& name, std::vector<Addr> &chain)
+    {
+        iew.instQueue.addProducerConsumerChain(name, chain);
+    }
+
+    void addDestIdxOverride(Addr pc, int dst_idx)
+    {
+        iew.instQueue.addDestIdxOverride(pc, dst_idx);
+    }
+
+    void registerFunctionInfo(std::string function_name, Addr exit_pc, std::vector<std::string> labels, std::vector<Addr> program_counters)
+    {
+        assert(program_counters.size() == labels.size());
+        commit.registerFunctionInfo(function_name, exit_pc, labels);
+        for (int i = 0; i < program_counters.size(); i++) {
+            iew.instQueue.addPCLabelPair(program_counters[i], labels[i]);
+        }
+    }
+
+    void setSequencer(ruby::Sequencer *sequencer)
+    {
+        commit.setSequencer(sequencer);
+    }
+  // FFUTSYM
+
   public:
     typedef std::list<DynInstPtr>::iterator ListIt;
 

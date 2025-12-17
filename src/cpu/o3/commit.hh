@@ -54,6 +54,7 @@
 #include "cpu/o3/rob.hh"
 #include "cpu/timebuf.hh"
 #include "enums/CommitPolicy.hh"
+#include "mem/ruby/system/Sequencer.hh"
 #include "sim/probe/probe.hh"
 
 namespace gem5
@@ -111,7 +112,43 @@ class Commit
         SquashAfterPending, //< Committing instructions before a squash.
     };
 
+  // MYSTUFF
+  public:
+    void registerFunctionInfo(std::string function_name, Addr exit_pc, std::vector<std::string> labels)
+    {
+        functionExits[exit_pc] = FunctionExit(function_name, exit_pc, labels);
+    }
+
+    void setSequencer(ruby::Sequencer *sequencer)
+    {
+        sequencerToNotify = sequencer;
+    }
+
   private:
+    class FunctionExit
+    {
+      private:
+        std::string functionName;
+
+        Addr exitPC;
+        std::set<std::string> localLabels;
+      public:
+        FunctionExit() = default;
+        FunctionExit(std::string function_name, Addr pc, const std::vector<std::string> &labels):
+            functionName(function_name), exitPC(pc), localLabels(labels.begin(), labels.end())
+        {}
+
+        std::string getFunctionName() const { return functionName; }
+
+        std::set<std::string> getLocalLabels() const { return localLabels; }
+    };
+
+    std::unordered_map<Addr, FunctionExit> functionExits;
+
+    ruby::Sequencer *sequencerToNotify;
+    // FFUTSYM
+  private:
+
     /** Overall commit status. */
     CommitStatus _status;
     /** Next commit status, to be set at the end of the cycle. */

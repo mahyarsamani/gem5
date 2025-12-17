@@ -91,8 +91,7 @@ DynInst::DynInst(const Arrays &arrays, const StaticInstPtr &static_inst,
 #endif
     _isProducer = false;
     _isConsumer = false;
-    _relationName = "";
-    _relationInstanceId = -1;
+    _indRelationIds.clear();
 }
 
 DynInst::DynInst(const Arrays &arrays, const StaticInstPtr &static_inst,
@@ -102,20 +101,29 @@ DynInst::DynInst(const Arrays &arrays, const StaticInstPtr &static_inst,
 {
     set(pc, _pc);
     set(predPC, pred_pc);
+
+    // MYSTUFF
     _isProducer = false;
     _isConsumer = false;
-    _relationName = "";
-    _relationInstanceId = -1;
+    _indRelationIds.clear();
+
+    _hasLabel = false;
+    _label = "";
+    // FFUTSYM
 }
 
 DynInst::DynInst(const Arrays &arrays, const StaticInstPtr &_staticInst,
         const StaticInstPtr &_macroop)
     : DynInst(arrays, _staticInst, _macroop, 0, nullptr)
 {
+    // MYSTUFF
     _isProducer = false;
     _isConsumer = false;
-    _relationName = "";
-    _relationInstanceId = -1;
+    _indRelationIds.clear();
+
+    _hasLabel = false;
+    _label = "";
+    // FFUTSYM
 }
 
 /*

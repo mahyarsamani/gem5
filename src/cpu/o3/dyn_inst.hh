@@ -74,22 +74,34 @@ namespace o3
 
 class DynInst : public ExecContext, public RefCounted
 {
-
+  // MYSTUFF
   private:
     bool _isProducer;
     bool _isConsumer;
-    std::string _relationName;
-    int _relationInstanceId;
+    std::vector<std::tuple<std::string, int>> _indRelationIds;
+
+    bool _hasLabel;
+    std::string _label;
 
   public:
     void setProducer() { _isProducer = true; }
     bool isProducer() const { return _isProducer; }
     void setConsumer() { _isConsumer = true; }
     bool isConsumer() const { return _isConsumer; }
-    void setRelationName(const std::string &name) { _relationName = name; }
-    std::string relationName() { return _relationName; }
-    void setRelationInstanceId(int id) { _relationInstanceId = id; }
-    int relationInstanceId() { return _relationInstanceId; }
+    void addIndRelationId(const std::string &name, int id)
+    {
+        _indRelationIds.emplace_back(name, id);
+    }
+    std::vector<std::tuple<std::string, int>> getIndRelationIds() const
+    {
+        return _indRelationIds;
+    }
+
+    void setHasLabel() { _hasLabel = true; }
+    bool hasLabel() const { return _hasLabel; }
+    void setLabel(std::string label) { _label = label;}
+    std::string label() const { return _label; }
+    // FFUTSYM
 
   private:
     DynInst(const StaticInstPtr &staticInst, const StaticInstPtr &macroop,

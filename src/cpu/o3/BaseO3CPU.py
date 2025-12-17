@@ -44,6 +44,7 @@ from m5.objects.BranchPredictor import *
 from m5.objects.FUPool import *
 from m5.params import *
 from m5.proxy import *
+from m5.util.pybind import PyBindMethod
 
 
 class SMTFetchPolicy(ScopedEnum):
@@ -191,3 +192,10 @@ class BaseO3CPU(BaseCPU):
         TournamentBP(numThreads=Parent.numThreads), "Branch Predictor"
     )
     needsTSO = Param.Bool(False, "Enable TSO Memory model")
+
+    cxx_exports = [
+        PyBindMethod("setSequencer"),
+        PyBindMethod("addProducerConsumerChain"),
+        PyBindMethod("addDestIdxOverride"),
+        PyBindMethod("registerFunctionInfo"),
+    ]

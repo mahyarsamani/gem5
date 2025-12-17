@@ -63,6 +63,7 @@
 #include "debug/ExecFaulting.hh"
 #include "debug/HtmCpu.hh"
 #include "debug/O3PipeView.hh"
+#include "debug/Usefulness.hh"
 #include "params/BaseO3CPU.hh"
 #include "sim/faults.hh"
 #include "sim/full_system.hh"
@@ -982,6 +983,15 @@ Commit::commitInsts()
             bool commit_success = commitHead(head_inst, num_committed);
 
             if (commit_success) {
+                // MYSTUFF
+                if (functionExits.find(head_inst->pcState().instAddr()) != functionExits.end()) {
+                    DPRINTF(Usefulness, "%s: Exit PC %#lx committed for function %s. Invalidating its local labels.\n",
+                        __func__, head_inst->pcState().instAddr(), functionExits[head_inst->pcState().instAddr()].getFunctionName());
+                    for (auto label: functionExits[head_inst->pcState().instAddr()].getLocalLabels()) {
+                        sequencerToNotify->invalidateLabel(label);
+                    }
+                }
+                // FFUTSYM
                 ++num_committed;
                 cpu->commitStats[tid]
                     ->committedInstType[head_inst->opClass()]++;

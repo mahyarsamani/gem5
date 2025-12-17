@@ -98,39 +98,215 @@ class IEW;
  */
 class InstructionQueue
 {
+  // MYSTUFF
   private:
-    class IndAccRelation
+    class BaseProsumer
     {
       private:
-        std::string _name;
-        std::vector<Addr> pcChain;
+        Addr _programCounter;
 
-        int nextId;
-        std::unordered_map<PhysRegIdPtr, std::tuple<Addr, int>> regIdMap;
       public:
-        IndAccRelation(const std::string& name, std::vector<Addr> pc_chain):
-            _name(name), pcChain(pc_chain), nextId(0)
+        BaseProsumer(Addr program_counter): _programCounter(program_counter)
         {}
 
-        const std::string name() { return _name; }
+        virtual void construct() = 0;
+        virtual std::vector<std::string> constructSubtree() = 0;
 
-        // int trackInst(const DynInstPtr& inst, const std::string& proxy_simobject_name);
+        virtual std::vector<std::tuple<std::string, int>> getConsumerTags() = 0;
+        virtual void setRegisterToConsume(PhysRegIdPtr phys_reg, std::tuple<std::string, int> tag) = 0;
+        virtual void process(const DynInstPtr& inst, const std::string& proxy_simobject_name, int override_dst_idx) = 0;
 
-        int trackProducer(const DynInstPtr& producer_inst, const std::string& proxy_simobject_name);
-
-        int trackConsumer(const DynInstPtr& consumer_inst, const std::string& proxy_simobject_name);
+        Addr programCounter() const { return _programCounter; }
+        virtual void addConsumer(BaseProsumer* consumer) = 0;
     };
 
-    std::unordered_map<Addr, IndAccRelation*> pcRelationMap;
+    class Producer: public BaseProsumer
+    {
+      private:
+        std::vector<BaseProsumer*> consumers;
+
+      public:
+        Producer(Addr program_counter): BaseProsumer(program_counter)
+        {}
+
+        virtual void construct() override
+        {
+            for (auto consumer: consumers) {
+                consumer->constructSubtree();
+            }
+        }
+
+        std::vector<std::string> constructSubtree() override
+        {
+            panic("Producer should not be asked to get subtree names");
+        }
+
+        virtual std::vector<std::tuple<std::string, int>> getConsumerTags() override
+        {
+            panic("Producer should not be asked to get consumer tags");
+        }
+
+        virtual void setRegisterToConsume(PhysRegIdPtr phys_reg, const std::tuple<std::string, int> tag) override
+        {
+            panic("Producer should not be asked to set register to consumer");
+        }
+
+        virtual void process(const DynInstPtr& inst, const std::string& proxy_simobject_name, int override_dst_idx) override;
+
+        virtual void addConsumer(BaseProsumer* consumer) override
+        {
+            consumers.push_back(consumer);
+        }
+    };
+
+    class Prosumer: public BaseProsumer
+    {
+      private:
+        std::vector<BaseProsumer*> consumers;
+        std::unordered_map<std::string, BaseProsumer*> subtreeName;
+        std::unordered_map<PhysRegIdPtr, std::vector<std::tuple<std::string, int>>> regToRelTag;
+
+      public:
+        Prosumer(Addr program_counter): BaseProsumer(program_counter)
+        {}
+
+        virtual void construct() override
+        {
+            panic("Prosumer should not be asked to construct");
+        }
+
+        std::vector<std::string> constructSubtree() override
+        {
+            std::vector<std::string> all_subtree_names;
+            for (auto consumer: consumers) {
+                std::vector<std::string> subtree_names = consumer->constructSubtree();
+                for (auto subtree_name: subtree_names)
+                {
+                    subtreeName[subtree_name] = consumer;
+                }
+                all_subtree_names.insert(all_subtree_names.end(), subtree_names.begin(), subtree_names.end());
+            }
+            return all_subtree_names;
+        }
+
+        virtual std::vector<std::tuple<std::string, int>> getConsumerTags() override
+        {
+            std::vector<std::tuple<std::string, int>> tags;
+            for (auto consumer: consumers) {
+                std::vector<std::tuple<std::string, int>> consumer_tags = consumer->getConsumerTags();
+                tags.insert(tags.end(), consumer_tags.begin(), consumer_tags.end());
+            }
+            return tags;
+        }
+
+        virtual void setRegisterToConsume(PhysRegIdPtr phys_reg, const std::tuple<std::string, int> tag) override
+        {
+            regToRelTag[phys_reg].emplace_back(tag);
+        }
+
+        virtual void process(const DynInstPtr& inst, const std::string& proxy_simobject_name, int override_dst_idx) override;
+
+        virtual void addConsumer(BaseProsumer* consumer) override
+        {
+            consumers.push_back(consumer);
+        }
+    };
+
+    class Consumer: public BaseProsumer
+    {
+      private:
+        std::string _relationName;
+        int nextId;
+
+        std::unordered_map<PhysRegIdPtr, int> regId;
+
+      public:
+        Consumer(Addr program_counter, const std::string& relation_name):
+            BaseProsumer(program_counter), _relationName(relation_name), nextId(-1)
+        {}
+
+        virtual void construct() override
+        {
+            panic("Consumer should not be asked to construct");
+        }
+
+        virtual std::vector<std::string> constructSubtree() override
+        {
+            return { _relationName };
+        }
+
+        virtual std::vector<std::tuple<std::string, int>> getConsumerTags() override
+        {
+            nextId++;
+            return {std::make_tuple(_relationName, nextId)};
+        }
+
+        virtual void setRegisterToConsume(PhysRegIdPtr phys_reg, std::tuple<std::string, int> tag) override
+        {
+            regId[phys_reg] = std::get<1>(tag);
+        }
+
+        virtual void process(const DynInstPtr& inst, const std::string& proxy_simobject_name, int override_dst_idx) override;
+
+        virtual void addConsumer(BaseProsumer* consumer) override
+        {
+            panic("Consumer should not be asked to add a consumer");
+        }
+    };
+
+    std::vector<Producer*> producers;
+    std::unordered_map<Addr, BaseProsumer*> pcProsumerMap;
+    std::unordered_map<Addr, int> pcDstIdxMap;
+
+    std::unordered_map<Addr, std::string> pcLabelMap;
 
   public:
-    void addProducerConsumerPair(const std::string& relation_name,  std::vector<Addr> pc_chain)
+
+    void addProducerConsumerChain(const std::string& relation_name,  std::vector<Addr> pc_chain)
     {
-        IndAccRelation* relation = new IndAccRelation(relation_name, pc_chain);
-        for (const auto& pc : pc_chain) {
-            pcRelationMap[pc] = relation;
+        int length = pc_chain.size();
+        assert(length >= 2);
+
+        // NOTE: Creating a producer for this chain if it does not exist.
+        Addr producer_addr = pc_chain[0];
+        if (pcProsumerMap.find(producer_addr) == pcProsumerMap.end()) {
+            pcProsumerMap[producer_addr] = new Producer(producer_addr);
+            producers.push_back(static_cast<Producer*>(pcProsumerMap[producer_addr]));
+        }
+        // NOTE: Producing the intermediate prosumers if they don't exist.
+        for (int i = 1; i < length - 1; i++) {
+            Addr prosumer_addr = pc_chain[i];
+            if (pcProsumerMap.find(prosumer_addr) == pcProsumerMap.end()) {
+                pcProsumerMap[prosumer_addr] = new Prosumer(prosumer_addr);
+                pcProsumerMap[pc_chain[i - 1]]->addConsumer(pcProsumerMap[prosumer_addr]);
+            }
+        }
+        // NOTE: Creating a consumer for the last address in the chain.
+        // It should not already exist.
+        Addr consumer_addr = pc_chain[length - 1];
+        assert(pcProsumerMap.find(consumer_addr) == pcProsumerMap.end());
+        pcProsumerMap[consumer_addr] = new Consumer(consumer_addr, relation_name);
+        pcProsumerMap[pc_chain[length - 2]]->addConsumer(pcProsumerMap[consumer_addr]);
+    }
+
+    void addDestIdxOverride(Addr pc, int dst_idx)
+    {
+        fatal_if(pcDstIdxMap.find(pc) != pcDstIdxMap.end(), "Can not add two overrides for the same pc.");
+        pcDstIdxMap[pc] = dst_idx;
+    }
+
+    void constructIndRelTrees()
+    {
+        for (auto producer: producers) {
+            producer->construct();
         }
     }
+
+    void addPCLabelPair(Addr program_counter, std::string label)
+    {
+        pcLabelMap[program_counter] = label;
+    }
+    // FFUTSYM
 
   public:
     // Typedef of iterator through the list of instructions.
