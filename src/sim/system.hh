@@ -71,10 +71,14 @@ class BaseRemoteGDB;
 class KvmVM;
 class ThreadContext;
 
+
 class System : public SimObject, public PCEventScope
 {
   private:
-
+    // MYSTUFF
+    bool observedMSS;
+    uint64_t mssFlag;
+    // FFUTSYM
     /**
      * Private class for the system port which is only used as a
      * requestor for debug access and for non-structural entities that do
@@ -565,7 +569,6 @@ class System : public SimObject, public PCEventScope
 
     System(const Params &p);
     ~System();
-
     /**
      * Range used by memory-mapped m5 pseudo-ops if enabled. Returns
      * an invalid/empty range if disabled.
@@ -584,6 +587,12 @@ class System : public SimObject, public PCEventScope
     std::map<std::pair<uint32_t, uint32_t>, Tick>  lastWorkItemStarted;
     std::map<uint32_t, statistics::Histogram*> workItemStats;
 
+    // MYSTUFF
+    void observeMSS() { observedMSS = true; }
+    bool seenMSS() { return observedMSS; }
+    uint64_t getMSSFlag() { return mssFlag; }
+    void setMSSFlag(uint64_t mss_flag) { mssFlag = mss_flag; }
+    // FFUTSYM
     ////////////////////////////////////////////
     //
     // STATIC GLOBAL SYSTEM LIST

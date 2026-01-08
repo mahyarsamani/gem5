@@ -211,6 +211,9 @@ System::System(const Params &p)
     // Set back pointers to the system in all memories
     for (int x = 0; x < params().memories.size(); x++)
         params().memories[x]->system(this);
+
+    observedMSS = false;
+    mssFlag = 0;
 }
 
 System::~System()

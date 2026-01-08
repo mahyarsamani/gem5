@@ -43,6 +43,7 @@ from m5.objects.Workload import StubWorkload
 from m5.params import *
 from m5.proxy import *
 from m5.SimObject import *
+from m5.util.pybind import PyBindMethod
 
 
 class MemoryMode(Enum):
@@ -59,6 +60,7 @@ class System(SimObject):
     cxx_exports = [
         PyBindMethod("getMemoryMode"),
         PyBindMethod("setMemoryMode"),
+        PyBindMethod("setMSSFlag"),
     ]
 
     memories = VectorParam.AbstractMemory(
