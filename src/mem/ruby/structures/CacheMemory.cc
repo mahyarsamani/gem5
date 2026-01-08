@@ -923,6 +923,7 @@ CacheMemory::htmCommitTransaction()
         htmReadSetSize, htmWriteSetSize);
 }
 
+// MYSTUFF
 void
 CacheMemory::profileUsefulness(Addr line_addr, bool is_prefetched, std::string access_name, const WriteMask read_usefulness, const WriteMask write_usefulness)
 {
@@ -980,6 +981,31 @@ CacheMemory::profileUnexplainedUselessness(Addr line_addr)
     DPRINTF(Usefulness, "%s: Addr %#x is useless and not prefetched.\n", __func__, line_addr);
     cacheMemoryStats.uselessBlocksNotExplainedbyPrefetch++;
 }
+
+void
+CacheMemory::profileTransfer(MachineID dst, std::string acc_name, int num_bytes)
+{
+    if (bytesTransferred.find(acc_name) == bytesTransferred.end())
+    {
+        DPRINTF(Usefulness, "%s: Creating an entry for tracking per "
+                "machine transfer for name %s.\n", __func__, acc_name);
+        bytesTransferred[acc_name] = std::unordered_map<MachineID, statistics::Scalar*>();
+    }
+    if (bytesTransferred[acc_name].find(dst) == bytesTransferred[acc_name].end())
+    {
+        DPRINTF(Usefulness, "%s: Creating a scalar for bytes transferred "
+        "to %s for name %s.\n", __func__, MachineIDToString(dst), num_bytes);
+        bytesTransferred[acc_name][dst] = new statistics::Scalar(
+            this,
+            csprintf("bytesTransferred[%s][%s]", acc_name, MachineIDToString(dst)).c_str(),
+            statistics::units::Count::get(),
+            "Number of bytes transferred from this machine "
+            "to each specific machine for each name.");
+        *bytesTransferred[acc_name][dst] = 0;
+    }
+    *bytesTransferred[acc_name][dst] += num_bytes;
+}
+// FFUTSYM
 
 void
 CacheMemory::profileDemandHit()

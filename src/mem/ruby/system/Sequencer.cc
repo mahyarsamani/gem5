@@ -1325,8 +1325,10 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
         if (label) {
             DPRINTF(Usefulness, "%s: Mem access name %s from label cache for addr %#lx.\n", __func__, label.value(), request->getPaddr());
             if (from_cpu != nullptr && from_cpu->name() != label.value()) {
-                warn("%s: %s: Label mismatch between label cache (%s) and "
-                     "from CPU (%s) for addr %#lx. This does not influence the"
+                // NOTE: Warn only once due to performance reasons.
+                // It helps to know that such cases exist though.
+                warn_once("%s: %s: Label mismatch between label cache (%s) and"
+                     " from CPU (%s) for addr %#lx. This does not influence the"
                      " current access name. However, it does influence those "
                      "accesses that rely solely on the label cache for their names.\n",
                      name(),__func__, label.value(), from_cpu->name(), request->getPaddr());

@@ -252,6 +252,9 @@ structure (CacheMemory, external = "yes") {
   void profileDemandMiss();
   void profilePrefetchHit();
   void profilePrefetchMiss();
+  // MYSTUFF
+  void profileTransfer(MachineID, std::string, int);
+  // FFUTSYM
 }
 
 structure (WireBuffer, inport="yes", outport="yes", external = "yes") {

@@ -275,10 +275,13 @@ DataBlock::setAccessName(std::string name, bool can_override, std::string proxy_
         // NOTE: Just in case a physical address is reused, e.g. for local
         // variables of two functions before a labeled block is evicted.
         accessName = name;
-        warn("%s: %s: Overriding access name %s (overridable) with %s for addr %#lx.\n",
-                proxy_simobject_name, __func__, accessName, name, addr);
+        // NOTE: Commented out for performance reasons.
+        // warn("%s: %s: Overriding access name %s (overridable) with %s for addr %#lx.\n",
+        //         proxy_simobject_name, __func__, accessName, name, addr);
     } else if (accessName != name) {
-            warn("%s: %s: Attempt to override access "
+            // NOTE: warn_once due to performance reasons.
+            // It helps to know if such cases exist though.
+            warn_once("%s: %s: Attempt to override access "
                 "name %s with %s. Ignoring it!\n",
                 proxy_simobject_name, __func__, accessName, name);
     } else {

@@ -52,6 +52,7 @@
 #include "mem/cache/replacement_policies/base.hh"
 #include "mem/cache/replacement_policies/replaceable_entry.hh"
 #include "mem/ruby/common/DataBlock.hh"
+#include "mem/ruby/common/MachineID.hh"
 #include "mem/ruby/common/WriteMask.hh"
 #include "mem/ruby/protocol/CacheRequestType.hh"
 #include "mem/ruby/protocol/CacheResourceType.hh"
@@ -294,9 +295,12 @@ class CacheMemory : public SimObject
         statistics::Scalar uselessBlocksNotExplainedbyPrefetch;
     } cacheMemoryStats;
 
+    // MYSTUFF
     std::unordered_map<std::string, statistics::Histogram*> usefulBytes;
     std::unordered_map<std::string, statistics::Histogram*> readUsefulBytes;
     std::unordered_map<std::string, statistics::Histogram*> writeUsefulBytes;
+    std::unordered_map<std::string, std::unordered_map<MachineID, statistics::Scalar*>> bytesTransferred;
+    // FFUTSYM
 
     public:
       void resetStats() override;
@@ -309,6 +313,10 @@ class CacheMemory : public SimObject
       void profileDemandMiss();
       void profilePrefetchHit();
       void profilePrefetchMiss();
+
+      // MYSTUFF
+      void profileTransfer(MachineID dst, std::string acc_name, int num_bytes);
+      // FFUTSYM
 
 };
 

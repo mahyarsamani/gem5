@@ -3202,6 +3202,10 @@ action(Send_Data, desc="") {
   assert(tbe.snd_pendEv);
   assert(tbe.snd_pendBytes.count() > 0);
   tbe.snd_pendEv := false;
+
+  MachineID dest_machine;
+  int num_bytes;
+  std::string access_name;
   enqueue(datOutPort, CHIDataMsg, data_latency) {
     out_msg.addr := tbe.addr;
     out_msg.type := tbe.snd_msgType;
@@ -3228,8 +3232,12 @@ action(Send_Data, desc="") {
     out_msg.responder := machineID;
 
     out_msg.Destination.add(tbe.snd_destination);
-  }
 
+    dest_machine := tbe.snd_destination;
+    num_bytes := range;
+    access_name := tbe.access_name;
+  }
+  cache.profileTransfer(dest_machine, access_name, num_bytes);
   // send next chunk (if any) next cycle
   scheduleSendData(tbe, 1);
 }
