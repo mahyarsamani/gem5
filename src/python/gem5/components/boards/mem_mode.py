@@ -24,8 +24,7 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-"""Specifies the MemMode enum
-"""
+"""Specifies the MemMode enum"""
 
 from enum import Enum
 
@@ -43,7 +42,9 @@ def mem_mode_to_string(mem_mode: MemMode) -> str:
 
     :returns: The string form of the ``mem_mode``.
     """
-    if mem_mode == MemMode.TIMING:
+    if isinstance(mem_mode, str):
+        return mem_mode
+    elif mem_mode == MemMode.TIMING:
         return "timing"
     elif mem_mode == MemMode.ATOMIC:
         return "atomic"

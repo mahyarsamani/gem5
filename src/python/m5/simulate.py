@@ -348,7 +348,7 @@ def _changeMemoryMode(system, mode):
         print("System already in target mode. Memory mode unchanged.")
 
 
-def switchCpus(system, cpuList, verbose=True):
+def switchCpus(system, cpuList, has_ruby_cache=False, verbose=True):
     """Switch CPUs in a system.
 
     .. note::
@@ -371,8 +371,8 @@ def switchCpus(system, cpuList, verbose=True):
         if not isinstance(item, tuple) or len(item) != 2:
             raise RuntimeError("List must have tuples of (oldCPU,newCPU)")
 
-    old_cpus = [old_cpu for old_cpu, new_cpu in cpuList]
-    new_cpus = [new_cpu for old_cpu, new_cpu in cpuList]
+    old_cpus = [old_cpu for old_cpu, _ in cpuList]
+    new_cpus = [new_cpu for _, new_cpu in cpuList]
     old_cpu_set = set(old_cpus)
     memory_mode_name = new_cpus[0].memory_mode()
     for old_cpu, new_cpu in cpuList:
@@ -406,6 +406,9 @@ def switchCpus(system, cpuList, verbose=True):
         memory_mode = MemoryMode(memory_mode_name).getValue()
     except KeyError:
         raise RuntimeError(f"Invalid memory mode ({memory_mode_name})")
+
+    if has_ruby_cache and memory_mode == "atomic":
+        memory_mode = "atomic_noncaching"
 
     drain()
 
