@@ -64,8 +64,9 @@ int countBoolVec(BoolVec bVec);
 RequestorID getRequestorID(RequestPtr req);
 // MYSTUFF:
 bool isSparse(RequestPtr req);
-Addr getNextAddr(RequestPtr req);
-int getNextSize(RequestPtr req);
+RequestPtr getNextReq(RequestPtr req);
+Addr getAddr(RequestPtr req);
+int getSize(RequestPtr req);
 bool isInvalid(MachineID mid);
 std::string getMemAccessName(RequestPtr req);
 // FFUTSYM:

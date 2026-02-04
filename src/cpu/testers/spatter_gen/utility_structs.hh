@@ -98,6 +98,8 @@ class SpatterAccess: public Extension<Request, SpatterAccess>,
     RequestorID requestorId;
     SpatterKernelType _kernelType;
     Tick accTripTime;
+
+    Addr emulatedPC;
     std::queue<AccessPair> accessPairs;
 
     mutable Random::RandomPtr rng = Random::genRandom();
@@ -110,7 +112,7 @@ class SpatterAccess: public Extension<Request, SpatterAccess>,
         return access_pair;
     }
 
-    PacketPtr createPacket(Addr addr, size_t size, MemCmd cmd)
+    RequestPtr createRequest(Addr addr, size_t size, MemCmd cmd, Addr pc)
     {
         RequestPtr req = std::make_shared<Request>(addr, size, 0, requestorId);
         req->setExtension<SpatterAccess>(shared_from_this());
@@ -118,7 +120,13 @@ class SpatterAccess: public Extension<Request, SpatterAccess>,
         // get entropy into higher bits
         // This piece of code is directly copied from
         // gem5::TrafficGen::
-        req->setPC(((Addr) requestorId) << 2);
+        req->setPC(pc << 2);
+        return req;
+    }
+
+    PacketPtr createPacket(Addr addr, size_t size, MemCmd cmd, Addr pc)
+    {
+        RequestPtr req = createRequest(addr, size, cmd, pc);
         PacketPtr pkt = new Packet(req, cmd);
         uint8_t* pkt_data = new uint8_t[req->getSize()];
         // Randomly intialize pkt_data, for testing cache coherence.
@@ -133,10 +141,10 @@ class SpatterAccess: public Extension<Request, SpatterAccess>,
     SpatterAccess(
         RequestorID requestor_id,
         SpatterKernelType kernel_type,
-        const std::queue<AccessPair>& access_pairs
+        const std::queue<AccessPair> &access_pairs
     ):
         requestorId(requestor_id), _kernelType(kernel_type),
-        accTripTime(0), accessPairs(access_pairs)
+        accTripTime(0), emulatedPC(0), accessPairs(access_pairs)
     {}
 
     SpatterKernelType type() const { return _kernelType; }
@@ -159,6 +167,21 @@ class SpatterAccess: public Extension<Request, SpatterAccess>,
         return clone;
     }
 
+    RequestPtr nextRequestAsNormal()
+    {
+        Addr addr;
+        size_t size;
+        std::tie(addr, size) = nextAccessPair();
+        MemCmd cmd;
+        if (tripsLeft() >= 1){
+            cmd = MemCmd::ReadReq;
+        } else {
+            cmd = _kernelType == \
+                SpatterKernelType::gather ? MemCmd::ReadReq : MemCmd::WriteReq;
+        }
+        return createRequest(addr, size, cmd, emulatedPC++);
+    }
+
     PacketPtr nextPacketAsNormal()
     {
         Addr addr;
@@ -171,7 +194,18 @@ class SpatterAccess: public Extension<Request, SpatterAccess>,
             cmd = _kernelType == \
                 SpatterKernelType::gather ? MemCmd::ReadReq : MemCmd::WriteReq;
         }
-        return createPacket(addr, size, cmd);
+        return createPacket(addr, size, cmd, emulatedPC++);
+    }
+
+    RequestPtr nextRequestAsInd()
+    {
+        Addr addr;
+        size_t size;
+        std::tie(addr, size) = nextAccessPair();
+        MemCmd cmd;
+        cmd = _kernelType == SpatterKernelType::gather ? \
+            MemCmd::ReadIndReq : MemCmd::WriteIndReq;
+        return createRequest(addr, size, cmd, emulatedPC++);
     }
 
     PacketPtr nextPacketAsInd()
@@ -182,21 +216,7 @@ class SpatterAccess: public Extension<Request, SpatterAccess>,
         MemCmd cmd;
         cmd = _kernelType == SpatterKernelType::gather ? \
             MemCmd::ReadIndReq : MemCmd::WriteIndReq;
-        return createPacket(addr, size, cmd);
-    }
-
-    Addr nextIndAccAddr()
-    {
-        Addr addr;
-        std::tie(addr, std::ignore) = accessPairs.front();
-        return addr;
-    }
-
-    size_t nextIndAccSize()
-    {
-        size_t size;
-        std::tie(std::ignore, size) = accessPairs.front();
-        return size;
+        return createPacket(addr, size, cmd, emulatedPC++);
     }
 
     void startNextTrip()
@@ -204,7 +224,6 @@ class SpatterAccess: public Extension<Request, SpatterAccess>,
         assert(tripsLeft() > 0);
         accessPairs.pop();
     }
-
 };
 
 class SpatterKernel
@@ -212,6 +231,33 @@ class SpatterKernel
   private:
     typedef enums::SpatterKernelType SpatterKernelType;
     typedef SpatterAccess::AccessPair AccessPair;
+
+    template <typename T>
+    class RollingDeque : public std::deque<T> { // Fixed: added <T>
+      private:
+        size_t remainingRolls;
+
+      public:
+        // Use the member initializer list for better performance
+        RollingDeque(const std::vector<T>& values):
+            std::deque<T>(values.begin(), values.end()),
+            remainingRolls(values.size())
+        {}
+
+        bool roll() {
+            if (this->empty()) return false;
+
+            T to_roll = this->front();
+            this->pop_front();
+            this->push_back(to_roll);
+
+            if (--remainingRolls == 0) {
+                remainingRolls = this->size();
+            }
+
+            return remainingRolls == this->size();
+        }
+    };
 
     class IndexGen
     {
@@ -257,13 +303,13 @@ class SpatterKernel
     size_t valueSize;
     Addr baseValueAddr;
 
-    // current iteration over indices
-    uint32_t iteration;
+    Addr baseAliasAddr;
 
     // number of times we have left to roll indices to finish one iteration.
-    uint32_t remRolls;
-    std::deque<uint32_t> indices;
+    RollingDeque<uint32_t> indices;
 
+    // current iteration over indices
+    uint32_t iteration;
   public:
 
     SpatterKernel(
@@ -272,24 +318,19 @@ class SpatterKernel
         SpatterKernelType type,
         uint32_t base_index, uint32_t indices_per_stride, uint32_t stride,
         size_t index_size, Addr base_index_addr,
-        size_t value_size, Addr base_value_addr
+        size_t value_size, Addr base_value_addr,
+        size_t alias_size, Addr base_alias_addr,
+        const std::vector<uint32_t> &pattern
     ):
         requestorId(requestor_id),
         indexGen(base_index, indices_per_stride, stride),
-        _id(id), delta(delta), count(count),
-        _type(type),
+        _id(id), delta(delta), count(count), _type(type),
         indexSize(index_size), baseIndexAddr(base_index_addr),
         valueSize(value_size), baseValueAddr(base_value_addr),
-        iteration(0), remRolls(0)
+        baseAliasAddr(base_alias_addr), indices(pattern), iteration(0)
     {}
 
     uint32_t id() const { return _id; }
-
-    void setIndices(const std::vector<uint32_t>& pattern)
-    {
-        indices.assign(pattern.begin(), pattern.end());
-        remRolls = indices.size();
-    }
 
     SpatterKernelType type() const { return _type; }
 
@@ -301,18 +342,22 @@ class SpatterKernel
         // get the next index for the index array
         uint32_t index = indexGen.nextIndex();
         Addr index_addr = baseIndexAddr + (index * indexSize);
-        access_pairs.emplace(index_addr, indexSize);
 
         uint32_t front = indices.front();
         uint32_t value_index = (delta * iteration) + front;
         Addr value_addr = baseValueAddr + (value_index * valueSize);
+
+        // Addr alias_addr = baseAliasAddr + (index * valueSize);
+        // MYSTUFF: FIXME: NOTE: This is temporary.
+        // alias_addr does not work outside of vector accesses.
+        Addr alias_addr = baseAliasAddr + (index * 64);
+
+        access_pairs.emplace(alias_addr, valueSize);
+        access_pairs.emplace(index_addr, indexSize);
         access_pairs.emplace(value_addr, valueSize);
+
         // roll indices
-        indices.pop_front();
-        indices.push_back(front);
-        remRolls--;
-        if (remRolls == 0) {
-            remRolls = indices.size();
+        if (indices.roll()) {
             iteration++;
         }
 

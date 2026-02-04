@@ -257,7 +257,7 @@ class Sequencer : public RubyPort
                                         RubyRequestType primary_type,
                                         RubyRequestType secondary_type);
 
-    RubySystem *m_ruby_system;
+    // RubySystem *m_ruby_system;
 
   public:
     // MYSTUFF

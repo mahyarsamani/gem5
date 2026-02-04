@@ -341,35 +341,6 @@ getRequestorID(RequestPtr req)
     return req->requestorId();
 }
 
-inline Addr
-getNextAddr(RequestPtr req)
-{
-    std::shared_ptr<SpatterAccess> spatter_access = req->getExtension<SpatterAccess>();
-    if (spatter_access == nullptr) {
-        return -1;
-    } else {
-        return spatter_access->nextIndAccAddr();
-    }
-}
-
-// inline Addr
-// calculateNextAddr(DataBlock &data, Addr offset, int acc_size, Addr second_base, Addr second_size)
-// {
-//     const uint8_t *index = data.getData(offset, acc_size);
-//     return 0;
-// }
-
-inline int
-getNextSize(RequestPtr req)
-{
-    std::shared_ptr<SpatterAccess> spatter_access = req->getExtension<SpatterAccess>();
-    if (spatter_access == nullptr) {
-        return -1;
-    } else {
-        return (int) spatter_access->nextIndAccSize();
-    }
-}
-
 inline bool
 isInvalid(MachineID m_id)
 {
@@ -387,6 +358,26 @@ getMemAccessName(RequestPtr req)
         return "";
     }
 }
+
+inline RequestPtr
+getNextReq(RequestPtr req)
+{
+    std::shared_ptr<SpatterAccess> spatter_access = req->getExtension<SpatterAccess>();
+    return spatter_access->nextRequestAsInd();
+}
+
+inline Addr
+getAddr(RequestPtr req)
+{
+    return req->getPaddr();
+}
+
+inline int
+getSize(RequestPtr req)
+{
+    return req->getSize();
+}
+
 // FFUTSYM:
 
 } // namespace ruby

@@ -478,8 +478,7 @@ CacheMemory::cacheProbeWithSparsityInMind(Addr address, bool is_sparse) const
     return m_cache[cacheSet][m_replacementPolicy_ptr->
                         getVictim(candidates)->getWay()]->m_Address;
 }
-// FFUTSYM:
-
+// FFUTSYM
 
 // looks an address up in the cache
 AbstractCacheEntry*
@@ -502,6 +501,7 @@ CacheMemory::lookup(Addr address) const
     if (loc == -1) return NULL;
     return m_cache[cacheSet][loc];
 }
+
 
 // Sets the most recently used bit for a cache block
 void

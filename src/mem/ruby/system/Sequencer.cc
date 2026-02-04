@@ -78,7 +78,7 @@ Sequencer::Sequencer(const Params &p)
     m_sequencer_type = p.seq_type;
     m_outstanding_count = 0;
 
-    m_ruby_system = p.ruby_system;
+    // m_ruby_system = p.ruby_system;
 
     m_dataCache_ptr = p.dcache;
     m_instCache_ptr = p.icache;
@@ -380,12 +380,11 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType primary_type,
     }
 
     Addr line_addr = makeLineAddress(pkt->getAddr());
-    // Check if there is any outstanding request for the same cache line.
-    // MYSTUFF
-    if (primary_type == RubyRequestType_LDIND) {
-        line_addr = ((pkt->getAddr() - line_addr) / pkt->getSize()) * 64;
+    if (primary_type == RubyRequestType_LDIND ||
+        primary_type == RubyRequestType_STIND) {
+        line_addr = pkt->getAddr();
     }
-    // FFUTSYM
+    // Check if there is any outstanding request for the same cache line.
     auto &seq_req_list = m_RequestTable[line_addr];
     // Create a default entry
     seq_req_list.emplace_back(pkt, primary_type,
@@ -628,7 +627,9 @@ Sequencer::readCallback(Addr address, DataBlock& data,
     // Free up read requests until we hit the first Write request
     // or end of the corresponding list.
     //
-    assert(address == makeLineAddress(address));
+    // MYSTUFF: FIXME: NOTE: Temporary change
+    // This is because indirect accesses have alias not aligned.
+    // assert(address == makeLineAddress(address));
     assert(m_RequestTable.find(address) != m_RequestTable.end());
     auto &seq_req_list = m_RequestTable[address];
 
@@ -1139,7 +1140,12 @@ Sequencer::makeRequest(PacketPtr pkt)
             // Note: M5 packets do not differentiate ST from RMW_Write
             //{
             if (pkt->isIndirect()) {
-                primary_type = secondary_type = RubyRequestType_STIND;
+                if (m_controller->disambiguated(pkt->getAddr())) {
+                    pkt->setAddr(m_controller->getAddrFromAlias(pkt->getAddr()));
+                    primary_type = secondary_type = RubyRequestType_ST;
+                } else {
+                    primary_type = secondary_type = RubyRequestType_STIND;
+                }
             } else {
                 primary_type = secondary_type = RubyRequestType_ST;
             }
@@ -1150,7 +1156,12 @@ Sequencer::makeRequest(PacketPtr pkt)
             } else if (pkt->req->isInstFetch()) {
                 primary_type = secondary_type = RubyRequestType_IFETCH;
             } else if (pkt->isIndirect()) {
-                primary_type = secondary_type = RubyRequestType_LDIND;
+                if (m_controller->disambiguated(pkt->getAddr())) {
+                    pkt->setAddr(m_controller->getAddrFromAlias(pkt->getAddr()));
+                    primary_type = secondary_type = RubyRequestType_LD;
+                } else {
+                    primary_type = secondary_type = RubyRequestType_LDIND;
+                }
             } else {
                 if (pkt->req->isReadModifyWrite()) {
                     primary_type = RubyRequestType_RMW_Read;

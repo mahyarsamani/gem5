@@ -84,8 +84,12 @@ class RejectException: public std::exception
 
 class AbstractController : public ClockedObject, public Consumer
 {
+  // MYSTUFF
+  private:
+    std::unordered_map<Addr, Addr> addrToAliasMap;
+    std::unordered_map<Addr, Addr> aliasToAddrMap;
+
   protected:
-    // MYSTUFF
     // NOTE: Pointer to all sequencers that are upstream to this controller.
     // The list should be of length 1 for a private cache controller, and
     // of length >= 1 for a shared cache controller.
@@ -95,6 +99,9 @@ class AbstractController : public ClockedObject, public Consumer
 
     std::string getName() { return name(); }
   public:
+    bool disambiguated(Addr alias) { return aliasToAddrMap.find(alias) != aliasToAddrMap.end(); }
+    void setAliasForAddr(Addr alias, Addr address) { addrToAliasMap[address] = alias; aliasToAddrMap[alias] = address; }
+    Addr getAddrFromAlias(Addr alias) { return aliasToAddrMap[alias]; }
     // FFUTSYM
   public:
     PARAMS(RubyController);

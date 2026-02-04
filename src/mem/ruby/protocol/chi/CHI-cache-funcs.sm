@@ -69,7 +69,6 @@ void outgoingTransactionEnd(Addr, bool, bool);
 Event curTransitionEvent();
 State curTransitionNextState();
 
-
 ////////////////////////////////////////////////////////////////////////////
 // Interface functions required by SLICC
 
@@ -91,16 +90,16 @@ DirEntry getDirEntry(Addr addr), return_by_pointer = "yes" {
 
 State getState(TBE tbe, CacheEntry cache_entry, Addr addr) {
   if (is_valid(tbe)) {
-      return tbe.state;
+    return tbe.state;
   } else if (is_valid(cache_entry)) {
     return cache_entry.state;
   } else {
-      DirEntry dir_entry := getDirEntry(addr);
-      if (is_valid(dir_entry)) {
-        return dir_entry.state;
-      } else {
-        return State:I;
-      }
+    DirEntry dir_entry := getDirEntry(addr);
+    if (is_valid(dir_entry)) {
+      return dir_entry.state;
+    } else {
+      return State:I;
+    }
   }
 }
 
@@ -299,7 +298,7 @@ Cycles mandatoryQueueLatency(RubyRequestType type) {
   return intToCycles(1);
 }
 
-// MYSTUFF: Calculate the latency of a tag access.
+// Calculate the latency of a tag access.
 Cycles tagLatency(bool from_sequencer) {
   if (from_sequencer) {
     //mandatoryQueueLatency accounts for 1 cy
@@ -873,10 +872,13 @@ bool needCacheEntry(CHIRequestType req_type, CHIRequestType second_type,
   if (second_type != CHIRequestType:null) {
     // MYSTUFF
     // TODO: Need to figure out what we need to do later.
-    return  (gather_cache && (second_type == CHIRequestType:ReadIndirect)) ||
-            (gather_cache && (second_type == CHIRequestType:WriteIndirect)) ||
-            (value_cache && (second_type == CHIRequestType:ReadValue)) ||
-            (value_cache && (second_type == CHIRequestType:WriteValue));
+    bool gather_cache_criterion := (alloc_for_index &&
+                                    ((second_type == CHIRequestType:ReadIndirect) ||
+                                    (second_type == CHIRequestType:WriteIndirect))
+                                    );
+    bool value_cache_criterion := (((alloc_for_read_value && second_type == CHIRequestType:ReadValue) ||
+                                    (alloc_for_write_value && second_type == CHIRequestType:WriteValue)));
+    return gather_cache_criterion || value_cache_criterion;
     // FFUTSYM
   } else if (is_valid(cache_entry) ||
       (enable_DMT && is_invalid(dir_entry) &&
@@ -1638,7 +1640,7 @@ void replicateTBE(TBE src, TBE dst) {
   dst.is_remote_pf := src.is_remote_pf;
 
   dst.atomic_op := src.atomic_op;
-  dst.atomic_to_be_done := src.atomic_to_be_done;
+dst.atomic_to_be_done := src.atomic_to_be_done;
   dst.atomic_to_be_wb := src.atomic_to_be_wb;
 
   dst.seqReq := src.seqReq;
@@ -1774,7 +1776,7 @@ CHIRequestType manipulateSecondType(CHIRequestMsg msg)
     } else if (compact_cache && msg.type == CHIRequestType:WriteValue) {
         return CHIRequestType:WriteValue;
     } else {
-        return CHIRequestType:null;
+        return msg.secondType;
     }
 }
 
@@ -1817,4 +1819,14 @@ bool isIndirect(CHIRequestType type, CHIRequestType second_type) {
         (second_type == CHIRequestType:WriteValue)
     );
 }
+
+void setAddrFromReq(CHIRequestMsg &out_msg, RequestPtr req)
+{
+    out_msg.seqReq := req;
+    out_msg.isSeqReqValid := true;
+    out_msg.accAddr := getAddr(req);
+    out_msg.addr := makeLineAddress(getAddr(req));
+    out_msg.accSize := getSize(req);
+}
+
 // FFUTSYM

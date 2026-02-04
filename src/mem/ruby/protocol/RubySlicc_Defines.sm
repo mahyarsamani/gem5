@@ -41,5 +41,8 @@ bool functionalMemoryWrite(Packet *pkt);
 std::string getName();
 
 bool canOverride(std::string, Addr);
+bool disambiguated(Addr);
+void setAliasForAddr(Addr, Addr);
+Addr getAddr(Addr);
 // FFUTSYM
 void dequeueMemRespQueue();

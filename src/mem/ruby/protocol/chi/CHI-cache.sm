@@ -226,11 +226,15 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   // NOTE: Maybe the index cache doesn't need to allocate for index either.
   // We can answer whether it is useful to cache or not cache index
   // by counting the number of useful bytes in index cache blocks.
-  bool gather_cache;
-  bool value_cache;
-  bool compact_cache;
+  bool gather_cache := "False";
+  bool value_cache := "False";
+  bool compact_cache := "False";
 
-  bool compact_with_sparsity;
+  bool alloc_for_index := "False";
+  bool alloc_for_read_value := "False";
+  bool alloc_for_write_value := "False";
+
+  bool compact_with_sparsity := "False";
 
   Cycles send_value_delay := 1;
   Cycles fwd_ind_acc_delay := 1;

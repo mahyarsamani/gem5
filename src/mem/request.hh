@@ -1216,22 +1216,21 @@ class MemAccessName: public Extension<Request, MemAccessName>
     std::string name() const { return _name; }
 };
 
-class IndirectHeader: public Extension<Request, IndirectHeader>
-{
-  private:
-    Addr _baseValueAddr;
-    Addr _valueElemSize;
-    Addr _aliasAddr;
+// class IndirectAccess: public Extension<Request, IndirectAccess>,
+//                     public std::enable_shared_from_this<IndirectAccess>
+// {
+//   public:
+//     IndirectAccess() {}
 
-  public:
-    IndirectHeader(Addr base_value_addr, Addr value_elem_size, Addr alias_addr):
-        _baseValueAddr(base_value_addr), _valueElemSize(value_elem_size), _aliasAddr(alias_addr)
-    {}
+//     virtual std::unique_ptr<ExtensionBase> clone() const override
+//     {
+//         return std::make_unique<IndirectAccess>();
+//     }
 
-    Addr baseValueAddr() { return _baseValueAddr; }
-    Addr valueElemSize() { return _valueElemSize; }
-    Addr aliasAddr() { return _aliasAddr; }
-};
+//     virtual Packet* nextPacket() = 0;
+
+//     RequestPtr nextRequest() { return nextPacket()->req; }
+// };
 
 } // namespace gem5
 

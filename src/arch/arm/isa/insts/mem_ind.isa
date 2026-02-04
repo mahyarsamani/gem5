@@ -1,0 +1,162 @@
+// -*- mode:c++ -*-
+
+////////////////////////////////////////////////////////////////////
+//
+// Custom Indirect Load/Store Instructions
+//
+////////////////////////////////////////////////////////////////////
+
+let {{
+    import math
+
+    # -------------------------------------------------------------------------
+    # Python Classes
+    # -------------------------------------------------------------------------
+
+    class CustomLoadStore(LoadStoreInst):
+        def __init__(self, mnem, size, flavor):
+            # Ensure decConstBase is set if not already set by subclass ref
+            if not hasattr(self, 'decConstBase'):
+                 self.decConstBase = 'MemoryOffset'
+
+            # Ensure execBase is set for eval()
+            # It is set by subclasses (LoadIndirectInt -> execBase='Load')
+
+            super().__init__()
+            self.name = mnem
+            self.size = size
+            self.flavor = flavor
+            self.post = False
+            self.add = True
+            self.writeback = False
+            self.sign = False
+            self.user = False
+            self.rasPop = False
+            self.memFlags = ["%d" % int(math.log(self.size, 2)), "ArmISA::MMU::AllowUnaligned"]
+            self.instFlags = []
+            self.codeBlobs = {"postacc_code" : ""}
+
+        # Copied from LoadInst64 in ldr64.isa
+        def emitHelper(self, base='Memory64', wbDecl=None):
+            global header_output, decoder_output, exec_output
+
+            # If this is a microop itself, don't allow anything that would
+            # require further microcoding.
+            # if self.micro:
+            #     assert not wbDecl
+
+            # Simplified for skeleton: always assume normal
+            fa_code = None
+
+            (newHeader, newDecoder, newExec) = \
+                self.fillTemplates(self.name, self.Name, self.codeBlobs,
+                                   self.memFlags, self.instFlags,
+                                   base, wbDecl, faCode=fa_code)
+
+            header_output += newHeader
+            decoder_output += newDecoder
+            exec_output += newExec
+
+
+    class LoadIndirectBase(CustomLoadStore):
+        def emit(self):
+            # Standard LoadReg64 uses 'ArmISA::MemoryReg64'.
+            self.emitHelper('ArmISA::MemoryReg64', None)
+
+    # -------------------------------------------------------------------------
+    # Integer Load Pair (ldind)
+    # -------------------------------------------------------------------------
+    class LoadIndirectInt(LoadIndirectBase):
+        execBase = 'Load'
+        decConstBase = 'LoadReg'
+        def __init__(self, mnem, size):
+            super().__init__(mnem, size, 'normal')
+            self.Name = "LDIND_" + ("W" if size==4 else "X")
+
+            memacc = "IWDest = Mem_uw;" if size == 4 else "Dest = Mem_ud;"
+
+            self.codeBlobs = {
+                "ea_code": "EA = Base + (Index << %d);" % (2 if size==4 else 3),
+                "memacc_code": """
+                    uint64_t extra = xc->readIntRegOperand(this, bits(machInst, 9, 5));
+                    (void)extra;
+                    %s
+                """ % memacc
+            }
+
+    # -------------------------------------------------------------------------
+    # Vector Load (vldind)
+    # -------------------------------------------------------------------------
+    class LoadIndirectVec(LoadIndirectBase):
+        execBase = 'Load'
+        decConstBase = 'LoadReg'
+        def __init__(self, mnem, size):
+            super().__init__(mnem, size, 'fp')
+            self.Name = "VLDIND_" + ("S" if size==4 else "D")
+
+            memacc = "FpDest_uw = Mem_uw;" if size == 4 else "FpDest_ud = Mem_ud;"
+
+            self.codeBlobs = {
+                "ea_code": """
+                    EA = Base + (Index << %d);
+                """ % (2 if size==4 else 3),
+                "memacc_code": """
+                    uint64_t extra = xc->readIntRegOperand(this, bits(machInst, 9, 5));
+                    (void)extra;
+
+                    %s
+                """ % memacc
+            }
+            self.codeBlobs["ea_code"] += "\\n" + vfpEnabledCheckCode
+
+    # -------------------------------------------------------------------------
+    # Integer Store Pair (stind)
+    # -------------------------------------------------------------------------
+    class StoreIndirectInt(LoadIndirectBase):
+        execBase = 'Store'
+        decConstBase = 'StoreReg'
+        def __init__(self, mnem, size):
+            super().__init__(mnem, size, 'normal')
+            self.Name = "STIND_" + ("W" if size==4 else "X")
+
+            memacc = "Mem_uw = Dest;" if size == 4 else "Mem_ud = Dest;"
+
+            self.codeBlobs = {
+                "ea_code": "EA = Base + (Index << %d);" % (2 if size==4 else 3),
+                "memacc_code": memacc
+            }
+
+    # -------------------------------------------------------------------------
+    # Vector Store (vstind)
+    # -------------------------------------------------------------------------
+    class StoreIndirectVec(LoadIndirectBase):
+        execBase = 'Store'
+        decConstBase = 'StoreReg'
+        def __init__(self, mnem, size):
+            super().__init__(mnem, size, 'fp')
+            self.Name = "VSTIND_" + ("S" if size==4 else "D")
+
+            memacc = "Mem_uw = FpDest_uw;" if size == 4 else "Mem_ud = FpDest_ud;"
+
+            self.codeBlobs = {
+                "ea_code": "EA = Base + (Index << %d);" % (2 if size==4 else 3),
+                "memacc_code": memacc
+            }
+            self.codeBlobs["ea_code"] += "\\n" + vfpEnabledCheckCode
+
+
+    def buildIndirect(mnem_ld, mnem_st, mnem_vld, mnem_vst):
+        # 0x8 Load
+        LoadIndirectInt(mnem_ld, 4).emit()
+        LoadIndirectInt(mnem_ld, 8).emit()
+        LoadIndirectVec(mnem_vld, 4).emit()
+        LoadIndirectVec(mnem_vld, 8).emit()
+
+        # 0xC Store
+        StoreIndirectInt(mnem_st, 4).emit()
+        StoreIndirectInt(mnem_st, 8).emit()
+        StoreIndirectVec(mnem_vst, 4).emit()
+        StoreIndirectVec(mnem_vst, 8).emit()
+
+    buildIndirect("ldind", "stind", "vldind", "vstind")
+}};

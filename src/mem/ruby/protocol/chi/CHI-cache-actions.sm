@@ -176,8 +176,9 @@ action(AllocateTBE_SeqRequest, desc="") {
         error("Invalid RubyRequestType");
       }
 
-      // MYSTUFF NOTE: If you compare these call to manipulateType
-      // and manipulateSecondType, you'll see that there in_msg is used
+      // MYSTUFF NOTE: If you compare these calls to manipulateType
+      // and manipulateSecondType in AllocateTBE_Request,
+      // you'll see that there in_msg is used
       // and here out_msg is used. It's because that we want a message
       // that is CHIRequestMsg. The right way to do it is to pass in_msg.
       // However, we really don't have a choice here. It's ok only when
@@ -188,7 +189,6 @@ action(AllocateTBE_SeqRequest, desc="") {
       out_msg.is_sparse := isSparse(in_msg.getRequestPtr());
       out_msg.access_name := getMemAccessName(in_msg.getRequestPtr());
 
-      out_msg.alias := ((in_msg.PhysicalAddress - in_msg.LineAddress) / in_msg.Size) * 64;
       DPRINTF(Usefulness, "Setting access name for addr %#lx to %s.\n", out_msg.addr, out_msg.access_name);
       // MYSTUFF
     }
@@ -3748,7 +3748,17 @@ action(ProcessNextState_ClearPending, desc="") {
 action(Callback_LoadHit, desc="") {
   assert(is_valid(tbe));
   assert(tbe.reqType == CHIRequestType:Load);
-  if (tbe.is_local_pf == false) {
+
+  if (isIndirect(tbe.reqType, tbe.secondType)) {
+    if (tbe.dataValid && (tbe.reqType == CHIRequestType:Load)) {
+        // NOTE: Could be index load or value load
+        DPRINTF(IndirectAccess, "Finished servicing a hit for a load to addr %#lx.\n", tbe.addr);
+        if (tbe.secondType == CHIRequestType:ReadValue) {
+            DPRINTF(IndirectAccess, "Load to addr %#lx was to a value.\n", tbe.addr);
+            sequencer.readCallback(tbe.alias, tbe.dataBlk, true);
+        }
+    }
+  } else if (tbe.is_local_pf == false) {
     assert(tbe.dataValid);
     DPRINTF(RubySlicc, "Read data %s\n", tbe.dataBlk);
     sequencer.readCallback(tbe.addr, tbe.dataBlk, false);
@@ -4285,7 +4295,11 @@ action(Fwd_ReadIndirect, desc="Forward ReadIndirect") {
   enqueue(reqOutPort, CHIRequestMsg, request_latency) {
     prepareRequest(tbe, CHIRequestType:ReadIndirect, out_msg);
 
-    out_msg.Destination.add(mapAddressToDownstreamMachine(tbe.addr));
+    if (compact_cache) {
+        out_msg.alias := tbe.accAddr;
+        setAddrFromReq(out_msg, getNextReq(tbe.seqReq));
+    }
+    out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
     // NOTE: What do the following two lines mean?
     out_msg.dataToFwdRequestor := false;
     allowRequestRetry(tbe, out_msg);
@@ -4297,35 +4311,29 @@ action(Initiate_Dependent_Requests, desc="Start accesses that are dependent on t
     if (gather_cache && tbe.secondType == CHIRequestType:ReadIndirect) {
         enqueue(reqOutPort, CHIRequestMsg, request_latency) {
             indirectDependentBoilerPlate(out_msg);
-            Addr next_acc_addr := getNextAddr(tbe.seqReq);
-            Addr next_addr := makeLineAddress(next_acc_addr);
-            out_msg.addr := next_addr;
-            out_msg.accAddr := next_acc_addr;
-            out_msg.accSize := getNextSize(tbe.seqReq);
+            setAddrFromReq(out_msg, getNextReq(tbe.seqReq));
             out_msg.type := CHIRequestType:ReadValue;
             out_msg.compact_cache_id := tbe.compact_cache_id;
             out_msg.value_cache_id := tbe.value_cache_id;
             out_msg.index_cache_id := tbe.index_cache_id;
+            out_msg.alias := tbe.alias;
 
             if (isInvalid(tbe.compact_cache_id)) {
                 DPRINTF(IndirectAccess, "Compact cache id not set yet. Sending ReadValue downstream.\n");
-                out_msg.Destination.add(mapAddressToDownstreamMachine(next_addr));
+                out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
             } else {
                 DPRINTF(IndirectAccess, "Compact cache id set. Sending ReadValue upstream.\n");
                 out_msg.Destination.add(tbe.compact_cache_id);
             }
         }
-        DPRINTF(IndirectAccess, "Need subsequent access to addr: %#lx.\n", getNextAddr(tbe.seqReq));
+        // FIXME: getNextAddr(tbe.seqReq) is not going to work since we popped front.
+        // DPRINTF(IndirectAccess, "Need subsequent access to addr: %#lx.\n", getNextAddr(tbe.seqReq));
     }
 
     if (gather_cache && tbe.secondType == CHIRequestType:WriteIndirect) {
         enqueue(reqOutPort, CHIRequestMsg, request_latency) {
             indirectDependentBoilerPlate(out_msg);
-            Addr next_acc_addr := getNextAddr(tbe.seqReq);
-            Addr next_addr := makeLineAddress(next_acc_addr);
-            out_msg.addr := next_addr;
-            out_msg.accAddr := next_acc_addr;
-            out_msg.accSize := getNextSize(tbe.seqReq);
+            setAddrFromReq(out_msg, getNextReq(tbe.seqReq));
             out_msg.type := CHIRequestType:WriteValue;
             out_msg.compact_cache_id := tbe.compact_cache_id;
             out_msg.value_cache_id := tbe.value_cache_id;
@@ -4333,14 +4341,22 @@ action(Initiate_Dependent_Requests, desc="Start accesses that are dependent on t
 
             if (isInvalid(tbe.compact_cache_id)) {
                 DPRINTF(IndirectAccess, "Compact cache id not set yet. Sending ReadValue downstream.\n");
-                out_msg.Destination.add(mapAddressToDownstreamMachine(next_addr));
+                out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
             } else {
                 DPRINTF(IndirectAccess, "Compact cache id set. Sending ReadValue upstream.\n");
                 out_msg.Destination.add(tbe.compact_cache_id);
             }
         }
-        DPRINTF(IndirectAccess, "Need subsequent access to addr: %#lx.\n", getNextAddr(tbe.seqReq));
+        // FIXME: getNextAddr(tbe.seqReq) is not going to work since we popped front.
+        // DPRINTF(IndirectAccess, "Need subsequent access to addr: %#lx.\n", getNextAddr(tbe.seqReq));
     }
+
+    // if (compact_cache &&
+    //     ((tbe.secondType == CHIRequestType:ReadValue && alloc_for_read_value) ||
+    //     (tbe.secondType == CHIRequestType:WriteValue && alloc_for_write_value))
+    // ) {
+    //     setAliasForAddr(tbe.alias, tbe.accAddr);
+    // }
 }
 
 // FFUTSYM

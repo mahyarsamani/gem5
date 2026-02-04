@@ -147,7 +147,7 @@ structure(CHIRequestMsg, desc="", interface="Message") {
   MachineID value_cache_id,        desc="MachineID of the value cache for an indirect request";
   MachineID index_cache_id,        desc="MachineID of the index cache for an indirect request";
 
-  CHIRequestType secondType,     desc="Secondary type of request for an indirect request";
+  CHIRequestType secondType,     default="CHIRequestType_null", desc="Secondary type of request for an indirect request";
 
   WriteMask read_usefulness,     desc="Mask denoting bytes that were useful for read.";
   WriteMask write_usefulness,    desc="Mask denoting bytes that were useful for write.";

@@ -153,6 +153,8 @@ class SpatterKernel:
         base_index_addr: Addr,
         value_size: int,
         base_value_addr: Addr,
+        alias_size: int,
+        base_alias_addr: Addr,
         kernel_trace: List[int],
     ):
         self._id = kernel_id
@@ -166,6 +168,8 @@ class SpatterKernel:
         self._base_index_addr = base_index_addr
         self._value_size = value_size
         self._base_value_addr = base_value_addr
+        self._alias_size = alias_size
+        self._base_alias_addr = base_alias_addr
         self._trace = kernel_trace
 
     def empty(self):
@@ -184,6 +188,8 @@ class SpatterKernel:
             self._base_index_addr,
             self._value_size,
             self._base_value_addr,
+            self._alias_size,
+            self._base_alias_addr,
             self._trace,
         ]
 
@@ -346,6 +352,7 @@ def prepare_kernels(
     interleave_size: int,
     base_index_addr: Addr,
     base_value_addr: Addr,
+    base_alias_addr: Addr,
 ) -> List[List[SpatterKernel]]:
     """
     Function to prepare kernels from a spatter trace. It will read the trace
@@ -395,6 +402,8 @@ def prepare_kernels(
                     base_index_addr=base_index_addr,
                     value_size=8,
                     base_value_addr=base_value_addr,
+                    alias_size=64,
+                    base_alias_addr=base_alias_addr,
                     kernel_trace=trace,
                 )
             )
