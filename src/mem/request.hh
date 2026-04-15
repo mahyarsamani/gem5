@@ -1216,21 +1216,21 @@ class MemAccessName: public Extension<Request, MemAccessName>
     std::string name() const { return _name; }
 };
 
-// class IndirectAccess: public Extension<Request, IndirectAccess>,
-//                     public std::enable_shared_from_this<IndirectAccess>
-// {
-//   public:
-//     IndirectAccess() {}
+class DependentAccessGen: public Extension<Request, DependentAccessGen>
+{
+  protected:
+    Addr _baseAddr;
+    unsigned _size;
 
-//     virtual std::unique_ptr<ExtensionBase> clone() const override
-//     {
-//         return std::make_unique<IndirectAccess>();
-//     }
+  public:
+    DependentAccessGen(Addr base_addr, unsigned size):
+        Extension<Request, DependentAccessGen>(),
+        _baseAddr(base_addr), _size(size)
+    {}
 
-//     virtual Packet* nextPacket() = 0;
-
-//     RequestPtr nextRequest() { return nextPacket()->req; }
-// };
+    virtual RequestPtr genNextRequestFrom4B(uint32_t index_value) = 0;
+    virtual RequestPtr genNextRequestFrom8B(uint64_t index_value) = 0;
+};
 
 } // namespace gem5
 

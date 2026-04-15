@@ -1412,6 +1412,47 @@ namespace Aarch64
                       default:
                         GEM5_UNREACHABLE;
                     }
+                  case 0x8:
+                    {
+                        // Custom Load Indirect (Use Bit 24 for Indexer Size)
+                        // Rt (4:0) = Dest
+                        // Rn (9:5) = Base Indexee
+                        // Rm (20:16) = Base Indexer
+                        // Ra (14:10) = Index (reusing Rt2 field)
+                        // Size (31:30) = Indexee Element Size
+                        // Bit 24 = Indexer Element Size (0=32, 1=64)
+
+                        RegIndex rt = (RegIndex)(uint32_t)bits(machInst, 4, 0);       // Dest Value
+                        // Rt+1 is Implicit Alias/EA. Handled in instruction class.
+                        RegIndex rn = (RegIndex)(uint32_t)bits(machInst, 9, 5);       // Base Data
+                        RegIndex rm = (RegIndex)(uint32_t)bits(machInst, 20, 16);     // Base Indexer
+                        RegIndex ra = (RegIndex)(uint32_t)bits(machInst, 14, 10);     // Index
+
+                        uint32_t size_data_enc = bits(machInst, 31, 30);
+                        uint32_t size_idx_enc = bits(machInst, 24);
+
+                        // Map to Instruction Class
+                        // Check naming convention in mem_ind.isa: LDIND(size_data)_(size_idx)
+                        // Suffixes: b, h, w, x / w, x
+                        // Example: LDINDW_X
+
+                        if (size_idx_enc == 0) { // Indexer 32-bit (w)
+                            switch (size_data_enc) {
+                              case 0: return new LDINDB_W(machInst, rt, rt+1, rn, rm, ra);
+                              case 1: return new LDINDH_W(machInst, rt, rt+1, rn, rm, ra);
+                              case 2: return new LDINDW_W(machInst, rt, rt+1, rn, rm, ra);
+                              case 3: return new LDINDX_W(machInst, rt, rt+1, rn, rm, ra);
+                            }
+                        } else { // Indexer 64-bit (x)
+                            switch (size_data_enc) {
+                              case 0: return new LDINDB_X(machInst, rt, rt+1, rn, rm, ra);
+                              case 1: return new LDINDH_X(machInst, rt, rt+1, rn, rm, ra);
+                              case 2: return new LDINDW_X(machInst, rt, rt+1, rn, rm, ra);
+                              case 3: return new LDINDX_X(machInst, rt, rt+1, rn, rm, ra);
+                            }
+                        }
+                        return new Unknown64(machInst);
+                    }
                   case 0x9:
                     switch (size) {
                       case 0x0:
@@ -1450,6 +1491,34 @@ namespace Aarch64
                         return new CASL64(machInst, rt, rnsp, rs);
                       default:
                         GEM5_UNREACHABLE;
+                    }
+                  case 0xC:
+                    {
+                        // Custom Store Indirect (Use Bit 24 for Indexer Size)
+                        RegIndex rt = (RegIndex)(uint32_t)bits(machInst, 4, 0);       // Source Value
+                        RegIndex rn = (RegIndex)(uint32_t)bits(machInst, 9, 5);       // Base Data
+                        RegIndex rm = (RegIndex)(uint32_t)bits(machInst, 20, 16);     // Base Indexer
+                        RegIndex ra = (RegIndex)(uint32_t)bits(machInst, 14, 10);     // Index
+
+                        uint32_t size_data_enc = bits(machInst, 31, 30);
+                        uint32_t size_idx_enc = bits(machInst, 24);
+
+                        if (size_idx_enc == 0) { // Indexer 32-bit (w)
+                            switch (size_data_enc) {
+                              case 0: return new STINDB_W(machInst, rt, rt+1, rn, rm, ra);
+                              case 1: return new STINDH_W(machInst, rt, rt+1, rn, rm, ra);
+                              case 2: return new STINDW_W(machInst, rt, rt+1, rn, rm, ra);
+                              case 3: return new STINDX_W(machInst, rt, rt+1, rn, rm, ra);
+                            }
+                        } else { // Indexer 64-bit (x)
+                            switch (size_data_enc) {
+                              case 0: return new STINDB_X(machInst, rt, rt+1, rn, rm, ra);
+                              case 1: return new STINDH_X(machInst, rt, rt+1, rn, rm, ra);
+                              case 2: return new STINDW_X(machInst, rt, rt+1, rn, rm, ra);
+                              case 3: return new STINDX_X(machInst, rt, rt+1, rn, rm, ra);
+                            }
+                        }
+                        return new Unknown64(machInst);
                     }
                   case 0xd:
                     switch (size) {
