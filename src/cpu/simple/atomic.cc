@@ -575,6 +575,19 @@ AtomicSimpleCPU::amoMem(Addr addr, uint8_t* data, unsigned size,
     req->setVirt(addr, size, flags, dataRequestorId(),
                  thread->pcState().instAddr(), std::move(amo_op));
 
+    auto ext = t_info.getDAGExt();
+    if (ext) {
+        req->setExtension<DependentAccessGen>(ext);
+        t_info.setDAGExt(nullptr);
+    }
+    struct ExtensionClearer {
+        RequestPtr req;
+        std::shared_ptr<DependentAccessGen> ext;
+        ~ExtensionClearer() {
+            if (ext) req->removeExtension<DependentAccessGen>();
+        }
+    } clearer{req, ext};
+
     // translate to physical address
     Fault fault = thread->mmu->translateAtomic(
         req, thread->getTC(), BaseMMU::Write);

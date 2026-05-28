@@ -186,9 +186,8 @@ action(AllocateTBE_SeqRequest, desc="") {
       out_msg.type := manipulateType(out_msg);
       out_msg.secondType := manipulateSecondType(out_msg);
 
-      out_msg.is_sparse := isSparse(in_msg.getRequestPtr());
       out_msg.access_name := getMemAccessName(in_msg.getRequestPtr());
-
+      out_msg.alias := in_msg.Alias;
       DPRINTF(Usefulness, "Setting access name for addr %#lx to %s.\n", out_msg.addr, out_msg.access_name);
       // MYSTUFF
     }
@@ -347,6 +346,8 @@ action(Initiate_Request, desc="") {
         // NOTE: We are the value cache. Set the value_cache_id in
         // tbe so that we can use it when we send a message out.
         tbe.compact_cache_id := machineID;
+        DPRINTF(IndirectAccess, "Received an indirect access to address %#lx with invalid compact cache id. I am it. Setting it to myself.\n", address
+        );
     }
     if (gather_cache && isInvalid(tbe.index_cache_id)) {
         // NOTE: We are the index cache. Set the index_cache_id in
@@ -441,7 +442,7 @@ action(Initiate_Snoop_Hazard, desc="") {
   // Use state from prev TBE
   tbe.pendReqType := prev_tbe.pendReqType;
   copyCacheAndDirTBEs(prev_tbe, tbe);
-  tbe.wakeup_pending_req := prev_tbe.wakeup_pending_req;
+  tbe.wakeup_pending_req  := prev_tbe.wakeup_pending_req;
   tbe.wakeup_pending_snp := prev_tbe.wakeup_pending_snp;
   tbe.wakeup_pending_tgr := prev_tbe.wakeup_pending_tgr;
 }
@@ -504,16 +505,23 @@ action(Initiate_Replacement, desc="") {
     peek(replTriggerInPort, ReplacementMsg) {
       set_tbe(allocateReplacementTBEOnSlot(address, in_msg.slot));
       DPRINTF(RubySlicc, "Allocated replacement TBE on slot %d\n", tbe.storSlot);
+      if (in_msg.has_pending_req) {
+        tbe.wakeup_pending_req := true;
+      }
     }
   } else {
-    set_tbe(allocateReplacementTBE(address));
-    DPRINTF(RubySlicc, "Allocated replacement TBE on new slot %d\n", tbe.storSlot);
+    peek(replTriggerInPort, ReplacementMsg) {
+      set_tbe(allocateReplacementTBE(address));
+      DPRINTF(RubySlicc, "Allocated replacement TBE on new slot %d\n", tbe.storSlot);
+      if (in_msg.has_pending_req) {
+        tbe.wakeup_pending_req := true;
+      }
+    }
   }
   // MYSTUFF
   tbe.read_usefulness := read_usefulness;
   tbe.write_usefulness := write_usefulness;
   tbe.access_name := access_name;
-  tbe.is_sparse := cache_entry.isSparse();
   // FFUTSYM
 
   copyCacheAndDir(cache_entry, getDirEntry(address), tbe, initial);
@@ -3510,10 +3518,7 @@ action(Finalize_UpdateCacheFromTBE, desc="") {
     // make sure only deallocate the cache entry if data is invalid
     assert(tbe.dataValid == false);
     if (is_valid(cache_entry)) {
-      // MYSTUFF:
-    //   cache.deallocate(address);
-       deallocate(address);
-      // FFUTSYM:
+      cache.deallocate(address);
       unset_cache_entry();
     }
   }
@@ -3544,10 +3549,7 @@ action(Finalize_UpdateDirectoryFromTBE, desc="") {
 
 action(Deallocate_CacheBlock, desc="") {
   assert(is_valid(cache_entry));
-  // MYSTUFF:
-//   cache.deallocate(address);
-  deallocate(address);
-  // FFUTSYM:
+  cache.deallocate(address);
   unset_cache_entry();
 }
 
@@ -3568,20 +3570,15 @@ action(CheckCacheFill, desc="") {
   // MYSTUFF: NOTE: Need to understand what dataValid and dataToBeInvalid mean?
   bool need_fill := tbe.dataValid && (tbe.dataToBeInvalid == false) && tbe.doCacheFill;
   bool execute_next := true;
-  bool is_sparse := tbe.is_sparse;
 
   if (need_fill && is_valid(cache_entry)) {
     // can write
     tbe.actions.pushFront(Event:DataArrayWrite);
     tbe.actions.pushFront(Event:FillPipe);
-  // MYSTUFF:
-//   } else if (need_fill && cache.cacheAvail(address)) {
-  } else if (need_fill && cacheAvail(address, is_sparse)) {
-  // FFUTSYM:
+  } else if (need_fill && cache.cacheAvail(address)) {
     // don't have a cache block, but there is space to allocate one
+    set_cache_entry(cache.allocate(address, new CacheEntry));
     // MYSTUFF:
-    // set_cache_entry(cache.allocate(address, new CacheEntry));
-    set_cache_entry(allocate(address, new CacheEntry, is_sparse));
     DPRINTF(Usefulness, "Inside CheckCacheFill. Before calling functions from DataBlock.\n");
     cache_entry.DataBlk.setAccessName("reset", true, getName(), address);
     DPRINTF(Usefulness, "Inside CheckCacheFill. After calling functions from DataBlock.\n");
@@ -3595,10 +3592,7 @@ action(CheckCacheFill, desc="") {
     execute_next := false;
 
     // pick a victim to deallocate
-    // MYSTUFF:
-    // Addr victim_addr := cache.cacheProbe(address);
-    Addr victim_addr := cacheProbe(address, is_sparse);
-    // FFUTSYM:
+    Addr victim_addr := cache.cacheProbe(address);
     CacheEntry victim_entry := getCacheEntry(victim_addr);
     assert(is_valid(victim_entry));
     TBE victim_tbe := getCurrentActiveTBE(victim_addr);
@@ -3755,6 +3749,11 @@ action(Callback_LoadHit, desc="") {
         DPRINTF(IndirectAccess, "Finished servicing a hit for a load to addr %#lx.\n", tbe.addr);
         if (tbe.secondType == CHIRequestType:ReadValue) {
             DPRINTF(IndirectAccess, "Load to addr %#lx was to a value.\n", tbe.addr);
+            // Replace the Phase 1 packet (index-sized) with a Phase 2 packet
+            // (data-sized, correct PA) so hitCallback delivers the right bytes
+            // to completeAcc. tbe.seqReq is the RequestPtr for the Phase 2
+            // access: it carries the correct PA and sizeData.
+            sequencer.prepareIndPacket(tbe.alias, tbe.seqReq);
             sequencer.readCallback(tbe.alias, tbe.dataBlk, true);
         }
     }
@@ -3771,9 +3770,17 @@ action(Callback_StoreHit, desc="") {
          (tbe.reqType == CHIRequestType:Store));
   if (tbe.is_local_pf == false) {
     assert(tbe.dataValid);
-    DPRINTF(RubySlicc, "Write before %s\n", tbe.dataBlk);
-    sequencer.writeCallback(tbe.addr, tbe.dataBlk, false);
-    DPRINTF(RubySlicc, "Write after %s\n", tbe.dataBlk);
+    if (isIndirect(tbe.reqType, tbe.secondType)) {
+      if (tbe.secondType == CHIRequestType:WriteValue) {
+        DPRINTF(IndirectAccess, "Store to addr %#lx was to a value.\n", tbe.addr);
+        sequencer.prepareIndPacket(tbe.alias, tbe.seqReq);
+        sequencer.writeCallback(tbe.alias, tbe.dataBlk, true);
+      }
+    } else {
+      DPRINTF(RubySlicc, "Write before %s\n", tbe.dataBlk);
+      sequencer.writeCallback(tbe.addr, tbe.dataBlk, false);
+      DPRINTF(RubySlicc, "Write after %s\n", tbe.dataBlk);
+    }
     tbe.dataDirty := true;
   }
 }
@@ -3821,7 +3828,17 @@ action(Callback_Miss, desc="") {
         DPRINTF(IndirectAccess, "Finished servicing a miss for a load to addr %#lx.\n", tbe.addr);
         if (tbe.secondType == CHIRequestType:ReadValue) {
             DPRINTF(IndirectAccess, "Load to addr %#lx was to a value.\n", tbe.addr);
+            sequencer.prepareIndPacket(tbe.alias, tbe.seqReq);
             sequencer.readCallback(tbe.alias, tbe.dataBlk, true);
+        }
+    } else if (tbe.dataValid && ((tbe.reqType == CHIRequestType:Store) ||
+                                 (tbe.reqType == CHIRequestType:StoreLine))) {
+        DPRINTF(IndirectAccess, "Finished servicing a miss for a store to addr %#lx.\n", tbe.addr);
+        if (tbe.secondType == CHIRequestType:WriteValue) {
+            DPRINTF(IndirectAccess, "Store to addr %#lx was to a value.\n", tbe.addr);
+            sequencer.prepareIndPacket(tbe.alias, tbe.seqReq);
+            sequencer.writeCallback(tbe.alias, tbe.dataBlk, true);
+            tbe.dataDirty := true;
         }
     }
 //   if (tbe.dataValid && tbe.is_local_pf) {
@@ -3928,7 +3945,8 @@ action(Profile_Miss, desc="") {
     cache.profilePrefetchMiss();
   }
   // notify prefetcher about this demand miss
-  if (use_prefetcher && tbe.isSeqReqValid && (is_demand || is_remote_can_notify)) {
+  if (use_prefetcher && tbe.isSeqReqValid && (is_demand || is_remote_can_notify) &&
+      shouldNotifyPrefetcher(tbe.reqType, tbe.secondType)) {
     bool is_read := false;
     if (isReadReqType(tbe.reqType)) {
       is_read := true;
@@ -3956,7 +3974,8 @@ action(Profile_Hit, desc="") {
     cache.profilePrefetchHit();
   }
   // notify prefetcher about this demand hit
-  if (use_prefetcher && tbe.isSeqReqValid && (is_demand || is_remote_can_notify)) {
+  if (use_prefetcher && tbe.isSeqReqValid && (is_demand || is_remote_can_notify) &&
+      shouldNotifyPrefetcher(tbe.reqType, tbe.secondType)) {
     bool is_read := false;
     if (isReadReqType(tbe.reqType)) {
       is_read := true;
@@ -3973,7 +3992,7 @@ action(Profile_Hit, desc="") {
 action(Profile_Fill, desc="") {
   assert(is_valid(tbe));
   assert(is_valid(cache_entry));
-  if (use_prefetcher && tbe.isSeqReqValid) {
+  if (use_prefetcher && tbe.isSeqReqValid && shouldNotifyPrefetcher(tbe.reqType, tbe.secondType)) {
 
     cache_entry.HWPrefetched := tbe.is_local_pf ||
                           (tbe.is_remote_pf &&
@@ -4280,25 +4299,20 @@ action(Profile_OutgoingEnd_DVM, desc="") {
 }
 
 // // MYSTUFF
-action(delayFwdIndirect, desc="Model the delay to fwd ReadIndirect") {
+action(delayFwdIndirect, desc="Model the delay to fwd Indirect") {
     assert(is_valid(tbe));
     tbe.delayNextAction := curTick() + cyclesToTicks(fwd_ind_acc_delay);
 }
 
-action(Fwd_ReadIndirect, desc="Forward ReadIndirect") {
+action(Fwd_Indirect, desc="Forward ReadIndirect") {
   // NOTE: Does it make sense to add the following assert?
-  // What if we don't want to cache them at all? Or wsehat if we want to cache
+  // What if we don't want to cache them at all? Or what if we want to cache
   // them at the memory controller.
   // assert(is_HN == false);
-  assert(tbe.dataValid == false);
+  // assert(tbe.dataValid == false);
 
   enqueue(reqOutPort, CHIRequestMsg, request_latency) {
-    prepareRequest(tbe, CHIRequestType:ReadIndirect, out_msg);
-
-    if (compact_cache) {
-        out_msg.alias := tbe.accAddr;
-        setAddrFromReq(out_msg, getNextReq(tbe.seqReq));
-    }
+    prepareRequest(tbe, tbe.reqType, out_msg);
     out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
     // NOTE: What do the following two lines mean?
     out_msg.dataToFwdRequestor := false;
@@ -4311,7 +4325,7 @@ action(Initiate_Dependent_Requests, desc="Start accesses that are dependent on t
     if (gather_cache && tbe.secondType == CHIRequestType:ReadIndirect) {
         enqueue(reqOutPort, CHIRequestMsg, request_latency) {
             indirectDependentBoilerPlate(out_msg);
-            setAddrFromReq(out_msg, getNextReq(tbe.seqReq));
+            setAddrFromReq(out_msg, getDependentReq(tbe.seqReq, cache_entry.DataBlk));
             out_msg.type := CHIRequestType:ReadValue;
             out_msg.compact_cache_id := tbe.compact_cache_id;
             out_msg.value_cache_id := tbe.value_cache_id;
@@ -4333,17 +4347,18 @@ action(Initiate_Dependent_Requests, desc="Start accesses that are dependent on t
     if (gather_cache && tbe.secondType == CHIRequestType:WriteIndirect) {
         enqueue(reqOutPort, CHIRequestMsg, request_latency) {
             indirectDependentBoilerPlate(out_msg);
-            setAddrFromReq(out_msg, getNextReq(tbe.seqReq));
+            setAddrFromReq(out_msg, getDependentReq(tbe.seqReq, cache_entry.DataBlk));
             out_msg.type := CHIRequestType:WriteValue;
             out_msg.compact_cache_id := tbe.compact_cache_id;
             out_msg.value_cache_id := tbe.value_cache_id;
             out_msg.index_cache_id := tbe.index_cache_id;
+            out_msg.alias := tbe.alias;
 
             if (isInvalid(tbe.compact_cache_id)) {
-                DPRINTF(IndirectAccess, "Compact cache id not set yet. Sending ReadValue downstream.\n");
+                DPRINTF(IndirectAccess, "Compact cache id not set yet. Sending WriteValue downstream.\n");
                 out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
             } else {
-                DPRINTF(IndirectAccess, "Compact cache id set. Sending ReadValue upstream.\n");
+                DPRINTF(IndirectAccess, "Compact cache id set. Sending WriteValue upstream.\n");
                 out_msg.Destination.add(tbe.compact_cache_id);
             }
         }
@@ -4359,4 +4374,17 @@ action(Initiate_Dependent_Requests, desc="Start accesses that are dependent on t
     // }
 }
 
+// Enqueue a replacement for the index block and stall the FwdIndirect.
+// The normal eviction machinery (replTriggerInPort → Local_Eviction →
+// Initiate_Replacement) handles the writeback/evict. The stalled
+// FwdIndirect replays against state I after the eviction completes.
+action(Evict_ForIndirect,
+       desc="Enqueue replacement for index block and stall FwdIndirect") {
+    enqueue(replTriggerOutPort, ReplacementMsg, 0) {
+        out_msg.addr := address;
+        out_msg.from_addr := address;
+        out_msg.has_pending_req := true;
+    }
+    stall_and_wait(reqRdyPort, address);
+}
 // FFUTSYM

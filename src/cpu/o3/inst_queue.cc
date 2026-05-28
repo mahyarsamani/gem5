@@ -50,6 +50,7 @@
 #include "cpu/o3/limits.hh"
 #include "debug/IQ.hh"
 // #include "debug/MSDebug.hh"
+#include "debug/LatencyBreakdown.hh"
 #include "enums/OpClass.hh"
 #include "params/BaseO3CPU.hh"
 #include "sim/core.hh"
@@ -565,7 +566,7 @@ void
 InstructionQueue::Producer::process(const DynInstPtr& inst, const std::string& proxy_simobject_name, int override_dst_idx)
 {
     if ((inst->numDestRegs() != 1) && (override_dst_idx == -1)) {
-        warn("%s: %s: PC %#lx (%s) from context %d "
+        DPRINTFR(LatencyBreakdown, "%s: %s: PC %#lx (%s) from context %d "
             "failed one dest register assertion.\n",
             proxy_simobject_name, __func__, inst->pcState().instAddr(),
             inst->staticInst->disassemble(inst->pcState().instAddr()),
@@ -580,7 +581,7 @@ InstructionQueue::Producer::process(const DynInstPtr& inst, const std::string& p
     for (auto consumer : consumers) {
         std::vector<std::tuple<std::string, int>> consumer_tags = consumer->getConsumerTags();
         for (auto tag: consumer_tags) {
-            consumer->setRegisterToConsume(phys_reg, tag);
+            consumer->setRegisterToConsume(phys_reg, tag, inst->seqNum);
             inst->addIndRelationId(std::get<0>(tag), std::get<1>(tag));
         }
     }
@@ -590,7 +591,7 @@ void
 InstructionQueue::Prosumer::process(const DynInstPtr& inst, const std::string& proxy_simobject_name, int override_dst_idx)
 {
     if ((inst->numDestRegs() != 1) && (override_dst_idx == -1)) {
-        warn("%s: %s: PC %#lx (%s) from context %d "
+        DPRINTFR(LatencyBreakdown, "%s: %s: PC %#lx (%s) from context %d "
             "failed one dest register assertion.\n",
             proxy_simobject_name, __func__, inst->pcState().instAddr(),
             inst->staticInst->disassemble(inst->pcState().instAddr()),
@@ -604,12 +605,25 @@ InstructionQueue::Prosumer::process(const DynInstPtr& inst, const std::string& p
     bool producer_found = false;
     for (int i = 0; i < inst->numSrcRegs(); i++) {
         PhysRegIdPtr src_reg = inst->renamedSrcIdx(i);
-        if (regToRelTag.find(src_reg) != regToRelTag.end())
+        auto it = regToRelTag.find(src_reg);
+        if (it != regToRelTag.end())
         {
+            // Validate seqNum: the producer must be older than this
+            // instruction. If the entry is from a squashed instruction
+            // whose physical register was freed and reused, discard it.
+            if (it->second.producerSeqNum >= inst->seqNum) {
+                DPRINTFR(LatencyBreakdown, "%s: %s: PC %#lx [sn:%llu] "
+                    "discarding stale regToRelTag entry for src reg "
+                    "(producer seqNum %llu >= current %llu).\n",
+                    proxy_simobject_name, __func__,
+                    inst->pcState().instAddr(), inst->seqNum,
+                    it->second.producerSeqNum, inst->seqNum);
+                regToRelTag.erase(it);
+                continue;
+            }
             producer_found = true;
-            std::vector<std::tuple<std::string, int>> consumer_tags = regToRelTag[src_reg];
-            for (auto consumer_tag: consumer_tags) {
-                subtreeName[std::get<0>(consumer_tag)]->setRegisterToConsume(dst_reg, consumer_tag);
+            for (auto consumer_tag: it->second.tags) {
+                subtreeName[std::get<0>(consumer_tag)]->setRegisterToConsume(dst_reg, consumer_tag, inst->seqNum);
             }
         }
         if (producer_found) {
@@ -618,7 +632,8 @@ InstructionQueue::Prosumer::process(const DynInstPtr& inst, const std::string& p
         }
     }
     if (!producer_found) {
-        warn("%s: %s: PC %#lx (%s) from context %d has no producer.\n",
+        DPRINTFR(LatencyBreakdown, "%s: %s: PC %#lx (%s) from context %d "
+            "has no producer.\n",
             proxy_simobject_name, __func__,
             inst->pcState().instAddr(),
             inst->staticInst->disassemble(inst->pcState().instAddr()),
@@ -637,10 +652,23 @@ InstructionQueue::Consumer::process(const DynInstPtr& inst, const std::string& p
     for (int i = 0; i < inst->numSrcRegs(); i++)
     {
         PhysRegIdPtr src_reg = inst->renamedSrcIdx(i);
-        if (regId.find(src_reg) != regId.end())
+        auto it = regId.find(src_reg);
+        if (it != regId.end())
         {
+            // Validate seqNum: the producer must be older than this
+            // instruction.
+            if (it->second.producerSeqNum >= inst->seqNum) {
+                DPRINTFR(LatencyBreakdown, "%s: %s: PC %#lx [sn:%llu] "
+                    "discarding stale regId entry for src reg "
+                    "(producer seqNum %llu >= current %llu).\n",
+                    proxy_simobject_name, __func__,
+                    inst->pcState().instAddr(), inst->seqNum,
+                    it->second.producerSeqNum, inst->seqNum);
+                regId.erase(it);
+                continue;
+            }
             producer_found = true;
-            int producer_id = regId[src_reg];
+            int producer_id = it->second.instanceId;
             inst->setConsumer();
             inst->addIndRelationId(_relationName, producer_id);
         }
@@ -650,7 +678,8 @@ InstructionQueue::Consumer::process(const DynInstPtr& inst, const std::string& p
         }
     }
     if (!producer_found) {
-        warn("%s: %s: PC %#lx (%s) from context %d has no producer.\n",
+        DPRINTFR(LatencyBreakdown, "%s: %s: PC %#lx (%s) from context %d "
+            "has no producer.\n",
             proxy_simobject_name, __func__,
             inst->pcState().instAddr(),
             inst->staticInst->disassemble(inst->pcState().instAddr()),

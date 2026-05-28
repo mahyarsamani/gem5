@@ -42,6 +42,8 @@
 #ifndef __CPU_EXEC_CONTEXT_HH__
 #define __CPU_EXEC_CONTEXT_HH__
 
+#include <memory>
+
 #include "base/types.hh"
 #include "cpu/base.hh"
 #include "cpu/reg_class.hh"
@@ -113,6 +115,14 @@ class ExecContext
      * @{
      * @name Memory Interface
      */
+
+    virtual void setIAAExt(std::shared_ptr<IndirectAccessAlias> iaa) {}
+    virtual void setDAGExt(std::shared_ptr<DependentAccessGen> dag) {}
+    virtual void setIARExt(std::shared_ptr<IndependentAccessResp> iar) {}
+
+    virtual std::shared_ptr<IndirectAccessAlias> getIAAExt() const { return nullptr; }
+    virtual std::shared_ptr<DependentAccessGen> getDAGExt() const { return nullptr; }
+    virtual std::shared_ptr<IndependentAccessResp> getIARExt() const { return nullptr; }
     /**
      * Perform an atomic memory read operation.  Must be overridden
      * for exec contexts that support atomic memory mode.  Not pure

@@ -113,7 +113,7 @@ class InstructionQueue
         virtual std::vector<std::string> constructSubtree() = 0;
 
         virtual std::vector<std::tuple<std::string, int>> getConsumerTags() = 0;
-        virtual void setRegisterToConsume(PhysRegIdPtr phys_reg, std::tuple<std::string, int> tag) = 0;
+        virtual void setRegisterToConsume(PhysRegIdPtr phys_reg, std::tuple<std::string, int> tag, InstSeqNum producer_seq_num) = 0;
         virtual void process(const DynInstPtr& inst, const std::string& proxy_simobject_name, int override_dst_idx) = 0;
 
         Addr programCounter() const { return _programCounter; }
@@ -146,7 +146,7 @@ class InstructionQueue
             panic("Producer should not be asked to get consumer tags");
         }
 
-        virtual void setRegisterToConsume(PhysRegIdPtr phys_reg, const std::tuple<std::string, int> tag) override
+        virtual void setRegisterToConsume(PhysRegIdPtr phys_reg, const std::tuple<std::string, int> tag, InstSeqNum producer_seq_num) override
         {
             panic("Producer should not be asked to set register to consumer");
         }
@@ -164,7 +164,15 @@ class InstructionQueue
       private:
         std::vector<BaseProsumer*> consumers;
         std::unordered_map<std::string, BaseProsumer*> subtreeName;
-        std::unordered_map<PhysRegIdPtr, std::vector<std::tuple<std::string, int>>> regToRelTag;
+        /** Maps a physical register to its producer's sequence number
+         *  and the consumer tags associated with it. The seqNum is used
+         *  to validate that the mapping is not stale (from a squashed
+         *  instruction whose physical register was freed and reused). */
+        struct RegTagEntry {
+            InstSeqNum producerSeqNum;
+            std::vector<std::tuple<std::string, int>> tags;
+        };
+        std::unordered_map<PhysRegIdPtr, RegTagEntry> regToRelTag;
 
       public:
         Prosumer(Addr program_counter): BaseProsumer(program_counter)
@@ -199,9 +207,11 @@ class InstructionQueue
             return tags;
         }
 
-        virtual void setRegisterToConsume(PhysRegIdPtr phys_reg, const std::tuple<std::string, int> tag) override
+        virtual void setRegisterToConsume(PhysRegIdPtr phys_reg, const std::tuple<std::string, int> tag, InstSeqNum producer_seq_num) override
         {
-            regToRelTag[phys_reg].emplace_back(tag);
+            auto &entry = regToRelTag[phys_reg];
+            entry.producerSeqNum = producer_seq_num;
+            entry.tags.emplace_back(tag);
         }
 
         virtual void process(const DynInstPtr& inst, const std::string& proxy_simobject_name, int override_dst_idx) override;
@@ -218,7 +228,13 @@ class InstructionQueue
         std::string _relationName;
         int nextId;
 
-        std::unordered_map<PhysRegIdPtr, int> regId;
+        /** Maps a physical register to the producer's sequence number
+         *  and the instance ID for this consumer relation. */
+        struct RegIdEntry {
+            InstSeqNum producerSeqNum;
+            int instanceId;
+        };
+        std::unordered_map<PhysRegIdPtr, RegIdEntry> regId;
 
       public:
         Consumer(Addr program_counter, const std::string& relation_name):
@@ -241,9 +257,9 @@ class InstructionQueue
             return {std::make_tuple(_relationName, nextId)};
         }
 
-        virtual void setRegisterToConsume(PhysRegIdPtr phys_reg, std::tuple<std::string, int> tag) override
+        virtual void setRegisterToConsume(PhysRegIdPtr phys_reg, std::tuple<std::string, int> tag, InstSeqNum producer_seq_num) override
         {
-            regId[phys_reg] = std::get<1>(tag);
+            regId[phys_reg] = {producer_seq_num, std::get<1>(tag)};
         }
 
         virtual void process(const DynInstPtr& inst, const std::string& proxy_simobject_name, int override_dst_idx) override;

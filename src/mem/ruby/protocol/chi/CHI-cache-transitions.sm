@@ -966,7 +966,8 @@ transition({BUSY_BLKD,BUSY_INTR},
             WriteUniqueZero,
             AtomicReturn,AtomicReturn_PoC, AtomicReturn_PoC_Alloc
             AtomicNoReturn,AtomicNoReturn_PoC, AtomicNoReturn_PoC_Alloc
-            StashOnceShared,StashOnceUnique}) {
+            StashOnceShared,StashOnceUnique,
+            FwdIndirect}) {
   StallRequest;
 }
 
@@ -1002,14 +1003,22 @@ transition({BUSY_BLKD,BUSY_INTR}, ActionStalledOnHazard) {
 
 
 // MYSTUFF
-transition(I, FwdReadIndirect, BUSY_BLKD) {
+transition(I, FwdIndirect, BUSY_BLKD) {
     Initiate_Request;
     delayFwdIndirect;
-    Fwd_ReadIndirect;
+    Fwd_Indirect;
     Pop_ReqRdyQueue;
     ProcessNextState;
 }
 
+// FwdIndirect arriving at a cache that has the index block cached.
+// Enqueue a replacement to evict the block, stall the FwdIndirect.
+// When the eviction completes (block → I), the FwdIndirect replays
+// against state I and the existing (I, FwdIndirect) transition
+// forwards it downstream.
+transition({SC, UC, SD, UD}, FwdIndirect) {
+    Evict_ForIndirect;
+}
 // FFUTSYM
 
 // Trigger-specifc transitions

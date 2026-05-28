@@ -42,16 +42,21 @@
 #include "cpu/simple/timing.hh"
 
 #include "arch/generic/decoder.hh"
+#include "arch/generic/mmu.hh"
+#include "arch/arm/insts/dependent_access.hh"
 #include "base/compiler.hh"
 #include "cpu/exetrace.hh"
 #include "debug/Config.hh"
 #include "debug/Drain.hh"
 #include "debug/ExecFaulting.hh"
 #include "debug/HtmCpu.hh"
+#include "debug/MSDebug.hh"
 #include "debug/Mwait.hh"
 #include "debug/SimpleCPU.hh"
 #include "mem/packet.hh"
 #include "mem/packet_access.hh"
+#include "mem/page_table.hh"
+#include "mem/request.hh"
 #include "params/BaseTimingSimpleCPU.hh"
 #include "sim/faults.hh"
 #include "sim/full_system.hh"
@@ -412,8 +417,58 @@ TimingSimpleCPU::translationFault(const Fault &fault)
 PacketPtr
 TimingSimpleCPU::buildPacket(const RequestPtr &req, bool read)
 {
-    return read ? Packet::createRead(req) : Packet::createWrite(req);
+    // Check for an indirect (scatter-gather) request extension.
+    // getExtension returns a shared_ptr<T>, not a raw pointer.
+    auto dag_ext = req->getExtension<DependentAccessGen>();
+
+    if (dag_ext && !dag_ext->hasTranslator()) {
+        SimpleThread *thread = threadInfo[curThread]->thread;
+        ThreadContext *tc = thread->getTC();
+        Process *proc = tc->getProcessPtr();
+        DependentAccessGen::AddrTranslator translate_fn;
+
+        if (proc) {
+            // SE mode: wrap the process's hash-table page table.
+            // Safe to call from any context; just a map lookup.
+            EmulationPageTable *pt = proc->pTable;
+            translate_fn = [pt](Addr vaddr) -> Addr {
+                Addr paddr = 0;
+                panic_if(!pt->translate(vaddr, paddr),
+                    "DependentAccessGen (SE): VA->PA failed for vaddr=%#x. "
+                    "Ensure the gather destination buffer is mapped.",
+                    vaddr);
+                return paddr;
+            };
+        } else {
+            BaseMMU *mmu = tc->getMMUPtr();
+            RequestorID rid = tc->getCpuPtr()->dataRequestorId();
+            ContextID cid = tc->contextId();
+            translate_fn = [mmu, tc, rid, cid](Addr vaddr) -> Addr {
+                auto tmp_req = std::make_shared<Request>(
+                    vaddr, 8, 0, rid, 0, cid);
+                Fault fault = mmu->translateFunctional(
+                    tmp_req, tc, BaseMMU::Read);
+                panic_if(fault != NoFault,
+                    "DependentAccessGen (FS): VA->PA faulted for vaddr=%#x.",
+                    vaddr);
+                return tmp_req->getPaddr();
+            };
+        }
+
+        dag_ext->setTranslator(std::move(translate_fn));
+    }
+
+    PacketPtr pkt;
+    if (dag_ext) {
+        pkt = new Packet(req, read ? MemCmd::ReadIndReq : MemCmd::WriteIndReq);
+    } else {
+        pkt = read ? Packet::createRead(req) : Packet::createWrite(req);
+    }
+    DPRINTF(MSDebug, "Initiating memory access for addr %#x (Cmd: %s)\n",
+            req->hasVaddr() ? req->getVaddr() : 0, pkt->cmdString());
+    return pkt;
 }
+
 
 void
 TimingSimpleCPU::buildSplitPacket(PacketPtr &pkt1, PacketPtr &pkt2,
@@ -466,6 +521,20 @@ TimingSimpleCPU::initiateMemRead(Addr addr, unsigned size,
     RequestPtr req = std::make_shared<Request>(
         addr, size, flags, dataRequestorId(), pc, thread->contextId());
     req->setByteEnable(byte_enable);
+
+    auto iaa = t_info.getIAAExt();
+    auto dag = t_info.getDAGExt();
+    auto iar = t_info.getIARExt();
+    assert((iaa == nullptr && dag == nullptr && iar == nullptr) ||
+            (iaa != nullptr && dag != nullptr && iar != nullptr));
+    if (iaa && dag && iar) {
+        req->setExtension<IndirectAccessAlias>(iaa);
+        req->setExtension<DependentAccessGen>(dag);
+        req->setExtension<IndependentAccessResp>(iar);
+        t_info.setIAAExt(nullptr);
+        t_info.setDAGExt(nullptr);
+        t_info.setIARExt(nullptr);
+    }
 
     req->taskId(taskId());
 
@@ -549,6 +618,20 @@ TimingSimpleCPU::writeMem(uint8_t *data, unsigned size,
         addr, size, flags, dataRequestorId(), pc, thread->contextId());
     req->setByteEnable(byte_enable);
 
+    auto iaa = t_info.getIAAExt();
+    auto dag = t_info.getDAGExt();
+    auto iar = t_info.getIARExt();
+    assert((iaa == nullptr && dag == nullptr && iar == nullptr) ||
+        (iaa != nullptr && dag != nullptr && iar != nullptr));
+    if (iaa && dag) {
+        req->setExtension<IndirectAccessAlias>(iaa);
+        req->setExtension<DependentAccessGen>(dag);
+        req->setExtension<IndependentAccessResp>(iar);
+        t_info.setIAAExt(nullptr);
+        t_info.setDAGExt(nullptr);
+        t_info.setIARExt(nullptr);
+    }
+
     req->taskId(taskId());
 
     Addr split_addr = roundDown(addr + size - 1, block_size);
@@ -606,6 +689,20 @@ TimingSimpleCPU::initiateMemAMO(Addr addr, unsigned size,
                             std::move(amo_op));
 
     assert(req->hasAtomicOpFunctor());
+
+    auto iaa = t_info.getIAAExt();
+    auto dag = t_info.getDAGExt();
+    auto iar = t_info.getIARExt();
+    assert((iaa == nullptr && dag == nullptr && iar == nullptr) ||
+        (iaa != nullptr && dag != nullptr && iar != nullptr));
+    if (iaa && dag) {
+        req->setExtension<IndirectAccessAlias>(iaa);
+        req->setExtension<DependentAccessGen>(dag);
+        req->setExtension<IndependentAccessResp>(iar);
+        t_info.setIAAExt(nullptr);
+        t_info.setDAGExt(nullptr);
+        t_info.setIARExt(nullptr);
+    }
 
     req->taskId(taskId());
 

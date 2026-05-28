@@ -153,8 +153,6 @@ structure(CHIRequestMsg, desc="", interface="Message") {
   WriteMask write_usefulness,    desc="Mask denoting bytes that were useful for write.";
 
   std::string access_name,       desc="Name of the access from high level program.";
-  // DEPRECATED
-  bool is_sparse;
   // FFUTSYM:
 }
 

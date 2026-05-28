@@ -98,6 +98,8 @@ class AbstractController : public ClockedObject, public Consumer
     bool canOverride(std::string label, Addr address);
 
     std::string getName() { return name(); }
+
+    RequestPtr getDependentReq(RequestPtr &og_req, DataBlock &index_data);
   public:
     bool disambiguated(Addr alias) { return aliasToAddrMap.find(alias) != aliasToAddrMap.end(); }
     void setAliasForAddr(Addr alias, Addr address) { addrToAliasMap[address] = alias; aliasToAddrMap[alias] = address; }

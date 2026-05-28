@@ -361,7 +361,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     StashOnceShared,             desc="", in_trans="yes"; // Just discarding the hint
     StashOnceUnique,             desc="", in_trans="yes"; // Just discarding the hint
     // MYSTUFF:
-    FwdReadIndirect,             desc="", in_trans="yes";
+    FwdIndirect,             desc="", in_trans="yes";
 
     // DVM sequencer requests
     DvmTlbi_Initiate, desc="", out_trans="yes", in_trans="yes"; // triggered when a CPU core wants to send a TLBI
@@ -804,8 +804,6 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     WriteMask write_usefulness,    desc="Mask denoting bytes that were useful for write.";
 
     std::string access_name,       desc="Name of the access from high level program.";
-    // DEPRECATED
-    bool is_sparse;
     // FFUTSYM:
   }
 
@@ -923,6 +921,14 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     Addr addr;
     Addr from_addr;
     int slot; // set only when unify_repl_TBEs is set
+    // When an external request (e.g. FwdIndirect) triggers an eviction
+    // via replTriggerOutPort before any TBE exists, the requesting message
+    // is stalled on reqRdyPort. The replacement TBE created by
+    // Initiate_Replacement must inherit the wakeup obligation so that
+    // Finalize_DeallocateRequest wakes the stalled request when the
+    // eviction completes.
+    bool has_pending_req, default="false",
+         desc="Replacement TBE should set wakeup_pending_req";
     bool functionalRead(Packet *pkt) { return false; }
     bool functionalRead(Packet *pkt, WriteMask &mask) { return false; }
     bool functionalWrite(Packet *pkt) { return false; }

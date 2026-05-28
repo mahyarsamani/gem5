@@ -83,7 +83,19 @@ class DynInst : public ExecContext, public RefCounted
     bool _hasLabel;
     std::string _label;
 
+    std::shared_ptr<IndirectAccessAlias> _iaa;
+    std::shared_ptr<DependentAccessGen> _dag;
+    std::shared_ptr<IndependentAccessResp> _iar;
+
   public:
+    void setIAAExt(std::shared_ptr<IndirectAccessAlias> iaa) override { _iaa = std::move(iaa); }
+    void setDAGExt(std::shared_ptr<DependentAccessGen> dag) override { _dag = std::move(dag); }
+    void setIARExt(std::shared_ptr<IndependentAccessResp> iar) override { _iar = std::move(iar); }
+
+    std::shared_ptr<IndirectAccessAlias> getIAAExt() const override { return _iaa; }
+    std::shared_ptr<DependentAccessGen> getDAGExt() const override { return _dag; }
+    std::shared_ptr<IndependentAccessResp> getIARExt() const override { return _iar; }
+
     void setProducer() { _isProducer = true; }
     bool isProducer() const { return _isProducer; }
     void setConsumer() { _isConsumer = true; }

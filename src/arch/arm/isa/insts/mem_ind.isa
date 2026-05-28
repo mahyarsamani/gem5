@@ -6,6 +6,9 @@
 //
 ////////////////////////////////////////////////////////////////////
 
+// ---------------------------------------------------------------------------
+// Declaration template (header output)
+// ---------------------------------------------------------------------------
 def template IndirectRegDeclare {{
     /**
      * Static instruction class for "%(mnemonic)s".
@@ -25,8 +28,14 @@ def template IndirectRegDeclare {{
                           trace::InstRecord *) const override;
 
       protected:
-        RegIndex src_alias;
-        RegIndex base_index;
+        RegId customSrcRegIdxArr[4];
+        RegId customDestRegIdxArr[2];
+
+        uint32_t operand_idx_base_data;
+        uint32_t operand_idx_base_index;
+        uint32_t operand_idx_index_reg;
+        uint32_t operand_idx_src_alias;
+        uint32_t operand_idx_dest_src_alias;
         uint64_t shiftAmtIndex;
     };
 }};
@@ -37,164 +46,265 @@ def template IndirectRegConstructor {{
             uint32_t _base_data, uint32_t _base_index,
             uint32_t _index_reg) :
          %(base_class)s("%(mnemonic)s", machInst, %(op_class)s,
-                 (RegIndex)_dest, (RegIndex)_base_data,
-                 (RegIndex)_index_reg,
+                 (RegIndex)_dest, (RegIndex)_base_index,
                  ArmISA::UXTX, %(shift_amt)d),
-         src_alias((RegIndex)_src_alias),
-         base_index((RegIndex)_base_index),
          shiftAmtIndex(%(shift_amt_index)d)
     {
-        // Constructor
+        setRegIdxArrays(
+            reinterpret_cast<RegIdArrayPtr>(
+                &std::remove_pointer_t<decltype(this)>::customSrcRegIdxArr),
+            reinterpret_cast<RegIdArrayPtr>(
+                &std::remove_pointer_t<decltype(this)>::customDestRegIdxArr));
+
         %(constructor)s;
+
+        operand_idx_base_data = _numSrcRegs++;
+        setSrcRegIdx(operand_idx_base_data, intRegClass[_base_data]);
+
+        operand_idx_base_index = _numSrcRegs++;
+        setSrcRegIdx(operand_idx_base_index, intRegClass[_base_index]);
+
+        operand_idx_index_reg = _numSrcRegs++;
+        setSrcRegIdx(operand_idx_index_reg, intRegClass[_index_reg]);
+
+        operand_idx_src_alias = _numSrcRegs++;
+        setSrcRegIdx(operand_idx_src_alias, intRegClass[_src_alias]);
+
+        operand_idx_dest_src_alias = _numDestRegs++;
+        setDestRegIdx(operand_idx_dest_src_alias, intRegClass[_src_alias]);
+    }
+}};
+
+
+
+let {{
+    import math
+
+    # -------------------------------------------------------------------------
+
+    # -------------------------------------------------------------------------
+    # Python Classes
+    # -------------------------------------------------------------------------
+
+    class LoadIndirect:
+        """
+        Generates one LDIND variant using the LoadIndirect{Declare,Constructor,
+        InitiateAcc,CompleteAcc,Execute} templates.
+
+        size_data  – bytes of one data element  (e.g. 8 for ldindX_*)
+        size_index – bytes of one index element (e.g. 4 for ldind*_w)
+
+        The two sizes are passed directly to the MemoryInd64 constructor as
+        plain integers; no Mem type coupling occurs here.
+        """
+        execBase   = 'LoadIndirect'
+        decConstBase = 'LoadIndirect'
+
+        def __init__(self, mnem, size_data, size_index):
+            self.name       = mnem
+            self.size_data  = size_data
+            self.size_index = size_index
+
+            s_data_str = ("b" if size_data  == 1 else
+                          "h" if size_data  == 2 else
+                          "w" if size_data  == 4 else "x")
+            s_idx_str  = "w" if size_index == 4 else "x"
+
+            self.Name = "LDIND" + s_data_str.upper() + "_" + s_idx_str.upper()
+
+        def emit(self):
+            global header_output, decoder_output, exec_output
+
+            iop = ArmInstObjParams(
+                self.name,
+                self.Name,
+                "ArmISA::MemoryInd64",
+                {
+                    "size_index" : self.size_index,
+                    "size_data"  : self.size_data,
+                    # Legacy placeholders – no longer used for Mem sizing
+                    "shift_amt"       : int(math.log2(self.size_data)),
+                    "shift_amt_index" : int(math.log2(self.size_index)),
+                    # Satisfy fillTemplates stubs
+                    "ea_code"         : "",
+                    "memacc_code"     : ";",
+                    "postacc_code"    : "",
+                    "predicate_test"  : "true",
+                    "fa_code"         : "",
+                    "acc_name"        : self.Name,
+                    "use_uops"        : 0,
+                    "use_wb"          : 0,
+                    "use_pc"          : 0,
+                    "wb_decl"         : None,
+                    "pc_decl"         : None,
+                    "is_ras_pop"      : "0",
+                },
+                ['IsLoad']
+            )
+
+            header_output  += LoadIndirectDeclare.subst(iop)
+            decoder_output += LoadIndirectConstructor.subst(iop)
+            exec_output    += (LoadIndirectExecute.subst(iop) +
+                               LoadIndirectInitiateAcc.subst(iop) +
+                               LoadIndirectCompleteAcc.subst(iop))
+
+    class StoreIndirect:
+        execBase   = 'StoreIndirect'
+        decConstBase = 'StoreIndirect'
+
+        def __init__(self, mnem, size_data, size_index):
+            self.name       = mnem
+            self.size_data  = size_data
+            self.size_index = size_index
+
+            s_data_str = ("b" if size_data  == 1 else
+                          "h" if size_data  == 2 else
+                          "w" if size_data  == 4 else "x")
+            s_idx_str  = "w" if size_index == 4 else "x"
+
+            self.Name = "STIND" + s_data_str.upper() + "_" + s_idx_str.upper()
+
+        def emit(self):
+            global header_output, decoder_output, exec_output
+
+            iop = ArmInstObjParams(
+                self.name,
+                self.Name,
+                "ArmISA::MemoryInd64",
+                {
+                    "size_index" : self.size_index,
+                    "size_data"  : self.size_data,
+                    "shift_amt"       : int(math.log2(self.size_data)),
+                    "shift_amt_index" : int(math.log2(self.size_index)),
+                    "ea_code"         : "",
+                    "memacc_code"     : ";",
+                    "postacc_code"    : "",
+                    "predicate_test"  : "true",
+                    "fa_code"         : "",
+                    "acc_name"        : self.Name,
+                    "use_uops"        : 0,
+                    "use_wb"          : 0,
+                    "use_pc"          : 0,
+                    "wb_decl"         : None,
+                    "pc_decl"         : None,
+                    "is_ras_pop"      : "0",
+                },
+                ['IsStore']
+            )
+
+            header_output  += StoreIndirectDeclare.subst(iop)
+            decoder_output += StoreIndirectConstructor.subst(iop)
+            exec_output    += (StoreIndirectExecute.subst(iop) +
+                               StoreIndirectInitiateAcc.subst(iop) +
+                               StoreIndirectCompleteAcc.subst(iop))
+
+    def buildIndirect(mnem_ld):
+        # Generate variants for Load: data sizes 1/2/4/8 × index sizes 4/8
+        for s_data in [1, 2, 4, 8]:
+            for s_idx in [4, 8]:
+                s_d_str = ("b" if s_data == 1 else
+                           "h" if s_data == 2 else
+                           "w" if s_data == 4 else "x")
+                s_i_str = "w" if s_idx == 4 else "x"
+                LoadIndirect(mnem_ld + s_d_str + "_" + s_i_str, s_data, s_idx).emit()
+
+    buildIndirect("ldind")
+}};
+
+// ---------------------------------------------------------------------------
+// Stub classes for decoder completeness
+//
+// The decoder references all 16 LDIND and 8 STIND variants.  The ones below
+// are not yet implemented; they panic if actually executed.  This satisfies
+// the linker without dead-coding the decoder.
+// ---------------------------------------------------------------------------
+def template IndirectStubDeclare {{
+    class %(class_name)s : public ArmISA::MemoryInd64
+    {
+      public:
+        %(class_name)s(ExtMachInst machInst,
+                       uint32_t _dest, uint32_t _src_alias,
+                       uint32_t _base_data, uint32_t _base_index,
+                       uint32_t _index_reg);
+
+        Fault execute(ExecContext *, trace::InstRecord *) const override;
+        Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;
+        Fault completeAcc(PacketPtr, ExecContext *,
+                          trace::InstRecord *) const override;
+    };
+}};
+
+def template IndirectStubConstructor {{
+    %(class_name)s::%(class_name)s(ExtMachInst machInst,
+            uint32_t _dest, uint32_t _src_alias,
+            uint32_t _base_data, uint32_t _base_index,
+            uint32_t _index_reg) :
+         ArmISA::MemoryInd64("%(mnemonic)s", machInst, %(op_class)s,
+                 (RegIndex)_dest, (RegIndex)_base_index,
+                 %(size_index)d, %(size_data)d)
+    {}
+}};
+
+def template IndirectStubExecute {{
+    Fault %(class_name)s::execute(ExecContext *xc,
+            trace::InstRecord *) const {
+        panic("%(mnemonic)s: not implemented");
+    }
+    Fault %(class_name)s::initiateAcc(ExecContext *xc,
+            trace::InstRecord *) const {
+        panic("%(mnemonic)s: not implemented");
+    }
+    Fault %(class_name)s::completeAcc(PacketPtr, ExecContext *xc,
+            trace::InstRecord *) const {
+        panic("%(mnemonic)s: not implemented");
     }
 }};
 
 let {{
     import math
 
-    # -------------------------------------------------------------------------
-    # Python Classes
-    # -------------------------------------------------------------------------
+    class IndirectStub:
+        """Emit a stub class that panics on execution."""
+        decConstBase = 'IndirectStub'
 
-    class CustomLoadStore(LoadStoreInst):
-        def __init__(self, mnem, size_data, size_index, flavor):
-            # Ensure decConstBase is set if not already set by subclass ref
-            if not hasattr(self, 'decConstBase'):
-                 self.decConstBase = 'MemoryOffset'
-
-            # Ensure execBase is set for eval()
-            # It is set by subclasses (LoadIndirect -> execBase='Load')
-
-            super().__init__()
-            self.name = mnem
-            self.size_data = size_data
+        def __init__(self, mnem, name, size_data, size_index):
+            self.name       = mnem
+            self.Name       = name
+            self.size_data  = size_data
             self.size_index = size_index
-            self.flavor = flavor
-            self.post = False
-            self.add = True
-            self.writeback = False
-            self.sign = False
-            self.user = False
-            self.rasPop = False
-            # MemFlags usually only track the DATA access alignment
-            self.memFlags = ["%d" % int(math.log(self.size_data, 2)), "ArmISA::MMU::AllowUnaligned"]
-            self.instFlags = []
-            # AArch64 instructions are conventionally unconditional
-            self.codeBlobs = {"postacc_code" : "", "predicate_test" : "true"}
 
-        # Copied from LoadInst64 in ldr64.isa
-        def emitHelper(self, base='Memory64', wbDecl=None):
-            global header_output, decoder_output, exec_output
-
-            # Simplified for skeleton: always assume normal
-            fa_code = None
-
-            (newHeader, newDecoder, newExec) = \
-                self.fillTemplates(self.name, self.Name, self.codeBlobs,
-                                   self.memFlags, self.instFlags,
-                                   base, wbDecl, faCode=fa_code)
-
-            header_output += newHeader
-            decoder_output += newDecoder
-            exec_output += newExec
-
-
-    class LoadIndirectBase(CustomLoadStore):
         def emit(self):
-            # We emit using 'ArmISA::MemoryReg64' as the base class in Python,
-            # but the C++ class generated by IndirectRegDeclare will inherit from it
-            # and satisfy the constructor requirements.
-            self.emitHelper('ArmISA::MemoryReg64', None)
+            global header_output, decoder_output, exec_output
+            iop = ArmInstObjParams(
+                self.name, self.Name, "ArmISA::MemoryInd64",
+                {
+                    "size_index"     : self.size_index,
+                    "size_data"      : self.size_data,
+                    "shift_amt"      : int(math.log2(self.size_data)),
+                    "shift_amt_index": int(math.log2(self.size_index)),
+                    "ea_code"        : "",
+                    "memacc_code"    : ";",
+                    "postacc_code"   : "",
+                    "predicate_test" : "true",
+                    "fa_code"        : "",
+                    "acc_name"       : self.Name,
+                    "use_uops"       : 0, "use_wb": 0, "use_pc": 0,
+                    "wb_decl"        : None, "pc_decl": None,
+                    "is_ras_pop"     : "0",
+                }, [])
+            header_output  += IndirectStubDeclare.subst(iop)
+            decoder_output += IndirectStubConstructor.subst(iop)
+            exec_output    += IndirectStubExecute.subst(iop)
 
-    # -------------------------------------------------------------------------
-    # Integer Load Indirect (ldind)
-    # -------------------------------------------------------------------------
-    class LoadIndirect(LoadIndirectBase):
-        execBase = 'Load'
-        decConstBase = 'IndirectReg'
-        def __init__(self, mnem, size_data, size_index):
-            super().__init__(mnem, size_data, size_index, 'normal')
-
-            # Suffix: e.g. ldindw_x
-            s_data_str = "b" if size_data==1 else "h" if size_data==2 else "w" if size_data==4 else "x"
-            s_idx_str = "w" if size_index==4 else "x"
-
-            self.Name = "LDIND" + s_data_str.upper() + "_" + s_idx_str.upper()
-
-            # Data Access Size
-            memacc = "Dest = Mem_ud;" # Default
-            if size_data == 1:
-                memacc = "Dest = Mem_ub;"
-            elif size_data == 2:
-                memacc = "Dest = Mem_uh;"
-            elif size_data == 4:
-                memacc = "Dest = Mem_uw;"
-            else:
-                memacc = "Dest = Mem_ud;"
-
-            shift_idx = 2 if size_index==4 else 3
-            shift_data = 0 if size_data==1 else 1 if size_data==2 else 2 if size_data==4 else 3
-
-            # EA Code:
-            # We use base class members:
-            #   base (mapped from DataBase/Rn)
-            #   offset (mapped from Index/Ra)
-            #   shiftAmt (mapped from shift_data)
-            #
-            # The simplified EA calculation for now (as a placeholder):
-            self.codeBlobs["ea_code"] = "EA = base + (offset << shiftAmt);"
-
-            self.codeBlobs["memacc_code"] = memacc
-            self.codeBlobs["shift_amt"] = shift_data
-            self.codeBlobs["shift_amt_index"] = shift_idx
-
-
-    # -------------------------------------------------------------------------
-    # Integer Store Indirect (stind)
-    # -------------------------------------------------------------------------
-    class StoreIndirect(LoadIndirectBase):
-        execBase = 'Store'
-        decConstBase = 'IndirectReg'
-        def __init__(self, mnem, size_data, size_index):
-            super().__init__(mnem, size_data, size_index, 'normal')
-
-            s_data_str = "b" if size_data==1 else "h" if size_data==2 else "w" if size_data==4 else "x"
-            s_idx_str = "w" if size_index==4 else "x"
-            self.Name = "STIND" + s_data_str.upper() + "_" + s_idx_str.upper()
-
-            # Store Access
-            memacc = "Mem_ud = Dest;"
-            if size_data == 1:
-                memacc = "Mem_ub = Dest;"
-            elif size_data == 2:
-                memacc = "Mem_uh = Dest;"
-            elif size_data == 4:
-                memacc = "Mem_uw = Dest;"
-            else:
-                memacc = "Mem_ud = Dest;"
-
-            shift_data = 0 if size_data==1 else 1 if size_data==2 else 2 if size_data==4 else 3
-
-            self.codeBlobs["ea_code"] = "EA = base + (offset << shiftAmt);"
-            self.codeBlobs["memacc_code"] = memacc
-            self.codeBlobs["shift_amt"] = shift_data
-            self.codeBlobs["shift_amt_index"] = 2 if size_index==4 else 3
-
-
-    def buildIndirect(mnem_ld, mnem_st):
-        # Generate 8 variants for Load
+    # All STIND variants (stores)
+    def buildIndirectStore(mnem_st):
         for s_data in [1, 2, 4, 8]:
             for s_idx in [4, 8]:
-                suffix = "b" if s_data==1 else "h" if s_data==2 else "w" if s_data==4 else "x"
-                suffix += "_" + ("w" if s_idx==4 else "x")
-                LoadIndirect(mnem_ld + suffix, s_data, s_idx).emit()
+                s_d_str = ("b" if s_data == 1 else
+                           "h" if s_data == 2 else
+                           "w" if s_data == 4 else "x")
+                s_i_str = "w" if s_idx == 4 else "x"
+                StoreIndirect(mnem_st + s_d_str + "_" + s_i_str, s_data, s_idx).emit()
 
-        # Generate 8 variants for Store
-        for s_data in [1, 2, 4, 8]:
-            for s_idx in [4, 8]:
-                suffix = "b" if s_data==1 else "h" if s_data==2 else "w" if s_data==4 else "x"
-                suffix += "_" + ("w" if s_idx==4 else "x")
-                StoreIndirect(mnem_st + suffix, s_data, s_idx).emit()
-
-    buildIndirect("ldind", "stind")
+    buildIndirectStore("stind")
 }};

@@ -324,17 +324,6 @@ countBoolVec(BoolVec bVec)
 
 // MYSTUFF:
 
-inline bool
-isSparse(RequestPtr req)
-{
-    std::shared_ptr<SparseID> sparse_id = req->getExtension<SparseID>();
-    bool is_sparse = sparse_id != nullptr;
-    if (is_sparse) {
-        req->removeExtension<SparseID>();
-    }
-    return is_sparse;
-}
-
 inline RequestorID
 getRequestorID(RequestPtr req)
 {
@@ -359,13 +348,6 @@ getMemAccessName(RequestPtr req)
     }
 }
 
-inline RequestPtr
-getNextReq(RequestPtr req)
-{
-    std::shared_ptr<SpatterAccess> spatter_access = req->getExtension<SpatterAccess>();
-    return spatter_access->nextRequestAsInd();
-}
-
 inline Addr
 getAddr(RequestPtr req)
 {
@@ -378,7 +360,7 @@ getSize(RequestPtr req)
     return req->getSize();
 }
 
-// FFUTSYM:
+// FFUTSYM
 
 } // namespace ruby
 } // namespace gem5

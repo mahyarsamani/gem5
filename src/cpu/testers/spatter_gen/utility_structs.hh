@@ -37,6 +37,7 @@
 #include "base/types.hh"
 #include "enums/SpatterKernelType.hh"
 #include "mem/packet.hh"
+#include "mem/request.hh"
 
 namespace gem5
 {
@@ -86,7 +87,7 @@ class TimedQueue
 // // It supports multiple levels of indirection.
 // // However, the SpatterKernel class only works with one level of
 // // indirection (i.e. accessing value[index[i]]).
-class SpatterAccess: public Extension<Request, SpatterAccess>,
+class SpatterAccess: public DependentAccessGen,
                     public std::enable_shared_from_this<SpatterAccess>
 {
   private:
@@ -143,6 +144,7 @@ class SpatterAccess: public Extension<Request, SpatterAccess>,
         SpatterKernelType kernel_type,
         const std::queue<AccessPair> &access_pairs
     ):
+        DependentAccessGen(),
         requestorId(requestor_id), _kernelType(kernel_type),
         accTripTime(0), emulatedPC(0), accessPairs(access_pairs)
     {}
@@ -206,6 +208,10 @@ class SpatterAccess: public Extension<Request, SpatterAccess>,
         cmd = _kernelType == SpatterKernelType::gather ? \
             MemCmd::ReadIndReq : MemCmd::WriteIndReq;
         return createRequest(addr, size, cmd, emulatedPC++);
+    }
+
+    virtual RequestPtr genNextRequest(RequestPtr og_req, uint64_t index_value) override {
+        return nextRequestAsInd();
     }
 
     PacketPtr nextPacketAsInd()
@@ -349,7 +355,7 @@ class SpatterKernel
 
         // Addr alias_addr = baseAliasAddr + (index * valueSize);
         // MYSTUFF: FIXME: NOTE: This is temporary.
-        // alias_addr does not work outside of vector accesses.
+        // alias_addr does  not work outside of vector accesses.
         Addr alias_addr = baseAliasAddr + (index * 64);
 
         access_pairs.emplace(alias_addr, valueSize);

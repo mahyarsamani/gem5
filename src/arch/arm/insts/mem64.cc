@@ -229,3 +229,39 @@ MemoryAtomicPair64::generateDisassembly(
 
 } // namespace ArmISA
 } // namespace gem5
+
+namespace gem5
+{
+namespace ArmISA
+{
+
+MemoryInd64::MemoryInd64(const char *mnem, ExtMachInst _machInst,
+                         OpClass __opClass,
+                         RegIndex _dest, RegIndex _base,
+                         unsigned _sizeIndex, unsigned _sizeData)
+    : MightBeMicro64(mnem, _machInst, __opClass),
+      dest(_dest), base(_base),
+      sizeIndex(_sizeIndex), sizeData(_sizeData),
+      shiftAmtIndex(ceilLog2(_sizeIndex)),
+      shiftAmtData(ceilLog2(_sizeData)),
+      memAccessFlags(ArmISA::MMU::AllowUnaligned)
+{}
+
+std::string
+MemoryInd64::generateDisassembly(
+        Addr pc, const loader::SymbolTable *symtab) const
+{
+    // ldindx_w x4, x0, x1, x2
+    //           ^dest ^base_data ^base_index ^i
+    // 'base' here is base_index; base_data is tracked in the subclass.
+    std::stringstream ss;
+    printMnemonic(ss, "", false);
+    printIntReg(ss, dest);
+    ccprintf(ss, ", [");
+    printIntReg(ss, base);
+    ccprintf(ss, "]");
+    return ss.str();
+}
+
+} // namespace ArmISA
+} // namespace gem5

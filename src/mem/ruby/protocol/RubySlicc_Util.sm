@@ -63,8 +63,6 @@ structure(BoolVec, external="yes") {
 int countBoolVec(BoolVec bVec);
 RequestorID getRequestorID(RequestPtr req);
 // MYSTUFF:
-bool isSparse(RequestPtr req);
-RequestPtr getNextReq(RequestPtr req);
 Addr getAddr(RequestPtr req);
 int getSize(RequestPtr req);
 bool isInvalid(MachineID mid);

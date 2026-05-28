@@ -48,6 +48,7 @@
 #include "base/logging.hh"
 #include "base/str.hh"
 #include "cpu/testers/rubytest/RubyTester.hh"
+#include "debug/IndirectAccess.hh"
 #include "debug/LatencyBreakdown.hh"
 #include "debug/LLSC.hh"
 #include "debug/MemoryAccess.hh"
@@ -57,6 +58,7 @@
 #include "debug/RubyStats.hh"
 #include "debug/Usefulness.hh"
 #include "mem/packet.hh"
+#include "mem/request.hh"
 #include "mem/ruby/profiler/Profiler.hh"
 #include "mem/ruby/protocol/PrefetchBit.hh"
 #include "mem/ruby/protocol/RubyAccessMode.hh"
@@ -154,8 +156,9 @@ Sequencer::Sequencer(const Params &p)
         }
     }
     // MYSTUFF
-    labelCache = new LabelCache(name() + ".label_cache", 4096);
-    invalidLabelCache = new LabelCache(name() + ".invalid_label_cache", 4096);
+    uint64_t blk_size = m_ruby_system->getBlockSizeBytes();
+    labelCache = new LabelCache(name() + ".label_cache", 4096, blk_size);
+    invalidLabelCache = new LabelCache(name() + ".invalid_label_cache", 4096, blk_size);
     labelCache->setInvalidatedCache(invalidLabelCache);
     // FFUTSYM
 }
@@ -267,6 +270,23 @@ Sequencer::wakeup()
         total_outstanding += table_entry.second.size();
     }
 
+    for (const auto &table_entry : m_IndirectRequestTable) {
+        for (const auto &seq_req : table_entry.second) {
+            if (current_time - seq_req.issue_time < m_deadlock_threshold)
+                continue;
+
+            panic("Possible Deadlock detected. Aborting!\n version: %d "
+                  "indirect request alias: 0x%x m_IndirectRequestTable: %d "
+                  "current time: %u issue_time: %d difference: %d\n",
+                  m_version, seq_req.pkt->getAddr(),
+                  table_entry.second.size(),
+                  current_time * clockPeriod(), seq_req.issue_time
+                  * clockPeriod(), (current_time * clockPeriod())
+                  - (seq_req.issue_time * clockPeriod()));
+        }
+        total_outstanding += table_entry.second.size();
+    }
+
     assert(m_outstanding_count == total_outstanding);
 
     if (m_outstanding_count > 0) {
@@ -281,6 +301,13 @@ Sequencer::functionalWrite(Packet *func_pkt)
     int num_written = RubyPort::functionalWrite(func_pkt);
 
     for (const auto &table_entry : m_RequestTable) {
+        for (const auto& seq_req : table_entry.second) {
+            if (seq_req.functionalWrite(func_pkt))
+                ++num_written;
+        }
+    }
+
+    for (const auto &table_entry : m_IndirectRequestTable) {
         for (const auto& seq_req : table_entry.second) {
             if (seq_req.functionalWrite(func_pkt))
                 ++num_written;
@@ -380,10 +407,24 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType primary_type,
     }
 
     Addr line_addr = makeLineAddress(pkt->getAddr());
-    if (primary_type == RubyRequestType_LDIND ||
-        primary_type == RubyRequestType_STIND) {
-        line_addr = pkt->getAddr();
+    auto ext = pkt->req->getExtension<IndirectAccessAlias>();
+    if (ext != nullptr) {
+        // Indirect access — use alias as key in separate table.
+        // Aliases are not cache-line-aligned.
+        Addr alias = ext->alias();
+        auto &seq_req_list = m_IndirectRequestTable[alias];
+        seq_req_list.emplace_back(pkt, primary_type,
+            secondary_type, curCycle());
+        m_outstanding_count++;
+        // Aliasing should never occur for indirect accesses. Each alias
+        // is unique by construction: alias(i) = base_alias + i * data_elem_size.
+        // Two distinct in-flight indirect requests will always have distinct
+        // alias keys. If this fires, the alias creation scheme is broken.
+        assert(seq_req_list.size() == 1);
+        m_outstandReqHist.sample(m_outstanding_count);
+        return RequestStatus_Ready;
     }
+    // Normal path — unchanged
     // Check if there is any outstanding request for the same cache line.
     auto &seq_req_list = m_RequestTable[line_addr];
     // Create a default entry
@@ -491,9 +532,20 @@ Sequencer::writeCallback(Addr address, DataBlock& data,
     // Free the whole list as we assume we have had the exclusive access
     // to this cache line when response for the write comes back
     //
-    assert(address == makeLineAddress(address));
-    assert(m_RequestTable.find(address) != m_RequestTable.end());
-    auto &seq_req_list = m_RequestTable[address];
+    auto ind_it = m_IndirectRequestTable.find(address);
+    bool is_indirect = (ind_it != m_IndirectRequestTable.end());
+
+    if (!is_indirect) {
+        assert(address == makeLineAddress(address));
+        // NOTE: Commenting for now since there is no final design for alias
+        // assignment to indirect accesses and the alias is passed as the
+        // address here. It might now be cache block aligned.
+        // assert(m_RequestTable.find(address) != m_RequestTable.end());
+    }
+
+    auto &seq_req_list = is_indirect
+        ? ind_it->second
+        : m_RequestTable[address];
 
     // Perform hitCallback on every cpu request made to this cache block while
     // ruby request was outstanding. Since only 1 ruby request was made,
@@ -529,14 +581,15 @@ Sequencer::writeCallback(Addr address, DataBlock& data,
             // LL/SC support (tested with ARMv8)
             bool success = true;
 
+            Addr monitor_address = is_indirect ? makeLineAddress(seq_req.pkt->getAddr()) : address;
             if (seq_req.m_type != RubyRequestType_Store_Conditional) {
                 // Regular stores to addresses being monitored
                 // will fail (remove) the monitor entry.
-                llscClearMonitor(address);
+                llscClearMonitor(monitor_address);
             } else {
                 // Store conditionals must first check the monitor
                 // if they will succeed or not
-                success = llscStoreConditional(address);
+                success = llscStoreConditional(monitor_address);
                 seq_req.pkt->req->setExtraData(success ? 1 : 0);
             }
 
@@ -579,7 +632,11 @@ Sequencer::writeCallback(Addr address, DataBlock& data,
 
     // free all outstanding requests corresponding to this address
     if (seq_req_list.empty()) {
-        m_RequestTable.erase(address);
+        if (is_indirect) {
+            m_IndirectRequestTable.erase(address);
+        } else {
+            m_RequestTable.erase(address);
+        }
     }
 }
 
@@ -627,11 +684,20 @@ Sequencer::readCallback(Addr address, DataBlock& data,
     // Free up read requests until we hit the first Write request
     // or end of the corresponding list.
     //
-    // MYSTUFF: FIXME: NOTE: Temporary change
-    // This is because indirect accesses have alias not aligned.
-    // assert(address == makeLineAddress(address));
-    assert(m_RequestTable.find(address) != m_RequestTable.end());
-    auto &seq_req_list = m_RequestTable[address];
+
+    // Check if this is an indirect access (alias-keyed, may not be
+    // cache-line-aligned). Indirect requests live in a separate table.
+    auto ind_it = m_IndirectRequestTable.find(address);
+    bool is_indirect = (ind_it != m_IndirectRequestTable.end());
+
+    if (!is_indirect) {
+        assert(address == makeLineAddress(address));
+        assert(m_RequestTable.find(address) != m_RequestTable.end());
+    }
+
+    auto &seq_req_list = is_indirect
+        ? ind_it->second
+        : m_RequestTable[address];
 
     // Perform hitCallback on every cpu request made to this cache block while
     // ruby request was outstanding. Since only 1 ruby request was made,
@@ -667,9 +733,56 @@ Sequencer::readCallback(Addr address, DataBlock& data,
 
     // free all outstanding requests corresponding to this address
     if (seq_req_list.empty()) {
-        m_RequestTable.erase(address);
+        if (is_indirect) {
+            m_IndirectRequestTable.erase(address);
+        } else {
+            m_RequestTable.erase(address);
+        }
     }
 }
+
+// MYSTUFF
+void
+Sequencer::prepareIndPacket(Addr alias, RequestPtr& final_req)
+{
+    // Locate the Phase 1 SequencerRequest tracked under `alias`
+    // in the indirect request table.
+    auto it = m_IndirectRequestTable.find(alias);
+
+    panic_if(it == m_IndirectRequestTable.end() || it->second.empty(),
+        "prepareIndPacket: no SequencerRequest found for alias 0x%x",alias);
+    SequencerRequest &sreq = it->second.front();
+    PacketPtr old_pkt = sreq.pkt;
+
+    // Build the Phase 2 packet: correct PA, correct size (sizeData).
+    PacketPtr new_pkt = new Packet(final_req, old_pkt->cmd);
+    new_pkt->allocate();
+
+    // For stores, we must copy the payload into the new packet.
+    // The O3 pipeline truncates the payload because writeMem() uses sizeIndex.
+    // The full payload is preserved in the DependentAccessGen extension.
+    // It's not actually needed to be sent to the caches.
+    if (auto dag = final_req->getExtension<DependentAccessGen>()) {
+        if (dag->hasData()) {
+            assert(new_pkt->isWrite());
+            new_pkt->setData(dag->getStoreData());
+        }
+    }
+
+    DPRINTF(IndirectAccess, "%s: alias=0x%x Phase2 PA=0x%x size=%d\n",
+            __func__, alias, final_req->getPaddr(), final_req->getSize());
+
+    // Transfer the senderState chain so RubyPort can route the response
+    // back to the correct CPU port, and so O3 (if used) can match the
+    // returning packet via dynamic_cast<LSQRequest*>(pkt->senderState).
+    new_pkt->senderState = old_pkt->senderState;
+    old_pkt->senderState = nullptr;
+
+    // Replace the tracked packet; the old one is no longer needed.
+    delete old_pkt;
+    sreq.pkt = new_pkt;
+}
+// FFUTSYM
 
 void
 Sequencer::atomicCallback(Addr address, DataBlock& data,
@@ -1049,6 +1162,7 @@ bool
 Sequencer::empty() const
 {
     return m_RequestTable.empty() &&
+           m_IndirectRequestTable.empty() &&
            m_UnaddressedRequestTable.empty();
 }
 
@@ -1140,12 +1254,7 @@ Sequencer::makeRequest(PacketPtr pkt)
             // Note: M5 packets do not differentiate ST from RMW_Write
             //{
             if (pkt->isIndirect()) {
-                if (m_controller->disambiguated(pkt->getAddr())) {
-                    pkt->setAddr(m_controller->getAddrFromAlias(pkt->getAddr()));
-                    primary_type = secondary_type = RubyRequestType_ST;
-                } else {
-                    primary_type = secondary_type = RubyRequestType_STIND;
-                }
+                primary_type = secondary_type = RubyRequestType_STIND;
             } else {
                 primary_type = secondary_type = RubyRequestType_ST;
             }
@@ -1156,12 +1265,7 @@ Sequencer::makeRequest(PacketPtr pkt)
             } else if (pkt->req->isInstFetch()) {
                 primary_type = secondary_type = RubyRequestType_IFETCH;
             } else if (pkt->isIndirect()) {
-                if (m_controller->disambiguated(pkt->getAddr())) {
-                    pkt->setAddr(m_controller->getAddrFromAlias(pkt->getAddr()));
-                    primary_type = secondary_type = RubyRequestType_LD;
-                } else {
-                    primary_type = secondary_type = RubyRequestType_LDIND;
-                }
+                primary_type = secondary_type = RubyRequestType_LDIND;
             } else {
                 if (pkt->req->isReadModifyWrite()) {
                     primary_type = RubyRequestType_RMW_Read;
@@ -1358,6 +1462,10 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
                     __func__, from_cpu->name(), request->getPaddr());
             labelCache->onFirstTouch(from_cpu->name(), request->getPaddr());
         }
+    }
+    auto iaa = pkt->req->getExtension<IndirectAccessAlias>();
+    if (iaa) {
+        msg->m_Alias = iaa->alias();
     }
     // FFUTSYM
 

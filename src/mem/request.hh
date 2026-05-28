@@ -55,6 +55,7 @@
 #include <limits>
 #include <memory>
 #include <vector>
+#include <cstring>
 
 #include "base/amo.hh"
 #include "base/compiler.hh"
@@ -1141,18 +1142,6 @@ class Request : public Extensible<Request>
     }
 };
 
-// DEPRECATED
-class SparseID: public Extension<Request, SparseID>
-{
-  public:
-    SparseID() : Extension<Request, SparseID>() {}
-
-    virtual std::unique_ptr<ExtensionBase> clone() const override
-    {
-        return std::make_unique<SparseID>();
-    }
-};
-
 class IndAccProd: public Extension<Request, IndAccProd>
 {
   private:
@@ -1216,20 +1205,89 @@ class MemAccessName: public Extension<Request, MemAccessName>
     std::string name() const { return _name; }
 };
 
-class DependentAccessGen: public Extension<Request, DependentAccessGen>
+class IndirectAccessAlias: public Extension<Request, IndirectAccessAlias>
 {
-  protected:
-    Addr _baseAddr;
-    unsigned _size;
+  private:
+    Addr _alias;
 
   public:
-    DependentAccessGen(Addr base_addr, unsigned size):
-        Extension<Request, DependentAccessGen>(),
-        _baseAddr(base_addr), _size(size)
+    IndirectAccessAlias(Addr alias):
+        Extension<Request, IndirectAccessAlias>(), _alias(alias)
     {}
 
-    virtual RequestPtr genNextRequestFrom4B(uint32_t index_value) = 0;
-    virtual RequestPtr genNextRequestFrom8B(uint64_t index_value) = 0;
+    virtual std::unique_ptr<ExtensionBase> clone() const override
+    {
+        return std::make_unique<IndirectAccessAlias>(*this);
+    }
+
+    Addr alias() { return _alias; }
+};
+
+class DependentAccessGen: public Extension<Request, DependentAccessGen>
+{
+  public:
+    using AddrTranslator = std::function<Addr(Addr)>;
+
+    DependentAccessGen():
+        Extension<Request, DependentAccessGen>(),
+        _translateFn(nullptr), _storeData(nullptr), _storeDataSize(0), _hasData(false)
+    {}
+
+    virtual ~DependentAccessGen() {
+        if (_storeData) {
+            delete[] _storeData;
+        }
+    }
+
+    DependentAccessGen(const DependentAccessGen& other):
+        Extension<Request, DependentAccessGen>(other),
+        _translateFn(other._translateFn),
+        _storeData(nullptr), _storeDataSize(other._storeDataSize), _hasData(other._hasData)
+    {
+        if (other._storeData) {
+            _storeData = new uint8_t[_storeDataSize];
+            std::memcpy(_storeData, other._storeData, _storeDataSize);
+        }
+    }
+
+    void setStoreData(const uint8_t* data, unsigned size) {
+        if (_storeData) delete[] _storeData;
+        _storeDataSize = size;
+        _storeData = new uint8_t[size];
+        std::memcpy(_storeData, data, size);
+        _hasData = true;
+    }
+
+    bool hasData() const { return _hasData; }
+    const uint8_t* getStoreData() const { return _storeData; }
+    unsigned getStoreDataSize() const { return _storeDataSize; }
+
+    void setTranslator(AddrTranslator fn) { _translateFn = std::move(fn); }
+
+    bool hasTranslator() const { return static_cast<bool>(_translateFn); }
+
+    virtual RequestPtr genNextRequest(RequestPtr og_req,
+                                      uint64_t index_value) = 0;
+
+  protected:
+    AddrTranslator _translateFn;
+    uint8_t* _storeData;
+    unsigned _storeDataSize;
+    bool _hasData;
+};
+
+
+class IndependentAccessResp : public Extension<Request, IndependentAccessResp>
+{
+  private:
+    uint64_t _indexValue;
+  public:
+    IndependentAccessResp():
+        Extension<Request, IndependentAccessResp>(), _indexValue(-1)
+    {}
+
+    void setIndexValue(uint64_t index_value) { _indexValue = index_value; }
+    uint64_t getIndexValue() const { return _indexValue; }
 };
 
 } // namespace gem5

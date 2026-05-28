@@ -40,12 +40,20 @@
 
 #include "mem/ruby/slicc_interface/AbstractController.hh"
 
+#include "RubySlicc_Util.hh"
+// MYSTUFF
+#include "debug/MSDebug.hh"
+// FFUTSYM
 #include "debug/RubyQueue.hh"
+// MYSTUFF
+#include "mem/request.hh"
+// FFUTSYM
 #include "mem/ruby/network/Network.hh"
 #include "mem/ruby/protocol/MemoryMsg.hh"
 #include "mem/ruby/system/RubySystem.hh"
 #include "mem/ruby/system/Sequencer.hh"
 #include "sim/system.hh"
+#include <iterator>
 
 namespace gem5
 {
@@ -539,6 +547,55 @@ AbstractController::canOverride(std::string label, Addr address)
         }
         return ret;
     }
+}
+
+RequestPtr
+AbstractController::getDependentReq(RequestPtr &og_request, DataBlock &index_data)
+{
+    int offset = getOffset(og_request->getPaddr());
+    int size   = og_request->getSize();   // = size_index (e.g. 4 for _w variant)
+    const uint8_t *raw = index_data.getData(offset, size);
+    DPRINTF(MSDebug, "%s: Generating dependent request from %s.\n",
+            __func__, index_data);
+
+    uint64_t index_value = 0;
+    switch (size) {
+        case 4: index_value = *reinterpret_cast<const uint32_t *>(raw); break;
+        case 8: index_value = *reinterpret_cast<const uint64_t *>(raw); break;
+        default:
+            panic("getDependentReq: unsupported index element size %u bytes",
+                  size);
+    }
+    DPRINTF(MSDebug, "%s: offset=%d size=%d index_value=%" PRIu64 "\n",
+            __func__, offset, size, index_value);
+
+    // Generate the Phase 2 (data-fetch) request via the ISA-supplied generator.
+    RequestPtr phase2 =
+        og_request->getExtension<DependentAccessGen>()
+                  ->genNextRequest(og_request, index_value);
+
+    // Fill in the index value on the IAR extension that the CPU attached to
+    // og_request (Phase 1). This is the "blank" the cache fills in:
+    //   _destReg and _seqNum were set by the CPU at initiateAcc time.
+    //   _indexValue is now known — we just read it from the DataBlock.
+    auto iar = og_request->getExtension<IndependentAccessResp>();
+    assert(iar != nullptr);
+    iar->setIndexValue(index_value);
+
+    // Copy all relevant extensions from Phase 1 to Phase 2 so they are not lost.
+    phase2->setExtension<IndependentAccessResp>(iar);
+
+    if (auto iaa = og_request->getExtension<IndirectAccessAlias>())
+        phase2->setExtension<IndirectAccessAlias>(iaa);
+    if (auto dag = og_request->getExtension<DependentAccessGen>())
+        phase2->setExtension<DependentAccessGen>(dag);
+    if (auto name = og_request->getExtension<MemAccessName>())
+        phase2->setExtension<MemAccessName>(name);
+
+    assert(og_request->getExtension<IndAccProd>() == nullptr);
+    assert(og_request->getExtension<IndAccCons>() == nullptr);
+
+    return phase2;
 }
 // FFUTSYM
 

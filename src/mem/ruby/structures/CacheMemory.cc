@@ -301,16 +301,6 @@ CacheMemory::cacheAvail(Addr address) const
     return false;
 }
 
-bool
-CacheMemory::cacheAvailWithSparsityInMind(Addr address, bool is_sparse) const
-{
-    assert(address == makeLineAddress(address));
-
-    int64_t cache_set = addressToCacheSet(address);
-    int access_size = is_sparse ? m_sparse_access_size : m_block_size;
-    return m_used_set_capacity[cache_set] + access_size <= m_set_capacity;
-}
-
 AbstractCacheEntry*
 CacheMemory::allocate(Addr address, AbstractCacheEntry *entry)
 {
@@ -354,74 +344,6 @@ CacheMemory::allocate(Addr address, AbstractCacheEntry *entry)
     panic("Allocate didn't find an available entry");
 }
 
-// MYSTUFF:
-AbstractCacheEntry*
-CacheMemory::allocateWithSparsityInMind(Addr address, AbstractCacheEntry* entry, bool is_sparse)
-{
-    assert(address == makeLineAddress(address));
-    assert(!isTagPresent(address));
-    assert(cacheAvailWithSparsityInMind(address, is_sparse));
-
-    int access_size = is_sparse ? m_sparse_access_size : m_block_size;
-    // DPRINTF(MSDebug, "Allocating address: %#x with size %d.\n", address, access_size);
-
-    entry->initBlockSize(m_block_size);
-    entry->setRubySystem(m_ruby_system);
-
-    bool allocated = false;
-    int64_t cache_set = addressToCacheSet(address);
-    std::vector<AbstractCacheEntry*>& set = m_cache[cache_set];
-    for (int i = 0; i < set.size(); i++) {
-        if (!set[i] || set[i]->m_Permission == AccessPermission_NotPresent) {
-            if (set[i] && (set[i] != entry)) {
-                warn_once("This protocol contains a cache entry handling bug: "
-                    "Entries in the cache should never be NotPresent! If\n"
-                    "this entry (%#x) is not tracked elsewhere, it will memory "
-                    "leak here. Fix your protocol to eliminate these!",
-                    address);
-            }
-            set[i] = entry;  // Init entry
-            set[i]->m_Address = address;
-            set[i]->m_Permission = AccessPermission_Invalid;
-            DPRINTF(RubyCache, "Allocate clearing lock for addr: 0x%x\n", address);
-            set[i]->m_locked = -1;
-            m_tag_index[address] = i;
-            set[i]->setPosition(cache_set, i);
-            set[i]->replacementData = replacement_data[cache_set][i];
-            set[i]->setLastAccess(curTick());
-
-            // Call reset function here to set initial value for different
-            // replacement policies.
-            m_replacementPolicy_ptr->reset(entry->replacementData);
-            // MYSTUFF: The lines above are copied form allocate.
-            set[i]->setSparse(is_sparse);
-            allocated = true;
-            break;
-            // FFUTSYM:
-        }
-    }
-    // MYSTUFF: This block is colmpletely me.
-    if (!allocated) {
-        // DPRINTF(MSDebug, "%s: Need to extend the associativity of the cache.\n", __func__);
-        set.push_back(entry);
-        entry->m_Address = address;
-        entry->m_Permission = AccessPermission_Invalid;
-        DPRINTF(RubyCache, "Allocate clearing lock for addr: 0x%x\n", address);
-        entry->m_locked = -1;
-        m_tag_index[address] = set.size() - 1;
-        entry->setPosition(cache_set, set.size() - 1);
-        replacement_data[cache_set].push_back(m_replacementPolicy_ptr->instantiateEntry());
-        entry->replacementData = replacement_data[cache_set][set.size() - 1];
-        entry->setLastAccess(curTick());
-        entry->setSparse(is_sparse);
-        m_replacementPolicy_ptr->reset(entry->replacementData);
-        allocated = true;
-    }
-    m_used_set_capacity[cache_set] += access_size;
-    return entry;
-    // FFUTSYM:
-}
-// FFUTSYM:
 
 void
 CacheMemory::deallocate(Addr address)
@@ -458,27 +380,6 @@ CacheMemory::cacheProbe(Addr address) const
     return m_cache[cacheSet][m_replacementPolicy_ptr->
                         getVictim(candidates)->getWay()]->m_Address;
 }
-
-// MYSTUFF:
-Addr
-CacheMemory::cacheProbeWithSparsityInMind(Addr address, bool is_sparse) const
-{
-    assert(address == makeLineAddress(address));
-    assert(!cacheAvailWithSparsityInMind(address, is_sparse));
-
-    int64_t cacheSet = addressToCacheSet(address);
-    std::vector<ReplaceableEntry*> candidates;
-    for (int i = 0; i < m_cache[cacheSet].size(); i++) {
-        if (m_cache[cacheSet][i] == nullptr) {
-            continue;
-        }
-        candidates.push_back(static_cast<ReplaceableEntry*>(
-                                                       m_cache[cacheSet][i]));
-    }
-    return m_cache[cacheSet][m_replacementPolicy_ptr->
-                        getVictim(candidates)->getWay()]->m_Address;
-}
-// FFUTSYM
 
 // looks an address up in the cache
 AbstractCacheEntry*

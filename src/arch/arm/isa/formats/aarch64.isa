@@ -1295,7 +1295,13 @@ namespace Aarch64
         switch (bits(machInst, 29, 28)) {
           case 0x0:
             if (bits(machInst, 26) == 0) {
-                if (bits(machInst, 24) != 0)
+                // Custom LDIND (opc=0x8) and STIND (opc=0xC) use bit 24
+                // for indexer element size (0=32-bit, 1=64-bit), so we
+                // must not reject bit24=1 for those opcodes.
+                uint8_t opc_pre = (bits(machInst, 15) << 0) |
+                                  (bits(machInst, 23, 21) << 1);
+                if (bits(machInst, 24) != 0
+                    && opc_pre != 0x8 && opc_pre != 0xC)
                     return new Unknown64(machInst);
                 RegIndex rt = (RegIndex)(uint8_t)bits(machInst, 4, 0);
                 RegIndex rn = (RegIndex)(uint8_t)bits(machInst, 9, 5);

@@ -496,7 +496,6 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   DPRINTF(Usefulness, "Setting access_name for tbe for addr: %#lx from %s to %s.\n", addr, tbe.access_name, in_msg.access_name);
   tbe.access_name := in_msg.access_name;
 
-  tbe.is_sparse := in_msg.is_sparse;
   // FFUTSYM
   return tbe;
 }
@@ -706,7 +705,6 @@ void prepareRequest(TBE tbe, CHIRequestType type, CHIRequestMsg & out_msg) {
   out_msg.is_local_pf := false;
   out_msg.is_remote_pf := tbe.is_local_pf || tbe.is_remote_pf;
   out_msg.txnId := tbe.txnId;
-  out_msg.is_sparse := tbe.is_sparse;
 
   // MYSTUFF
   out_msg.read_usefulness := tbe.read_usefulness;
@@ -1384,7 +1382,9 @@ Event reqToEvent(CHIRequestType type, bool is_prefetch) {
       return Event:AtomicNoReturn;
     }
   } else if (type == CHIRequestType:ReadIndirect) {
-    return Event:FwdReadIndirect;
+    return Event:FwdIndirect;
+  } else if (type == CHIRequestType:WriteIndirect) {
+    return Event:FwdIndirect;
   } else {
     error("Invalid CHIRequestType");
   }
@@ -1716,38 +1716,6 @@ dst.atomic_to_be_done := src.atomic_to_be_done;
   dst.index_cache_id := src.index_cache_id;
   dst.secondType := src.secondType;
 
-  dst.is_sparse := src.is_sparse;
-}
-
-bool cacheAvail(Addr address, bool is_sparse)
-{
-    if (compact_with_sparsity) {
-        return cache.cacheAvailWithSparsityInMind(address, is_sparse);
-    } else {
-        return cache.cacheAvail(address);
-    }
-}
-
-AbstractCacheEntry allocate(Addr address, CacheEntry cache_entry, bool is_sparse), return_by_pointer="yes" {
-    if (compact_with_sparsity) {
-        return cache.allocateWithSparsityInMind(address, cache_entry, is_sparse);
-    } else {
-        return cache.allocate(address, cache_entry);
-    }
-}
-
-Addr cacheProbe(Addr address, bool is_sparse) {
-    if (compact_with_sparsity) {
-        return cache.cacheProbeWithSparsityInMind(address, is_sparse);
-    } else {
-        return cache.cacheProbe(address);
-    }
-}
-
-void deallocate(Addr address) {
-    // NOTE: No need to have a WithSparsityInMind version of this function.
-    // CacheMemory can internally check to see if entry at `address` is sparse.
-    cache.deallocate(address);
 }
 
 CHIRequestType manipulateType(CHIRequestMsg msg)
@@ -1803,7 +1771,6 @@ void indirectDependentBoilerPlate(CHIRequestMsg &out_msg)
     // NOTE: Defaults to 0;
     out_msg.txnId := max_outstanding_transactions;
 
-    out_msg.is_sparse := false;
 
     out_msg.secondType := CHIRequestType:null;
 }
@@ -1818,6 +1785,21 @@ bool isIndirect(CHIRequestType type, CHIRequestType second_type) {
         (second_type == CHIRequestType:ReadValue) ||
         (second_type == CHIRequestType:WriteValue)
     );
+}
+
+bool shouldNotifyPrefetcher(CHIRequestType type, CHIRequestType second_type) {
+    if (isIndirect(type, second_type)) {
+        if (gather_cache && ((second_type == CHIRequestType:ReadIndirect) ||
+                             (second_type == CHIRequestType:WriteIndirect))) {
+            return true;
+        }
+        if (value_cache && ((second_type == CHIRequestType:ReadValue) ||
+                            (second_type == CHIRequestType:WriteValue))) {
+            return true;
+        }
+        return false;
+    }
+    return true;
 }
 
 void setAddrFromReq(CHIRequestMsg &out_msg, RequestPtr req)

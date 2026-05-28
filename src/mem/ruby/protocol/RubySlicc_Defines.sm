@@ -44,5 +44,7 @@ bool canOverride(std::string, Addr);
 bool disambiguated(Addr);
 void setAliasForAddr(Addr, Addr);
 Addr getAddr(Addr);
+
+RequestPtr getDependentReq(RequestPtr, DataBlock);
 // FFUTSYM
 void dequeueMemRespQueue();

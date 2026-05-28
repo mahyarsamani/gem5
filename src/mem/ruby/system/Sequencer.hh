@@ -130,6 +130,21 @@ class Sequencer : public RubyPort
                       const Cycles forwardRequestTime = Cycles(0),
                       const Cycles firstResponseTime = Cycles(0));
 
+    // MYSTUFF
+    /**
+     * Replace the Phase 1 (index-fetch) packet tracked by `alias` with a
+     * new packet sized and addressed for the Phase 2 (data-fetch) response.
+     * Must be called BEFORE readCallback() so that hitCallback() sees the
+     * corrected packet (right address, right size). Data bytes are filled in
+     * by hitCallback() using the DataBlock passed to readCallback().
+     *
+     * @param alias     The alias key used in m_RequestTable for this LDIND.
+     * @param final_req The Phase 2 RequestPtr (carries PA and sizeData).
+     */
+    void prepareIndPacket(Addr alias, RequestPtr& final_req);
+
+    // FFUTSYM
+
     void atomicCallback(Addr address,
                         DataBlock& data,
                         const bool externalHit = false,
@@ -247,6 +262,11 @@ class Sequencer : public RubyPort
   protected:
     // RequestTable contains both read and write requests, handles aliasing
     std::unordered_map<Addr, std::list<SequencerRequest>> m_RequestTable;
+    // IndirectRequestTable holds requests keyed by alias addresses (from
+    // IndirectAccessAlias extensions). Aliases are not cache-line-aligned,
+    // so they must not be mixed with m_RequestTable entries.
+    std::unordered_map<Addr, std::list<SequencerRequest>>
+        m_IndirectRequestTable;
     // UnadressedRequestTable contains "unaddressed" requests,
     // guaranteed not to alias each other
     std::unordered_map<uint64_t, SequencerRequest> m_UnaddressedRequestTable;

@@ -56,7 +56,9 @@
 #include "debug/HtmCpu.hh"
 #include "debug/LSQ.hh"
 #include "debug/Writeback.hh"
+#include "mem/page_table.hh"
 #include "params/BaseO3CPU.hh"
+#include "sim/process.hh"
 
 namespace gem5
 {
@@ -1144,6 +1146,45 @@ LSQ::LSQRequest::addReq(Addr addr, unsigned size,
         if (_inst->hasLabel()) {
             req->setExtension<MemAccessName>(std::make_shared<MemAccessName>(_inst->label()));
         }
+
+        if (_inst->getIAAExt()) req->setExtension<IndirectAccessAlias>(_inst->getIAAExt());
+        if (_inst->getDAGExt()) {
+            auto dag = _inst->getDAGExt();
+            if (!dag->hasTranslator()) {
+                gem5::ThreadContext *tc = _inst->thread->getTC();
+                Process *proc = tc->getProcessPtr();
+                DependentAccessGen::AddrTranslator translate_fn;
+
+                if (proc) {
+                    EmulationPageTable *pt = proc->pTable;
+                    translate_fn = [pt](Addr vaddr) -> Addr {
+                        Addr paddr = 0;
+                        panic_if(!pt->translate(vaddr, paddr),
+                            "DependentAccessGen (SE): VA->PA failed for vaddr=%#x.",
+                            vaddr);
+                        return paddr;
+                    };
+                } else {
+                    BaseMMU *mmu = tc->getMMUPtr();
+                    RequestorID rid = tc->getCpuPtr()->dataRequestorId();
+                    ContextID cid = tc->contextId();
+                    translate_fn = [mmu, tc, rid, cid](Addr vaddr) -> Addr {
+                        auto tmp_req = std::make_shared<Request>(
+                            vaddr, 8, 0, rid, 0, cid);
+                        Fault fault = mmu->translateFunctional(
+                            tmp_req, tc, BaseMMU::Read);
+                        panic_if(fault != NoFault,
+                            "DependentAccessGen (FS): VA->PA faulted for vaddr=%#x.",
+                            vaddr);
+                        return tmp_req->getPaddr();
+                    };
+                }
+                dag->setTranslator(std::move(translate_fn));
+            }
+            req->setExtension<DependentAccessGen>(dag);
+        }
+        if (_inst->getIARExt()) req->setExtension<IndependentAccessResp>(_inst->getIARExt());
+
         _reqs.push_back(req);
     }
 }
@@ -1206,7 +1247,18 @@ LSQ::SingleDataRequest::recvTimingResp(PacketPtr pkt)
 {
     assert(_numOutstandingPackets == 1);
     flags.set(Flag::Complete);
-    assert(pkt == _packets.front());
+
+    if (pkt->isIndirect()) {
+        assert(req()->getExtension<IndirectAccessAlias>());
+        assert(req()->getExtension<DependentAccessGen>());
+        assert(req()->getExtension<IndependentAccessResp>());
+        assert(pkt->senderState == this);
+
+        _packets.front() = pkt;
+    } else {
+        assert(pkt == _packets.front());
+    }
+
     _port.completeDataAccess(pkt);
     _hasStaleTranslation = false;
     return true;
@@ -1215,6 +1267,8 @@ LSQ::SingleDataRequest::recvTimingResp(PacketPtr pkt)
 bool
 LSQ::SplitDataRequest::recvTimingResp(PacketPtr pkt)
 {
+    assert(!pkt->isIndirect());
+
     uint32_t pktIdx = 0;
     while (pktIdx < _packets.size() && pkt != _packets[pktIdx])
         pktIdx++;
@@ -1243,10 +1297,15 @@ LSQ::SingleDataRequest::buildPackets()
 {
     /* Retries do not create new packets. */
     if (_packets.size() == 0) {
-        _packets.push_back(
-                isLoad()
-                    ?  Packet::createRead(req())
-                    :  Packet::createWrite(req()));
+        bool is_indirect = req()->getExtension<IndirectAccessAlias>() != nullptr;
+        if (is_indirect) {
+            _packets.push_back(new Packet(req(), isLoad() ? MemCmd::ReadIndReq : MemCmd::WriteIndReq));
+        } else {
+            _packets.push_back(
+                    isLoad()
+                        ?  Packet::createRead(req())
+                        :  Packet::createWrite(req()));
+        }
         _packets.back()->dataStatic(_inst->memData);
         _packets.back()->senderState = this;
 
@@ -1275,6 +1334,8 @@ LSQ::SplitDataRequest::buildPackets()
 {
     /* Extra data?? */
     Addr base_address = _addr;
+
+    assert(req()->getExtension<IndirectAccessAlias>() == nullptr && "Indirect accesses must not be split and must be cache aligned");
 
     if (_packets.size() == 0) {
         /* New stuff */

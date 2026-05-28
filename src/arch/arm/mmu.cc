@@ -48,6 +48,9 @@
 #include "arch/arm/tlb.hh"
 #include "arch/arm/tlbi_op.hh"
 #include "debug/MMU.hh"
+// MYSTUFF
+#include "debug/MSDebug.hh"
+// FFUTSYM
 #include "mem/packet_access.hh"
 #include "sim/pseudo_inst.hh"
 #include "sim/process.hh"
@@ -303,6 +306,7 @@ MMU::finalizePhysical(const RequestPtr &req,
                       ThreadContext *tc, Mode mode) const
 {
     const Addr paddr = req->getPaddr();
+    DPRINTF(MSDebug, "%s: VA: %#lx translated to PA: %#lx.\n", __func__, req->getVaddr(), req->getPaddr());
 
     if (m5opRange.contains(paddr)) {
         uint8_t func;

@@ -305,6 +305,36 @@ class MemoryAtomicPair64 : public Memory64
             Addr pc, const loader::SymbolTable *symtab) const override;
 };
 
+/**
+ * Base class for indirect load/store instructions (LDIND / STIND).
+ *
+ * Unlike MemoryReg64, this class carries two independent access sizes:
+ *   sizeIndex – bytes of one index element (Phase 1 request size)
+ *   sizeData  – bytes of one data element  (Phase 2 request size)
+ *
+ * It does NOT use a single Mem template type so that initiateAcc and
+ * completeAcc can issue and receive requests of different widths.
+ */
+class MemoryInd64 : public MightBeMicro64
+{
+  protected:
+    RegIndex dest;           ///< Architectural destination (x4 in ldindx_w)
+    RegIndex base;           ///< base_index register (kept for disassembly)
+    unsigned sizeIndex;      ///< Bytes per index element, e.g. 4 for _w
+    unsigned sizeData;       ///< Bytes per data element,  e.g. 8 for ldindX_*
+    uint64_t shiftAmtIndex;  ///< log2(sizeIndex)
+    uint64_t shiftAmtData;   ///< log2(sizeData)
+    unsigned memAccessFlags; ///< Flags for Phase 1 memory request
+
+    MemoryInd64(const char *mnem, ExtMachInst _machInst,
+                OpClass __opClass,
+                RegIndex _dest, RegIndex _base,
+                unsigned _sizeIndex, unsigned _sizeData);
+
+    std::string generateDisassembly(
+            Addr pc, const loader::SymbolTable *symtab) const override;
+};
+
 } // namespace ArmISA
 } // namespace gem5
 

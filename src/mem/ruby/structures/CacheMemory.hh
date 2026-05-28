@@ -106,11 +106,6 @@ class CacheMemory : public SimObject
     //   b) an unused line in the same cache "way"
     bool cacheAvail(Addr address) const;
 
-    // MYSTUFF: NOTE: This is what I will use to check if I
-    // can allocate for compacted cache lines.
-    bool cacheAvailWithSparsityInMind(Addr address, bool is_sparse) const;
-    // FFUTSYM:
-
     // Returns a NULL entry that acts as a placeholder for invalid lines
     AbstractCacheEntry*
     getNullEntry() const
@@ -120,29 +115,17 @@ class CacheMemory : public SimObject
 
     // find an unused entry and sets the tag appropriate for the address
     AbstractCacheEntry* allocate(Addr address, AbstractCacheEntry* new_entry);
-    // MYSTUFF:
-    AbstractCacheEntry* allocateWithSparsityInMind(Addr address, AbstractCacheEntry* new_entry, bool is_sparse);
-    // FFUTSYM:
 
     void allocateVoid(Addr address, AbstractCacheEntry* new_entry)
     {
         allocate(address, new_entry);
     }
-    // MYSTUFF:
-    void allocateVoidWithSparsityInMind(Addr address, AbstractCacheEntry* new_entry, bool is_sparse)
-    {
-        allocateWithSparsityInMind(address, new_entry, is_sparse);
-    }
-    // FFUTSYM:
 
     // Explicitly free up this address
     void deallocate(Addr address);
 
     // Returns with the physical address of the conflicting cache line
     Addr cacheProbe(Addr address) const;
-    // MYSTUFF:
-    Addr cacheProbeWithSparsityInMind(Addr address, bool is_sparse) const;
-    // FFUTSYM:
 
     // looks an address up in the cache
     AbstractCacheEntry* lookup(Addr address);
