@@ -111,6 +111,9 @@ class MultiFidelityProcessor(AbstractProcessor):
     def switch(self):
         raise NotImplementedError
 
+    def total_switches(self):
+        raise NotImplementedError
+
     def switch_to_processor(self, switchable_core_key: str):
         # Run various checks.
         if not hasattr(self, "_board"):
