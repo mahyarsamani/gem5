@@ -418,45 +418,8 @@ PacketPtr
 TimingSimpleCPU::buildPacket(const RequestPtr &req, bool read)
 {
     // Check for an indirect (scatter-gather) request extension.
-    // getExtension returns a shared_ptr<T>, not a raw pointer.
+    // The translator is set by MMU::translateComplete, not here.
     auto dag_ext = req->getExtension<DependentAccessGen>();
-
-    if (dag_ext && !dag_ext->hasTranslator()) {
-        SimpleThread *thread = threadInfo[curThread]->thread;
-        ThreadContext *tc = thread->getTC();
-        Process *proc = tc->getProcessPtr();
-        DependentAccessGen::AddrTranslator translate_fn;
-
-        if (proc) {
-            // SE mode: wrap the process's hash-table page table.
-            // Safe to call from any context; just a map lookup.
-            EmulationPageTable *pt = proc->pTable;
-            translate_fn = [pt](Addr vaddr) -> Addr {
-                Addr paddr = 0;
-                panic_if(!pt->translate(vaddr, paddr),
-                    "DependentAccessGen (SE): VA->PA failed for vaddr=%#x. "
-                    "Ensure the gather destination buffer is mapped.",
-                    vaddr);
-                return paddr;
-            };
-        } else {
-            BaseMMU *mmu = tc->getMMUPtr();
-            RequestorID rid = tc->getCpuPtr()->dataRequestorId();
-            ContextID cid = tc->contextId();
-            translate_fn = [mmu, tc, rid, cid](Addr vaddr) -> Addr {
-                auto tmp_req = std::make_shared<Request>(
-                    vaddr, 8, 0, rid, 0, cid);
-                Fault fault = mmu->translateFunctional(
-                    tmp_req, tc, BaseMMU::Read);
-                panic_if(fault != NoFault,
-                    "DependentAccessGen (FS): VA->PA faulted for vaddr=%#x.",
-                    vaddr);
-                return tmp_req->getPaddr();
-            };
-        }
-
-        dag_ext->setTranslator(std::move(translate_fn));
-    }
 
     PacketPtr pkt;
     if (dag_ext) {

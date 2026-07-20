@@ -1149,39 +1149,9 @@ LSQ::LSQRequest::addReq(Addr addr, unsigned size,
 
         if (_inst->getIAAExt()) req->setExtension<IndirectAccessAlias>(_inst->getIAAExt());
         if (_inst->getDAGExt()) {
-            auto dag = _inst->getDAGExt();
-            if (!dag->hasTranslator()) {
-                gem5::ThreadContext *tc = _inst->thread->getTC();
-                Process *proc = tc->getProcessPtr();
-                DependentAccessGen::AddrTranslator translate_fn;
-
-                if (proc) {
-                    EmulationPageTable *pt = proc->pTable;
-                    translate_fn = [pt](Addr vaddr) -> Addr {
-                        Addr paddr = 0;
-                        panic_if(!pt->translate(vaddr, paddr),
-                            "DependentAccessGen (SE): VA->PA failed for vaddr=%#x.",
-                            vaddr);
-                        return paddr;
-                    };
-                } else {
-                    BaseMMU *mmu = tc->getMMUPtr();
-                    RequestorID rid = tc->getCpuPtr()->dataRequestorId();
-                    ContextID cid = tc->contextId();
-                    translate_fn = [mmu, tc, rid, cid](Addr vaddr) -> Addr {
-                        auto tmp_req = std::make_shared<Request>(
-                            vaddr, 8, 0, rid, 0, cid);
-                        Fault fault = mmu->translateFunctional(
-                            tmp_req, tc, BaseMMU::Read);
-                        panic_if(fault != NoFault,
-                            "DependentAccessGen (FS): VA->PA faulted for vaddr=%#x.",
-                            vaddr);
-                        return tmp_req->getPaddr();
-                    };
-                }
-                dag->setTranslator(std::move(translate_fn));
-            }
-            req->setExtension<DependentAccessGen>(dag);
+            // Attach DAG to request. The translator will be set by
+            // MMU::translateComplete after address translation.
+            req->setExtension<DependentAccessGen>(_inst->getDAGExt());
         }
         if (_inst->getIARExt()) req->setExtension<IndependentAccessResp>(_inst->getIARExt());
 

@@ -43,6 +43,8 @@
 
 #include <iostream>
 #include <list>
+#include <map>
+#include <deque>
 #include <unordered_map>
 
 #include "cpu/testers/rubytest/RubyTester.hh"
@@ -334,7 +336,20 @@ class Sequencer : public RubyPort
 
     bool m_runningGarnetStandalone;
 
+    // MYSTUFF: HOV Stats
+    bool m_hov_measurement_enabled;
+    size_t m_hov_history_size;
+    
+    uint64_t m_hov_seq_num;
+    std::unordered_map<Addr, uint64_t> m_hov_access_history;
+    std::unordered_map<Addr, uint64_t> m_hov_inst_history;
+
+    std::list<Addr> m_hov_addr_history;
+    std::unordered_map<Addr, std::list<Addr>::iterator> m_hov_addr_iterators;
     //! Histogram for number of outstanding requests per cycle.
+    statistics::Histogram m_hov_collision_distance;
+    statistics::Histogram m_hov_inst_distance;
+
     statistics::Histogram m_outstandReqHist;
 
     //! Histogram for holding latency profile of all requests.

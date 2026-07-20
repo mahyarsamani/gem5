@@ -37,8 +37,8 @@ ARMDependentAccessGen::genNextRequest(RequestPtr og_req, uint64_t index_value)
 {
     panic_if(!hasTranslator(),
         "ARMDependentAccessGen::genNextRequest called without a translator. "
-        "Ensure TimingSimpleCPU::buildPacket calls setTranslator() before "
-        "the request enters the memory hierarchy.");
+        "The translator should be set by MMU::translateComplete during "
+        "Phase 1 address translation.");
 
     // Compute the virtual address of the gather target element.
     Addr value_vaddr = _baseAddr + (index_value * _size);

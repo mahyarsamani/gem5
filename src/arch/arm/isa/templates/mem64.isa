@@ -993,6 +993,7 @@ def template LoadIndirectConstructor {{
         // Dest register (x4): dest operand 0, written in completeAcc Phase 2.
         operand_idx_dest = _numDestRegs++;
         setDestRegIdx(operand_idx_dest, intRegClass[_dest]);
+        _numTypedDestRegs[intRegClass[_dest].classValue()]++;
 
         operand_idx_base_data = _numSrcRegs++;
         setSrcRegIdx(operand_idx_base_data, intRegClass[_base_data]);
@@ -1003,12 +1004,14 @@ def template LoadIndirectConstructor {{
         operand_idx_index_reg = _numSrcRegs++;
         setSrcRegIdx(operand_idx_index_reg, intRegClass[_index_reg]);
 
+        // The implicit alias register is read to get the index value
         operand_idx_src_alias = _numSrcRegs++;
         setSrcRegIdx(operand_idx_src_alias, intRegClass[_src_alias]);
 
-        // Alias register (x5): also a dest, updated with index[i] value.
+        // The implicit alias register is also WRITTEN (Phase 2 completion updates it)
         operand_idx_dest_src_alias = _numDestRegs++;
         setDestRegIdx(operand_idx_dest_src_alias, intRegClass[_src_alias]);
+        _numTypedDestRegs[intRegClass[_src_alias].classValue()]++;
     }
 }};
 

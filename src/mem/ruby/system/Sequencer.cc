@@ -93,8 +93,13 @@ Sequencer::Sequencer(const Params &p)
     assert(m_deadlock_threshold > 0);
 
     m_unaddressedTransactionCnt = 0;
+    m_hov_seq_num = 0;
 
     m_runningGarnetStandalone = p.garnet_standalone;
+
+    // MYSTUFF: HOV Stats configuration
+    m_hov_measurement_enabled = p.hov_measurement_enabled;
+    m_hov_history_size = p.hov_history_size;
 
     m_num_pending_invs = 0;
     m_cache_inv_pkt = nullptr;
@@ -102,6 +107,13 @@ Sequencer::Sequencer(const Params &p)
     // These statistical variables are not for display.
     // The profiler will collate these across different
     // sequencers and display those collated statistics.
+    // MYSTUFF: HOV Stats
+    m_hov_collision_distance.init(10);
+    m_hov_inst_distance.init(10);
+    m_hov_addr_iterators.reserve(m_hov_history_size);
+    m_hov_access_history.reserve(m_hov_history_size);
+    m_hov_inst_history.reserve(m_hov_history_size);
+
     m_outstandReqHist.init(10);
     m_latencyHist.init(10);
     m_hitLatencyHist.init(10);
@@ -757,6 +769,52 @@ Sequencer::prepareIndPacket(Addr alias, RequestPtr& final_req)
     // Build the Phase 2 packet: correct PA, correct size (sizeData).
     PacketPtr new_pkt = new Packet(final_req, old_pkt->cmd);
     new_pkt->allocate();
+
+    // MYSTUFF: HOV Collision Stats
+    if (m_hov_measurement_enabled) {
+        Addr phase2_paddr = final_req->getPaddr();
+        uint64_t current_seq = ++m_hov_seq_num;
+        bool has_inst_count = old_pkt->req->hasInstCount();
+        uint64_t current_inst_count = has_inst_count ? old_pkt->req->getInstCount() : 0;
+
+        auto it = m_hov_addr_iterators.find(phase2_paddr);
+        if (it != m_hov_addr_iterators.end()) {
+            // Address is in history! Calculate distances.
+            uint64_t old_seq = m_hov_access_history[phase2_paddr];
+            if (current_seq >= old_seq) {
+                m_hov_collision_distance.sample(current_seq - old_seq);
+            }
+
+            if (has_inst_count && m_hov_inst_history.find(phase2_paddr) != m_hov_inst_history.end()) {
+                uint64_t old_inst_count = m_hov_inst_history[phase2_paddr];
+                if (current_inst_count >= old_inst_count) {
+                    m_hov_inst_distance.sample(current_inst_count - old_inst_count);
+                }
+            }
+
+            // LRU Move: move existing element to the back (youngest)
+            m_hov_addr_history.splice(m_hov_addr_history.end(), m_hov_addr_history, it->second);
+        } else {
+            // New entry: push to back and record iterator
+            m_hov_addr_history.push_back(phase2_paddr);
+            m_hov_addr_iterators[phase2_paddr] = std::prev(m_hov_addr_history.end());
+        }
+
+        // Update histories with latest sequences
+        m_hov_access_history[phase2_paddr] = current_seq;
+        if (has_inst_count) {
+            m_hov_inst_history[phase2_paddr] = current_inst_count;
+        }
+
+        // LRU Eviction: pop from front if size exceeded
+        if (m_hov_addr_history.size() > m_hov_history_size) {
+            Addr oldest_paddr = m_hov_addr_history.front();
+            m_hov_addr_history.pop_front();
+            m_hov_addr_iterators.erase(oldest_paddr);
+            m_hov_access_history.erase(oldest_paddr);
+            m_hov_inst_history.erase(oldest_paddr);
+        }
+    }
 
     // For stores, we must copy the payload into the new packet.
     // The O3 pipeline truncates the payload because writeMem() uses sizeIndex.

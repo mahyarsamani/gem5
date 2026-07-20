@@ -866,44 +866,57 @@ bool needCacheEntry(CHIRequestType req_type, CHIRequestType second_type,
   // never allocates:
   // - if entry already valid
   // - if using DMT; the request is a Read*; and dir entry is invalid
-  // oterwise follow config params
-  if (second_type != CHIRequestType:null) {
-    // MYSTUFF
-    // TODO: Need to figure out what we need to do later.
-    bool gather_cache_criterion := (alloc_for_index &&
-                                    ((second_type == CHIRequestType:ReadIndirect) ||
-                                    (second_type == CHIRequestType:WriteIndirect))
-                                    );
-    bool value_cache_criterion := (((alloc_for_read_value && second_type == CHIRequestType:ReadValue) ||
-                                    (alloc_for_write_value && second_type == CHIRequestType:WriteValue)));
-    return gather_cache_criterion || value_cache_criterion;
-    // FFUTSYM
-  } else if (is_valid(cache_entry) ||
+  if (is_valid(cache_entry) ||
       (enable_DMT && is_invalid(dir_entry) &&
        ((req_type == CHIRequestType:ReadShared) ||
         (req_type == CHIRequestType:ReadUnique) ||
         (req_type == CHIRequestType:MakeReadUnique) ||
         (req_type == CHIRequestType:ReadOnce)))) {
     return false;
-  } else {
-    return is_prefetch ||
-           (alloc_on_readshared && ((req_type == CHIRequestType:ReadShared) ||
-                                    (req_type == CHIRequestType:ReadNotSharedDirty))) ||
-           (alloc_on_readunique && ((req_type == CHIRequestType:ReadUnique) ||
-                                   (req_type == CHIRequestType:MakeReadUnique))) ||
-           (alloc_on_readonce && (req_type == CHIRequestType:ReadOnce)) ||
-           (alloc_on_writeback && ((req_type == CHIRequestType:WriteBackFull) ||
-                                   (req_type == CHIRequestType:WriteCleanFull) ||
-                                   (req_type == CHIRequestType:WriteEvictFull) ||
-                                   (is_HN && (req_type == CHIRequestType:WriteUniqueFull)))) ||
-           (alloc_on_seq_acc && ((req_type == CHIRequestType:Load) ||
-                                 (req_type == CHIRequestType:Store) ||
-                                 (req_type == CHIRequestType:AtomicLoad) ||
-                                 (req_type == CHIRequestType:AtomicStore))) ||
-           (alloc_on_seq_line_write && (req_type == CHIRequestType:StoreLine)) ||
-           (alloc_on_atomic && ((req_type == CHIRequestType:AtomicReturn) ||
-                                 (req_type == CHIRequestType:AtomicNoReturn)));
   }
+
+  // MYSTUFF
+  // Apply HOV specific cache allocation criteria
+  if (second_type != CHIRequestType:null) {
+    // Positive whitelist: Only allow requests that actively fetch or write data
+    // to allocate blocks based on indirect criteria. This prevents crashes with 
+    // dataless requests like CleanUnique or CMOs.
+    bool is_data_request := (req_type == CHIRequestType:ReadShared) ||
+                            (req_type == CHIRequestType:ReadNotSharedDirty) ||
+                            (req_type == CHIRequestType:ReadUnique) ||
+                            (req_type == CHIRequestType:Load) ||
+                            (req_type == CHIRequestType:Store);
+    if (is_data_request) {
+      bool gather_cache_criterion := (alloc_for_index &&
+                                      ((second_type == CHIRequestType:ReadIndirect) ||
+                                      (second_type == CHIRequestType:WriteIndirect)));
+      bool value_cache_criterion := (((alloc_for_read_value && second_type == CHIRequestType:ReadValue) ||
+                                      (alloc_for_write_value && second_type == CHIRequestType:WriteValue)));
+      if (gather_cache_criterion || value_cache_criterion) {
+          return true;
+      }
+    }
+  }
+  // FFUTSYM
+
+  // fallback to default config params
+  return is_prefetch ||
+         (alloc_on_readshared && ((req_type == CHIRequestType:ReadShared) ||
+                                  (req_type == CHIRequestType:ReadNotSharedDirty))) ||
+         (alloc_on_readunique && ((req_type == CHIRequestType:ReadUnique) ||
+                                  (req_type == CHIRequestType:MakeReadUnique))) ||
+         (alloc_on_readonce && (req_type == CHIRequestType:ReadOnce)) ||
+         (alloc_on_writeback && ((req_type == CHIRequestType:WriteBackFull) ||
+                                 (req_type == CHIRequestType:WriteCleanFull) ||
+                                 (req_type == CHIRequestType:WriteEvictFull) ||
+                                 (is_HN && (req_type == CHIRequestType:WriteUniqueFull)))) ||
+         (alloc_on_seq_acc && ((req_type == CHIRequestType:Load) ||
+                               (req_type == CHIRequestType:Store) ||
+                               (req_type == CHIRequestType:AtomicLoad) ||
+                               (req_type == CHIRequestType:AtomicStore))) ||
+         (alloc_on_seq_line_write && (req_type == CHIRequestType:StoreLine)) ||
+         (alloc_on_atomic && ((req_type == CHIRequestType:AtomicReturn) ||
+                               (req_type == CHIRequestType:AtomicNoReturn)));
 }
 
 bool needDeallocCacheEntry(CHIRequestType req_type) {

@@ -346,8 +346,7 @@ action(Initiate_Request, desc="") {
         // NOTE: We are the value cache. Set the value_cache_id in
         // tbe so that we can use it when we send a message out.
         tbe.compact_cache_id := machineID;
-        DPRINTF(IndirectAccess, "Received an indirect access to address %#lx with invalid compact cache id. I am it. Setting it to myself.\n", address
-        );
+        DPRINTF(IndirectAccess, "Received an indirect access to address %#lx with invalid compact cache id. I am it. Setting it to myself.\n", address);
     }
     if (gather_cache && isInvalid(tbe.index_cache_id)) {
         // NOTE: We are the index cache. Set the index_cache_id in

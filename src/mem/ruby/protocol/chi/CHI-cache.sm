@@ -234,8 +234,6 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   bool alloc_for_read_value := "False";
   bool alloc_for_write_value := "False";
 
-  bool compact_with_sparsity := "False";
-
   Cycles send_value_delay := 1;
   Cycles fwd_ind_acc_delay := 1;
 

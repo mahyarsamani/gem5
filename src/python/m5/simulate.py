@@ -41,6 +41,7 @@ import atexit
 import os
 import sys
 
+from m5.util import inform
 from m5.util.dot_writer import (
     do_dot,
     do_dvfs_dot,
@@ -407,8 +408,8 @@ def switchCpus(system, cpuList, has_ruby_cache=False, verbose=True):
     except KeyError:
         raise RuntimeError(f"Invalid memory mode ({memory_mode_name})")
 
-    if has_ruby_cache and memory_mode == "atomic":
-        memory_mode = "atomic_noncaching"
+    if has_ruby_cache and memory_mode_name == "atomic":
+        memory_mode = MemoryMode("atomic_noncaching").getValue()
 
     drain()
 

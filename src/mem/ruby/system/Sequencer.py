@@ -124,6 +124,10 @@ class RubySequencer(RubyPort):
     # 99 is the dummy default value
     coreid = Param.Int(99, "CorePair core id")
 
+    # MYSTUFF: HOV Stats parameters
+    hov_measurement_enabled = Param.Bool(True, "Enable HOV collision measurements")
+    hov_history_size = Param.Int(8192, "Size of the HOV history buffer")
+
     def connectCpuPorts(self, cpu):
         """
         Helper for connecting all cpu memory request output ports to this

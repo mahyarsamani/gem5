@@ -43,6 +43,8 @@
 #include "arch/arm/isa.hh"
 #include "arch/arm/mpam.hh"
 #include "arch/arm/reg_abi.hh"
+#include "arch/arm/faults.hh"
+#include "arch/arm/insts/dependent_access.hh"
 #include "arch/arm/stage2_lookup.hh"
 #include "arch/arm/table_walker.hh"
 #include "arch/arm/tlb.hh"
@@ -1224,6 +1226,34 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
 
     if (translation && (call_from_s2 || !state.stage2Req || req->hasPaddr() ||
         fault != NoFault)) {
+
+        // If this request carries a DependentAccessGen (indirect load/store),
+        // set the VA→PA translator now that translation has completed.
+        // This is the single canonical location for translator setup —
+        // neither the O3 LSQ nor TimingSimpleCPU should set it.
+        auto arm_dag = req->getExtension<ARMDependentAccessGen>();
+        // Guard: translateComplete may be called multiple times for the same
+        // request during multi-stage page table walks (stage 1 completes →
+        // table walker → stage 2). Only set the translator on the first
+        // successful pass.
+        if (fault == NoFault && arm_dag != nullptr
+            && !arm_dag->hasTranslator()) {
+            Addr base_vaddr = arm_dag->getBaseAddr();
+            auto tmp_req = std::make_shared<Request>(
+                base_vaddr, 8, 0, req->requestorId(),
+                0, req->contextId());
+            Fault base_fault = translateFunctional(tmp_req, tc, BaseMMU::Read);
+
+            if (base_fault == NoFault) {
+                Addr base_paddr = tmp_req->getPaddr();
+                arm_dag->setTranslator([base_vaddr, base_paddr](Addr req_vaddr) -> Addr {
+                    return base_paddr + (req_vaddr - base_vaddr);
+                });
+            } else {
+                panic("DependentAccessGen: Base VA->PA faulted during translateComplete!");
+            }
+        }
+
         if (!delay)
             translation->finish(fault, req, tc, mode);
         else

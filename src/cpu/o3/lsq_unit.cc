@@ -529,7 +529,18 @@ LSQUnit::checkViolations(typename LoadQueue::iterator& loadIt,
         Addr ld_eff_addr2 =
             (ld_inst->effAddr + ld_inst->effSize - 1) >> depCheckShift;
 
-        if (inst_eff_addr2 >= ld_eff_addr1 && inst_eff_addr1 <= ld_eff_addr2) {
+        // MYSTUFF: HOV Alias Tracking
+        bool inst_has_alias = (inst->getIAAExt() != nullptr);
+        bool ld_has_alias = (ld_inst->getIAAExt() != nullptr);
+        bool overlap = false;
+
+        if (inst_has_alias && ld_has_alias) {
+            overlap = (inst->getIAAExt()->alias() == ld_inst->getIAAExt()->alias());
+        } else {
+            overlap = (inst_eff_addr2 >= ld_eff_addr1 && inst_eff_addr1 <= ld_eff_addr2);
+        }
+
+        if (overlap) {
             if (inst->isLoad()) {
                 // If this load is to the same block as an external snoop
                 // invalidate that we've observed then the load needs to be
@@ -1400,17 +1411,51 @@ LSQUnit::read(LSQRequest *request, ssize_t load_idx)
               store_it->request()->mainReq()->isCacheMaintenance())) {
             assert(store_it->instruction()->effAddrValid());
 
-            // Check if the store data is within the lower and upper bounds of
-            // addresses that the request needs.
-            auto req_s = request->mainReq()->getVaddr();
-            auto req_e = req_s + request->mainReq()->getSize();
-            auto st_s = store_it->instruction()->effAddr;
-            auto st_e = st_s + store_size;
+            // MYSTUFF: HOV Alias Tracking
+            bool req_has_alias = (request->mainReq()->getExtension<IndirectAccessAlias>() != nullptr);
+            bool st_has_alias = (store_it->instruction()->getIAAExt() != nullptr);
+            
+            bool store_has_lower_limit = false;
+            bool store_has_upper_limit = false;
+            bool lower_load_has_store_part = false;
+            bool upper_load_has_store_part = false;
 
-            bool store_has_lower_limit = req_s >= st_s;
-            bool store_has_upper_limit = req_e <= st_e;
-            bool lower_load_has_store_part = req_s < st_e;
-            bool upper_load_has_store_part = req_e > st_s;
+            if (req_has_alias && st_has_alias) {
+                if (request->mainReq()->getExtension<IndirectAccessAlias>()->alias() ==
+                    store_it->instruction()->getIAAExt()->alias()) {
+                    
+                    // Match on alias! We must prevent forwarding because LDIND needs 
+                    // the index value from Ruby, but STIND only has data. 
+                    // We force a partial coverage to trigger a squash.
+                    store_has_lower_limit = true;
+                    lower_load_has_store_part = true;
+                }
+            } else if (req_has_alias != st_has_alias) {
+                // Mixed access (one indirect, one normal).
+                auto req_s = request->mainReq()->getVaddr();
+                auto req_e = req_s + request->mainReq()->getSize();
+                auto st_s = store_it->instruction()->effAddr;
+                auto st_e = st_s + store_size;
+                
+                bool overlap = (req_e > st_s && req_s < st_e);
+                if (overlap) {
+                    // They overlap on the index array! 
+                    // Prevent forwarding of index as data. Force squash.
+                    store_has_lower_limit = true;
+                    lower_load_has_store_part = true;
+                }
+            } else {
+                // Both are normal accesses. Do standard bounds checking for forwarding.
+                auto req_s = request->mainReq()->getVaddr();
+                auto req_e = req_s + request->mainReq()->getSize();
+                auto st_s = store_it->instruction()->effAddr;
+                auto st_e = st_s + store_size;
+
+                store_has_lower_limit = req_s >= st_s;
+                store_has_upper_limit = req_e <= st_e;
+                lower_load_has_store_part = req_s < st_e;
+                upper_load_has_store_part = req_e > st_s;
+            }
 
             auto coverage = AddrRangeCoverage::NoAddrRangeCoverage;
 

@@ -19,9 +19,9 @@ namespace ArmISA
  * ARM-specific DependentAccessGen for LDINDX_W scatter-gather offload.
  *
  * Constructed at ISA execute time with the gather parameters (base address
- * and element size). The VA->PA translation callback is set separately via
- * DependentAccessGen::setTranslator(), called from TimingSimpleCPU::buildPacket
- * while a ThreadContext is still live.
+ * and element size). The VA->PA translation callback is set by
+ * MMU::translateComplete once the Phase 1 address translation completes.
+ * This is the single canonical location for translator setup.
  */
 class ARMDependentAccessGen: public DependentAccessGen
 {
@@ -33,6 +33,8 @@ class ARMDependentAccessGen: public DependentAccessGen
     ARMDependentAccessGen(Addr base_addr, Addr size);
     virtual std::unique_ptr<ExtensionBase> clone() const override;
     virtual RequestPtr genNextRequest(RequestPtr og_req, uint64_t index_value) override;
+
+    Addr getBaseAddr() const { return _baseAddr; }
 };
 
 class ARMIndependentAccessResp: public IndependentAccessResp
