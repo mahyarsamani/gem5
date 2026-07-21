@@ -145,6 +145,14 @@ class Sequencer : public RubyPort
      */
     void prepareIndPacket(Addr alias, RequestPtr& final_req);
 
+    /**
+     * Specialized callbacks for indirect-value accesses (Phase 2).
+     * Called by the protocol when ReadValue/WriteValue responses arrive
+     * at the Indirect Unit (L1). Serves uop1 via m_IndirectRequestTable.
+     */
+    void indirectReadCallback(Addr address, DataBlock& data);
+    void indirectWriteCallback(Addr address, DataBlock& data);
+
     // FFUTSYM
 
     void atomicCallback(Addr address,
@@ -264,11 +272,15 @@ class Sequencer : public RubyPort
   protected:
     // RequestTable contains both read and write requests, handles aliasing
     std::unordered_map<Addr, std::list<SequencerRequest>> m_RequestTable;
-    // IndirectRequestTable holds requests keyed by alias addresses (from
-    // IndirectAccessAlias extensions). Aliases are not cache-line-aligned,
-    // so they must not be mixed with m_RequestTable entries.
-    std::unordered_map<Addr, std::list<SequencerRequest>>
-        m_IndirectRequestTable;
+    // IndirectRequestTable: rendezvous point for uop1 ↔ ReadValue callback.
+    // Keyed by data line address. Supports two orderings:
+    //   Case A (uop1 first): cacheReady=false, pending holds uop1
+    //   Case B (ReadValue first): cacheReady=true, pending empty (sense bit)
+    struct IndirectEntry {
+        bool cacheReady = false;
+        std::list<SequencerRequest> pending;
+    };
+    std::unordered_map<Addr, IndirectEntry> m_IndirectRequestTable;
     // UnadressedRequestTable contains "unaddressed" requests,
     // guaranteed not to alias each other
     std::unordered_map<uint64_t, SequencerRequest> m_UnaddressedRequestTable;

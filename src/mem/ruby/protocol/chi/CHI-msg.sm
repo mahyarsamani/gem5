@@ -143,9 +143,9 @@ structure(CHIRequestMsg, desc="", interface="Message") {
   Addr value_size,                default="0", desc="Size of each value element";
   Addr alias,                    default="0", desct="Alias";
 
-  MachineID compact_cache_id,      desc="MachineID of the compact cache for an indirect request";
-  MachineID value_cache_id,        desc="MachineID of the value cache for an indirect request";
-  MachineID index_cache_id,        desc="MachineID of the index cache for an indirect request";
+  MachineID indirect_unit_id,      desc="MachineID of the indirect unit for an indirect request";
+  MachineID value_unit_id,         desc="MachineID of the value unit for an indirect request";
+  MachineID gather_unit_id,        desc="MachineID of the gather unit for an indirect request";
 
   CHIRequestType secondType,     default="CHIRequestType_null", desc="Secondary type of request for an indirect request";
 

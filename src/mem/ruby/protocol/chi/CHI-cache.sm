@@ -226,9 +226,9 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   // NOTE: Maybe the index cache doesn't need to allocate for index either.
   // We can answer whether it is useful to cache or not cache index
   // by counting the number of useful bytes in index cache blocks.
-  bool gather_cache := "False";
-  bool value_cache := "False";
-  bool compact_cache := "False";
+  bool gather_unit := "False";
+  bool value_unit := "False";
+  bool indirect_unit := "False";
 
   bool alloc_for_index := "False";
   bool alloc_for_read_value := "False";
@@ -792,9 +792,9 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     Addr value_size,                default="0", desc="Size of each value element";
     Addr alias,                    default="0", desct="Alias";
 
-    MachineID compact_cache_id,      desc="MachineID of the compact cache for an indirect request";
-    MachineID value_cache_id,        desc="MachineID of the value cache for an indirect request";
-    MachineID index_cache_id,        desc="MachineID of the index cache for an indirect request";
+    MachineID indirect_unit_id,      desc="MachineID of the indirect unit for an indirect request";
+    MachineID value_unit_id,         desc="MachineID of the value unit for an indirect request";
+    MachineID gather_unit_id,        desc="MachineID of the gather unit for an indirect request";
 
     CHIRequestType secondType,     desc="Secondary type of request for an indirect request";
 

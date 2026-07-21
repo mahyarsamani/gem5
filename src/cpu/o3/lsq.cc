@@ -1218,16 +1218,10 @@ LSQ::SingleDataRequest::recvTimingResp(PacketPtr pkt)
     assert(_numOutstandingPackets == 1);
     flags.set(Flag::Complete);
 
-    if (pkt->isIndirect()) {
-        assert(req()->getExtension<IndirectAccessAlias>());
-        assert(req()->getExtension<DependentAccessGen>());
-        assert(req()->getExtension<IndependentAccessResp>());
-        assert(pkt->senderState == this);
-
-        _packets.front() = pkt;
-    } else {
-        assert(pkt == _packets.front());
-    }
+    // Two-uop model: uop0 (ReadIndReq) responses arrive through normal
+    // readCallback. uop1 (ReadReq+IAA) responses arrive through
+    // indirectReadCallback. Both use the original stored packet.
+    assert(pkt == _packets.front());
 
     _port.completeDataAccess(pkt);
     _hasStaleTranslation = false;

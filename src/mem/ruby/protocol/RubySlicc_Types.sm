@@ -165,6 +165,8 @@ structure (Sequencer, external = "yes") {
 
   // MYSTUFF
   void prepareIndPacket(Addr, RequestPtr);
+  void indirectReadCallback(Addr, DataBlock);
+  void indirectWriteCallback(Addr, DataBlock);
   bool canOverride(std::string name);
   // FFUTSYM
 }

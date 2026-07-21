@@ -338,26 +338,26 @@ action(Initiate_Request, desc="") {
     DPRINTF(Usefulness, "Inside Initiate_Request. After calling functions from DataBlock.\n");
   }
   if (isIndirect(tbe.reqType, tbe.secondType)) {
-    if (compact_cache && isInvalid(tbe.compact_cache_id)) {
-        // NOTE: We should see the compact cache before we see the value cache.
-        // In other words, the compact cache is upstream of the value cache.
+    if (indirect_unit && isInvalid(tbe.indirect_unit_id)) {
+        // NOTE: We should see the indirect unit before we see the value unit.
+        // In other words, the indirect unit is upstream of the value unit.
         // They can be the same cache too.
-        assert(isInvalid(tbe.value_cache_id));
-        // NOTE: We are the value cache. Set the value_cache_id in
+        assert(isInvalid(tbe.value_unit_id));
+        // NOTE: We are the indirect unit. Set the indirect_unit_id in
         // tbe so that we can use it when we send a message out.
-        tbe.compact_cache_id := machineID;
-        DPRINTF(IndirectAccess, "Received an indirect access to address %#lx with invalid compact cache id. I am it. Setting it to myself.\n", address);
+        tbe.indirect_unit_id := machineID;
+        DPRINTF(IndirectAccess, "Received an indirect access to address %#lx with invalid indirect unit id. I am it. Setting it to myself.\n", address);
     }
-    if (gather_cache && isInvalid(tbe.index_cache_id)) {
-        // NOTE: We are the index cache. Set the index_cache_id in
+    if (gather_unit && isInvalid(tbe.gather_unit_id)) {
+        // NOTE: We are the gather unit. Set the gather_unit_id in
         // tbe so that we can use it when we send a message out.
-        tbe.index_cache_id := machineID;
+        tbe.gather_unit_id := machineID;
     }
-    // NOTE: Check to see if we have seen the value cache yet.
-    if (value_cache && isInvalid(tbe.value_cache_id)) {
-        // NOTE: We are the value cache. Set the value_cache_id in
+    // NOTE: Check to see if we have seen the value unit yet.
+    if (value_unit && isInvalid(tbe.value_unit_id)) {
+        // NOTE: We are the value unit. Set the value_unit_id in
         // tbe so that we can use it when we send a message out.
-        tbe.value_cache_id := machineID;
+        tbe.value_unit_id := machineID;
     }
   }
   // FFUTSYM
@@ -3744,16 +3744,18 @@ action(Callback_LoadHit, desc="") {
 
   if (isIndirect(tbe.reqType, tbe.secondType)) {
     if (tbe.dataValid && (tbe.reqType == CHIRequestType:Load)) {
-        // NOTE: Could be index load or value load
         DPRINTF(IndirectAccess, "Finished servicing a hit for a load to addr %#lx.\n", tbe.addr);
-        if (tbe.secondType == CHIRequestType:ReadValue) {
-            DPRINTF(IndirectAccess, "Load to addr %#lx was to a value.\n", tbe.addr);
-            // Replace the Phase 1 packet (index-sized) with a Phase 2 packet
-            // (data-sized, correct PA) so hitCallback delivers the right bytes
-            // to completeAcc. tbe.seqReq is the RequestPtr for the Phase 2
-            // access: it carries the correct PA and sizeData.
-            sequencer.prepareIndPacket(tbe.alias, tbe.seqReq);
-            sequencer.readCallback(tbe.alias, tbe.dataBlk, true);
+        if (tbe.secondType == CHIRequestType:ReadIndirect) {
+            // Two-uop model: Phase 1 complete. Return index data to CPU.
+            // The CPU's uop1 (ldind_idx/stind_idx) will extract index[i]
+            // from this cache line and write it to Rd+1.
+            DPRINTF(IndirectAccess, "Load to addr %#lx was to an index (Phase 1). Calling back to CPU.\n", tbe.addr);
+            sequencer.readCallback(tbe.addr, tbe.dataBlk, true);
+        } else if (tbe.secondType == CHIRequestType:ReadValue) {
+            // Two-uop model: Phase 2 complete. Notify sequencer so it
+            // can serve the held uop1 (or set sense bit for later).
+            DPRINTF(IndirectAccess, "Load to addr %#lx was to a value (Phase 2). Calling indirectReadCallback.\n", tbe.addr);
+            sequencer.indirectReadCallback(tbe.addr, tbe.dataBlk);
         }
     }
   } else if (tbe.is_local_pf == false) {
@@ -3769,17 +3771,12 @@ action(Callback_StoreHit, desc="") {
          (tbe.reqType == CHIRequestType:Store));
   if (tbe.is_local_pf == false) {
     assert(tbe.dataValid);
-    if (isIndirect(tbe.reqType, tbe.secondType)) {
-      if (tbe.secondType == CHIRequestType:WriteValue) {
-        DPRINTF(IndirectAccess, "Store to addr %#lx was to a value.\n", tbe.addr);
-        sequencer.prepareIndPacket(tbe.alias, tbe.seqReq);
-        sequencer.writeCallback(tbe.alias, tbe.dataBlk, true);
-      }
-    } else {
-      DPRINTF(RubySlicc, "Write before %s\n", tbe.dataBlk);
-      sequencer.writeCallback(tbe.addr, tbe.dataBlk, false);
-      DPRINTF(RubySlicc, "Write after %s\n", tbe.dataBlk);
-    }
+    // Two-uop model: stind uop2 is a normal WriteReq, handled by the
+    // standard store path below. The old WriteValue callback path is removed
+    // because the cache no longer sends WriteValue on behalf of the CPU.
+    DPRINTF(RubySlicc, "Write before %s\n", tbe.dataBlk);
+    sequencer.writeCallback(tbe.addr, tbe.dataBlk, false);
+    DPRINTF(RubySlicc, "Write after %s\n", tbe.dataBlk);
     tbe.dataDirty := true;
   }
 }
@@ -3823,23 +3820,19 @@ action(Callback_Miss, desc="") {
   // MYSTUFF
   if (isIndirect(tbe.reqType, tbe.secondType)) {
     if (tbe.dataValid && (tbe.reqType == CHIRequestType:Load)) {
-        // NOTE: Could be index load or value load
         DPRINTF(IndirectAccess, "Finished servicing a miss for a load to addr %#lx.\n", tbe.addr);
-        if (tbe.secondType == CHIRequestType:ReadValue) {
-            DPRINTF(IndirectAccess, "Load to addr %#lx was to a value.\n", tbe.addr);
-            sequencer.prepareIndPacket(tbe.alias, tbe.seqReq);
-            sequencer.readCallback(tbe.alias, tbe.dataBlk, true);
-        }
-    } else if (tbe.dataValid && ((tbe.reqType == CHIRequestType:Store) ||
-                                 (tbe.reqType == CHIRequestType:StoreLine))) {
-        DPRINTF(IndirectAccess, "Finished servicing a miss for a store to addr %#lx.\n", tbe.addr);
-        if (tbe.secondType == CHIRequestType:WriteValue) {
-            DPRINTF(IndirectAccess, "Store to addr %#lx was to a value.\n", tbe.addr);
-            sequencer.prepareIndPacket(tbe.alias, tbe.seqReq);
-            sequencer.writeCallback(tbe.alias, tbe.dataBlk, true);
-            tbe.dataDirty := true;
+        if (tbe.secondType == CHIRequestType:ReadIndirect) {
+            // Two-uop model: Phase 1 complete. Return index data to CPU.
+            DPRINTF(IndirectAccess, "Load to addr %#lx was to an index (Phase 1). Calling back to CPU.\n", tbe.addr);
+            sequencer.readCallback(tbe.addr, tbe.dataBlk, true);
+        } else if (tbe.secondType == CHIRequestType:ReadValue) {
+            // Two-uop model: Phase 2 complete. Notify sequencer.
+            DPRINTF(IndirectAccess, "Load to addr %#lx was to a value (Phase 2). Calling indirectReadCallback.\n", tbe.addr);
+            sequencer.indirectReadCallback(tbe.addr, tbe.dataBlk);
         }
     }
+    // Two-uop model: stind uop1 is a load (index fetch), not a store.
+    // stind uop2 is a normal WriteReq. No WriteValue path needed here.
 //   if (tbe.dataValid && tbe.is_local_pf) {
   // FFUTSYM
   } else if (tbe.dataValid && tbe.is_local_pf) {
@@ -4321,51 +4314,51 @@ action(Fwd_Indirect, desc="Forward ReadIndirect") {
 
 action(Initiate_Dependent_Requests, desc="Start accesses that are dependent on this access")
 {
-    if (gather_cache && tbe.secondType == CHIRequestType:ReadIndirect) {
+    if (gather_unit && tbe.secondType == CHIRequestType:ReadIndirect) {
         enqueue(reqOutPort, CHIRequestMsg, request_latency) {
             indirectDependentBoilerPlate(out_msg);
-            setAddrFromReq(out_msg, getDependentReq(tbe.seqReq, cache_entry.DataBlk));
+            fillInMsgFromReq(out_msg, getDependentReq(tbe.seqReq, cache_entry.DataBlk));
             out_msg.type := CHIRequestType:ReadValue;
-            out_msg.compact_cache_id := tbe.compact_cache_id;
-            out_msg.value_cache_id := tbe.value_cache_id;
-            out_msg.index_cache_id := tbe.index_cache_id;
+            out_msg.indirect_unit_id := tbe.indirect_unit_id;
+            out_msg.value_unit_id := tbe.value_unit_id;
+            out_msg.gather_unit_id := tbe.gather_unit_id;
             out_msg.alias := tbe.alias;
 
-            if (isInvalid(tbe.compact_cache_id)) {
-                DPRINTF(IndirectAccess, "Compact cache id not set yet. Sending ReadValue downstream.\n");
+            if (isInvalid(tbe.indirect_unit_id)) {
+                DPRINTF(IndirectAccess, "Indirect unit id not set yet. Sending ReadValue downstream.\n");
                 out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
             } else {
-                DPRINTF(IndirectAccess, "Compact cache id set. Sending ReadValue upstream.\n");
-                out_msg.Destination.add(tbe.compact_cache_id);
+                DPRINTF(IndirectAccess, "Indirect unit id set. Sending ReadValue upstream.\n");
+                out_msg.Destination.add(tbe.indirect_unit_id);
             }
         }
         // FIXME: getNextAddr(tbe.seqReq) is not going to work since we popped front.
         // DPRINTF(IndirectAccess, "Need subsequent access to addr: %#lx.\n", getNextAddr(tbe.seqReq));
     }
 
-    if (gather_cache && tbe.secondType == CHIRequestType:WriteIndirect) {
+    if (gather_unit && tbe.secondType == CHIRequestType:WriteIndirect) {
         enqueue(reqOutPort, CHIRequestMsg, request_latency) {
             indirectDependentBoilerPlate(out_msg);
-            setAddrFromReq(out_msg, getDependentReq(tbe.seqReq, cache_entry.DataBlk));
+            fillInMsgFromReq(out_msg, getDependentReq(tbe.seqReq, cache_entry.DataBlk));
             out_msg.type := CHIRequestType:WriteValue;
-            out_msg.compact_cache_id := tbe.compact_cache_id;
-            out_msg.value_cache_id := tbe.value_cache_id;
-            out_msg.index_cache_id := tbe.index_cache_id;
+            out_msg.indirect_unit_id := tbe.indirect_unit_id;
+            out_msg.value_unit_id := tbe.value_unit_id;
+            out_msg.gather_unit_id := tbe.gather_unit_id;
             out_msg.alias := tbe.alias;
 
-            if (isInvalid(tbe.compact_cache_id)) {
-                DPRINTF(IndirectAccess, "Compact cache id not set yet. Sending WriteValue downstream.\n");
+            if (isInvalid(tbe.indirect_unit_id)) {
+                DPRINTF(IndirectAccess, "Indirect unit id not set yet. Sending WriteValue downstream.\n");
                 out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
             } else {
-                DPRINTF(IndirectAccess, "Compact cache id set. Sending WriteValue upstream.\n");
-                out_msg.Destination.add(tbe.compact_cache_id);
+                DPRINTF(IndirectAccess, "Indirect unit id set. Sending WriteValue upstream.\n");
+                out_msg.Destination.add(tbe.indirect_unit_id);
             }
         }
         // FIXME: getNextAddr(tbe.seqReq) is not going to work since we popped front.
         // DPRINTF(IndirectAccess, "Need subsequent access to addr: %#lx.\n", getNextAddr(tbe.seqReq));
     }
 
-    // if (compact_cache &&
+    // if (indirect_unit &&
     //     ((tbe.secondType == CHIRequestType:ReadValue && alloc_for_read_value) ||
     //     (tbe.secondType == CHIRequestType:WriteValue && alloc_for_write_value))
     // ) {
