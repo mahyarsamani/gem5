@@ -52,8 +52,8 @@ action(AllocateTBE_Request, desc="") {
         assert(in_msg.is_local_pf == false);
         out_msg := in_msg;
         // MYSTUFF
-        out_msg.type := manipulateType(in_msg);
         out_msg.secondType := manipulateSecondType(in_msg);
+        out_msg.type := manipulateType(in_msg);
         // MYSTUFF
       }
     }
@@ -183,11 +183,11 @@ action(AllocateTBE_SeqRequest, desc="") {
       // that is CHIRequestMsg. The right way to do it is to pass in_msg.
       // However, we really don't have a choice here. It's ok only when
       // translating sequencer
-      out_msg.type := manipulateType(out_msg);
       out_msg.secondType := manipulateSecondType(out_msg);
+      out_msg.type := manipulateType(out_msg);
 
-      out_msg.access_name := getMemAccessName(in_msg.getRequestPtr());
-      out_msg.alias := in_msg.Alias;
+      out_msg.access_name := in_msg.accessName;
+      out_msg.alias := in_msg.alias;
       DPRINTF(Usefulness, "Setting access name for addr %#lx to %s.\n", out_msg.addr, out_msg.access_name);
       // MYSTUFF
     }
@@ -286,6 +286,9 @@ action(Initiate_Request, desc="") {
   // MYSTUFF:
   bool reduce_usefulness := false;
 
+  MachineID indirect_unit_id;
+  MachineID gather_unit_id;
+  MachineID value_unit_id;
   WriteMask read_usefulness;
   WriteMask write_usefulness;
   // FFUTSYM:
@@ -302,6 +305,9 @@ action(Initiate_Request, desc="") {
         DPRINTF(Usefulness, "Got read usefulness for name %s with count %d from message.\n", in_msg.access_name, read_usefulness.count());
         DPRINTF(Usefulness, "Got write usefulness for name %s with count %d from message.\n", in_msg.access_name, write_usefulness.count());
     }
+    indirect_unit_id := in_msg.indirect_unit_id;
+    gather_unit_id := in_msg.gather_unit_id;
+    value_unit_id := in_msg.value_unit_id;
     // FFUTSYM
   }
   DirEntry dir_entry := getDirEntry(address);
@@ -337,28 +343,32 @@ action(Initiate_Request, desc="") {
     tbe.dataBlk.reduceUsefulness(read_usefulness, write_usefulness, getName(), address);
     DPRINTF(Usefulness, "Inside Initiate_Request. After calling functions from DataBlock.\n");
   }
-  if (isIndirect(tbe.reqType, tbe.secondType)) {
-    if (indirect_unit && isInvalid(tbe.indirect_unit_id)) {
-        // NOTE: We should see the indirect unit before we see the value unit.
-        // In other words, the indirect unit is upstream of the value unit.
-        // They can be the same cache too.
-        assert(isInvalid(tbe.value_unit_id));
-        // NOTE: We are the indirect unit. Set the indirect_unit_id in
-        // tbe so that we can use it when we send a message out.
-        tbe.indirect_unit_id := machineID;
-        DPRINTF(IndirectAccess, "Received an indirect access to address %#lx with invalid indirect unit id. I am it. Setting it to myself.\n", address);
-    }
-    if (gather_unit && isInvalid(tbe.gather_unit_id)) {
-        // NOTE: We are the gather unit. Set the gather_unit_id in
-        // tbe so that we can use it when we send a message out.
-        tbe.gather_unit_id := machineID;
-    }
-    // NOTE: Check to see if we have seen the value unit yet.
-    if (value_unit && isInvalid(tbe.value_unit_id)) {
-        // NOTE: We are the value unit. Set the value_unit_id in
-        // tbe so that we can use it when we send a message out.
-        tbe.value_unit_id := machineID;
-    }
+
+  tbe.indirect_unit_id := indirect_unit_id;
+  tbe.gather_unit_id := gather_unit_id;
+  tbe.value_unit_id := value_unit_id;
+  if (indirect_unit && isInvalid(tbe.indirect_unit_id)) {
+    // NOTE: We should see the indirect unit before we see the value unit.
+    // In other words, the indirect unit is upstream of the value unit.
+    // They can be the same cache too.
+    // Same about gather unit.
+    assert(isInvalid(tbe.value_unit_id));
+    assert(isInvalid(tbe.gather_unit_id));
+    // NOTE: We are the indirect unit. Set the indirect_unit_id in
+    // tbe so that we can use it when we send a message out.
+    tbe.indirect_unit_id := machineID;
+    DPRINTF(IndirectAccess, "Received an indirect access to address %#lx with invalid indirect unit id. I am it. Setting it to myself.\n", address);
+  }
+  if (gather_unit && isInvalid(tbe.gather_unit_id)) {
+    // NOTE: We are the gather unit. Set the gather_unit_id in
+    // tbe so that we can use it when we send a message out.
+    tbe.gather_unit_id := machineID;
+  }
+  // NOTE: Check to see if we have seen the value unit yet.
+  if (value_unit && isInvalid(tbe.value_unit_id)) {
+    // NOTE: We are the value unit. Set the value_unit_id in
+    // tbe so that we can use it when we send a message out.
+    tbe.value_unit_id := machineID;
   }
   // FFUTSYM
 
@@ -3504,6 +3514,11 @@ action(Finalize_UpdateCacheFromTBE, desc="") {
     assert(tbe.dataValid);
     assert(is_valid(cache_entry));
     cache_entry.DataBlk := tbe.dataBlk;
+
+    // MYSTUFF
+    cache_entry.indirect_unit_id := tbe.indirect_unit_id;
+    cache_entry.value_unit_id := tbe.value_unit_id;
+    cache_entry.gather_unit_id := tbe.gather_unit_id;
     DPRINTF(Usefulness, "Inside Finalize_UpdateCacheFromTBE. Before calling functions from DataBlock.\n");
     // cache_entry.DataBlk.copyReadUsefulness(tbe.dataBlk.getReadUsefulness(getName(), address), getName(), address);
     // cache_entry.DataBlk.copyWriteUsefulness(tbe.dataBlk.getWriteUsefulness(getName(), address), getName(), address);
@@ -3511,6 +3526,7 @@ action(Finalize_UpdateCacheFromTBE, desc="") {
     cache_entry.DataBlk.setIsPrefetched(tbe.is_local_pf || tbe.is_remote_pf, getName(), address);
     cache_entry.DataBlk.setAccessName(tbe.access_name, canOverride(cache_entry.DataBlk.getAccessName(getName(), address), address), getName(), address);
     DPRINTF(Usefulness, "Inside Finalize_UpdateCacheFromTBE. After calling functions from DataBlock.\n");
+    // FFUTSYM
 
     DPRINTF(RubySlicc, "Cached data %s pfb %s\n", tbe.dataBlk, cache_entry.HWPrefetched);
   } else {
@@ -3538,6 +3554,9 @@ action(Finalize_UpdateDirectoryFromTBE, desc="") {
     dir_entry.ownerIsExcl := tbe.dir_ownerIsExcl;
     dir_entry.owner := tbe.dir_owner;
     dir_entry.sharers := tbe.dir_sharers;
+    dir_entry.indirect_unit_id := tbe.indirect_unit_id;
+    dir_entry.value_unit_id := tbe.value_unit_id;
+    dir_entry.gather_unit_id := tbe.gather_unit_id;
   } else {
     assert((tbe.dir_ownerExists == false) && tbe.dir_sharers.isEmpty());
     if(directory.isTagPresent(address)) {
@@ -3833,7 +3852,6 @@ action(Callback_Miss, desc="") {
     }
     // Two-uop model: stind uop1 is a load (index fetch), not a store.
     // stind uop2 is a normal WriteReq. No WriteValue path needed here.
-//   if (tbe.dataValid && tbe.is_local_pf) {
   // FFUTSYM
   } else if (tbe.dataValid && tbe.is_local_pf) {
     assert(use_prefetcher);
@@ -4290,87 +4308,9 @@ action(Profile_OutgoingEnd_DVM, desc="") {
   outgoingTransactionEnd(address, tbe.rcvdRetryAck, false);
 }
 
-// // MYSTUFF
-action(delayFwdIndirect, desc="Model the delay to fwd Indirect") {
-    assert(is_valid(tbe));
-    tbe.delayNextAction := curTick() + cyclesToTicks(fwd_ind_acc_delay);
-}
+// MYSTUFF
 
-action(Fwd_Indirect, desc="Forward ReadIndirect") {
-  // NOTE: Does it make sense to add the following assert?
-  // What if we don't want to cache them at all? Or what if we want to cache
-  // them at the memory controller.
-  // assert(is_HN == false);
-  // assert(tbe.dataValid == false);
-
-  enqueue(reqOutPort, CHIRequestMsg, request_latency) {
-    prepareRequest(tbe, tbe.reqType, out_msg);
-    out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
-    // NOTE: What do the following two lines mean?
-    out_msg.dataToFwdRequestor := false;
-    allowRequestRetry(tbe, out_msg);
-  }
-}
-
-action(Initiate_Dependent_Requests, desc="Start accesses that are dependent on this access")
-{
-    if (gather_unit && tbe.secondType == CHIRequestType:ReadIndirect) {
-        enqueue(reqOutPort, CHIRequestMsg, request_latency) {
-            indirectDependentBoilerPlate(out_msg);
-            fillInMsgFromReq(out_msg, getDependentReq(tbe.seqReq, cache_entry.DataBlk));
-            out_msg.type := CHIRequestType:ReadValue;
-            out_msg.indirect_unit_id := tbe.indirect_unit_id;
-            out_msg.value_unit_id := tbe.value_unit_id;
-            out_msg.gather_unit_id := tbe.gather_unit_id;
-            out_msg.alias := tbe.alias;
-
-            if (isInvalid(tbe.indirect_unit_id)) {
-                DPRINTF(IndirectAccess, "Indirect unit id not set yet. Sending ReadValue downstream.\n");
-                out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
-            } else {
-                DPRINTF(IndirectAccess, "Indirect unit id set. Sending ReadValue upstream.\n");
-                out_msg.Destination.add(tbe.indirect_unit_id);
-            }
-        }
-        // FIXME: getNextAddr(tbe.seqReq) is not going to work since we popped front.
-        // DPRINTF(IndirectAccess, "Need subsequent access to addr: %#lx.\n", getNextAddr(tbe.seqReq));
-    }
-
-    if (gather_unit && tbe.secondType == CHIRequestType:WriteIndirect) {
-        enqueue(reqOutPort, CHIRequestMsg, request_latency) {
-            indirectDependentBoilerPlate(out_msg);
-            fillInMsgFromReq(out_msg, getDependentReq(tbe.seqReq, cache_entry.DataBlk));
-            out_msg.type := CHIRequestType:WriteValue;
-            out_msg.indirect_unit_id := tbe.indirect_unit_id;
-            out_msg.value_unit_id := tbe.value_unit_id;
-            out_msg.gather_unit_id := tbe.gather_unit_id;
-            out_msg.alias := tbe.alias;
-
-            if (isInvalid(tbe.indirect_unit_id)) {
-                DPRINTF(IndirectAccess, "Indirect unit id not set yet. Sending WriteValue downstream.\n");
-                out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
-            } else {
-                DPRINTF(IndirectAccess, "Indirect unit id set. Sending WriteValue upstream.\n");
-                out_msg.Destination.add(tbe.indirect_unit_id);
-            }
-        }
-        // FIXME: getNextAddr(tbe.seqReq) is not going to work since we popped front.
-        // DPRINTF(IndirectAccess, "Need subsequent access to addr: %#lx.\n", getNextAddr(tbe.seqReq));
-    }
-
-    // if (indirect_unit &&
-    //     ((tbe.secondType == CHIRequestType:ReadValue && alloc_for_read_value) ||
-    //     (tbe.secondType == CHIRequestType:WriteValue && alloc_for_write_value))
-    // ) {
-    //     setAliasForAddr(tbe.alias, tbe.accAddr);
-    // }
-}
-
-// Enqueue a replacement for the index block and stall the FwdIndirect.
-// The normal eviction machinery (replTriggerInPort → Local_Eviction →
-// Initiate_Replacement) handles the writeback/evict. The stalled
-// FwdIndirect replays against state I after the eviction completes.
-action(Evict_ForIndirect,
+action(Evict_IdxLine,
        desc="Enqueue replacement for index block and stall FwdIndirect") {
     enqueue(replTriggerOutPort, ReplacementMsg, 0) {
         out_msg.addr := address;
@@ -4378,5 +4318,42 @@ action(Evict_ForIndirect,
         out_msg.has_pending_req := true;
     }
     stall_and_wait(reqRdyPort, address);
+}
+
+action(Initiate_Dependent_Requests, desc="Issue one dependent request from cached entries")
+{
+    if (gather_unit && hasDependentWork(address)) {
+        enqueue(reqOutPort, CHIRequestMsg, request_latency) {
+            indirectDependentBoilerPlate(out_msg);
+            RequestPtr depReq := getDependentReq(address, cache_entry.DataBlk);
+            fillInMsgFromReq(out_msg, depReq);
+
+            if (isDepReadReq(depReq)) {
+                out_msg.type := CHIRequestType:ReadValue;
+            } else {
+                out_msg.type := CHIRequestType:WriteValue;
+            }
+
+            out_msg.indirect_unit_id := tbe.indirect_unit_id;
+            out_msg.value_unit_id := tbe.value_unit_id;
+            out_msg.gather_unit_id := tbe.gather_unit_id;
+            out_msg.alias := tbe.alias;
+
+            DPRINTF(IndirectAccess,
+                "IDR: index_line=%#x -> data_addr=%#x alias=%d isRead=%d\n",
+                address, out_msg.addr, tbe.alias, isDepReadReq(depReq)
+            );
+
+            if (isInvalid(tbe.indirect_unit_id)) {
+                DPRINTF(IndirectAccess, "Indirect unit id not set yet. Sending downstream.\n");
+                out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
+            } else {
+                DPRINTF(IndirectAccess, "Indirect unit id set. Sending upstream.\n");
+                out_msg.Destination.add(tbe.indirect_unit_id);
+            }
+        }
+        // TODO: If hasDependentWork(address) still true, re-trigger this
+        // action via the TBE's transition queue to issue with delay.
+    }
 }
 // FFUTSYM

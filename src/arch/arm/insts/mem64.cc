@@ -335,7 +335,7 @@ MicroIndIdx::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
     // Attach IndirectAccessAlias so CHI protocol recognizes this as indirect
     auto iaa = std::make_shared<IndirectAccessAlias>(alias_val);
     // Attach DependentAccessGen so CHI can generate Phase 2 (ReadValue)
-    auto dag = std::make_shared<ARMDependentAccessGen>(base_data_val, sizeData);
+    auto dag = std::make_shared<ARMDependentAccessGen>(sizeIndex, sizeData, base_data_val);
     xc->setIAAExt(iaa);
     xc->setDAGExt(dag);
 
@@ -442,8 +442,9 @@ MicroLdIndVal::initiateAcc(ExecContext *xc,
 
     Addr EA = base_data_val + (index_value << shiftAmtData);
 
-    DPRINTF(IndirectAccess, "[ldind_val initiateAcc] index_value=%llu "
+    DPRINTF(IndirectAccess, "[%s initiateAcc] index_value=%llu "
             "base_data=0x%llx EA=0x%llx sizeData=%u alias=0x%llx\n",
+            mnemonic,
             (unsigned long long)index_value,
             (unsigned long long)base_data_val,
             (unsigned long long)EA, sizeData,
@@ -490,8 +491,8 @@ MicroLdIndVal::completeAcc(PacketPtr pkt, ExecContext *xc,
             panic("MicroLdIndVal: unsupported sizeData=%u", sizeData);
     }
 
-    DPRINTF(IndirectAccess, "[ldind_val completeAcc] data=0x%llx\n",
-            (unsigned long long)data);
+    DPRINTF(IndirectAccess, "[%s completeAcc] data=0x%llx\n",
+            mnemonic, (unsigned long long)data);
 
     // Write data element to Rd
     xc->setRegOperand(this, 0, data);
@@ -503,7 +504,8 @@ MicroLdIndVal::generateDisassembly(
         Addr pc, const loader::SymbolTable *symtab) const
 {
     std::stringstream ss;
-    ss << "  ldind_val ";
+    printMnemonic(ss, "", false);
+    ss << " ";
     printIntReg(ss, destData);
     ss << ", [";
     printIntReg(ss, baseData);
@@ -563,9 +565,10 @@ MicroStIndVal::initiateAcc(ExecContext *xc,
 
     Addr EA = base_data_val + (index_value << shiftAmtData);
 
-    DPRINTF(IndirectAccess, "[stind_val initiateAcc] index_value=%llu "
+    DPRINTF(IndirectAccess, "[%s initiateAcc] index_value=%llu "
             "base_data=0x%llx data_to_store=0x%llx EA=0x%llx sizeData=%u "
             "alias=0x%llx\n",
+            mnemonic,
             (unsigned long long)index_value,
             (unsigned long long)base_data_val,
             (unsigned long long)data_val,
@@ -587,7 +590,7 @@ Fault
 MicroStIndVal::completeAcc(PacketPtr pkt, ExecContext *xc,
                            trace::InstRecord *traceData) const
 {
-    DPRINTF(IndirectAccess, "[stind_val completeAcc] store complete\n");
+    DPRINTF(IndirectAccess, "[%s completeAcc] store complete\n", mnemonic);
     return NoFault;
 }
 
@@ -596,7 +599,8 @@ MicroStIndVal::generateDisassembly(
         Addr pc, const loader::SymbolTable *symtab) const
 {
     std::stringstream ss;
-    ss << "  stind_val ";
+    printMnemonic(ss, "", false);
+    ss << " ";
     printIntReg(ss, srcData);
     ss << ", [";
     printIntReg(ss, baseData);

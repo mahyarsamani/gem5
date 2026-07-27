@@ -161,5 +161,7 @@ class SpatterGenerator(AbstractGenerator):
                 self._proceed_past_sync_point()
             yield not (sync_points_observed < sync_points_expected)
 
-    def set_access_mode(self, access_mode: SpatterAccessMode) -> None:
-        self._access_mode = access_mode
+    def set_access_mode(
+        self, access_mode: Union[SpatterAccessMode, str]
+    ) -> None:
+        self._access_mode = SpatterAccessMode(access_mode).getValue()

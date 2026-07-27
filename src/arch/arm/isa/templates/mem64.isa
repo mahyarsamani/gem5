@@ -984,7 +984,7 @@ def template LoadIndirectConstructor {{
         // Sources: base_index, index_reg, alias_reg (for IAA), base_data (for DAG)
         // Dest: src_alias (Rd+1) — receives index[i]
         microOps[0] = new ArmISA::MicroIndIdx(
-            "%(mnemonic)s_idx", machInst,
+            "ldind_%(idx_suffix)sidx", machInst,
             (RegIndex)_src_alias,   // destIdx = Rd+1
             (RegIndex)_base_index,  // baseIndex
             (RegIndex)_index_reg,   // indexReg
@@ -996,7 +996,7 @@ def template LoadIndirectConstructor {{
         // Sources: Rd+1 (index value from uop0), base_data
         // Dest: Rd (data register)
         microOps[1] = new ArmISA::MicroLdIndVal(
-            "%(mnemonic)s_val", machInst,
+            "ldind_%(data_suffix)sval", machInst,
             (RegIndex)_dest,        // destData = Rd
             (RegIndex)_src_alias,   // srcIdx = Rd+1 (output of uop0)
             (RegIndex)_base_data,   // baseData
@@ -1082,7 +1082,7 @@ def template StoreIndirectConstructor {{
 
         // uop0: fetch index[i] from index array (same as ldind uop0)
         microOps[0] = new ArmISA::MicroIndIdx(
-            "%(mnemonic)s_idx", machInst,
+            "stind_%(idx_suffix)sidx", machInst,
             (RegIndex)_src_alias,   // destIdx = Rd+1
             (RegIndex)_base_index,  // baseIndex
             (RegIndex)_index_reg,   // indexReg
@@ -1093,7 +1093,7 @@ def template StoreIndirectConstructor {{
         // uop1: store data[index[i]] to data array
         // Sources: Rd+1 (index value from uop0), base_data, Rd (data to store)
         microOps[1] = new ArmISA::MicroStIndVal(
-            "%(mnemonic)s_val", machInst,
+            "stind_%(data_suffix)sval", machInst,
             (RegIndex)_dest,        // srcData = Rd (data to store)
             (RegIndex)_src_alias,   // srcIdx = Rd+1 (output of uop0)
             (RegIndex)_base_data,   // baseData

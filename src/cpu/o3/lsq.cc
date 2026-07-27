@@ -1151,9 +1151,9 @@ LSQ::LSQRequest::addReq(Addr addr, unsigned size,
         if (_inst->getDAGExt()) {
             // Attach DAG to request. The translator will be set by
             // MMU::translateComplete after address translation.
+            _inst->getDAGExt()->setRequestorId(req->requestorId());
             req->setExtension<DependentAccessGen>(_inst->getDAGExt());
         }
-        if (_inst->getIARExt()) req->setExtension<IndependentAccessResp>(_inst->getIARExt());
 
         _reqs.push_back(req);
     }

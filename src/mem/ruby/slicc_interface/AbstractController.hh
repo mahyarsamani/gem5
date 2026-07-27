@@ -43,6 +43,7 @@
 
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -89,6 +90,16 @@ class AbstractController : public ClockedObject, public Consumer
     std::unordered_map<Addr, Addr> addrToAliasMap;
     std::unordered_map<Addr, Addr> aliasToAddrMap;
 
+    // Per-line cache of Request extensions extracted from seqReq on arrival.
+    // Keyed by line address. Supports multiple sub-line entries per line
+    // (e.g., index[i] and index[i+1] in the same cache line).
+    struct CachedEntry {
+        bool read;  // true = gather (ReadValue), false = scatter (WriteValue)
+        int offset;   // byte offset of this index element within the line
+        std::shared_ptr<DependentAccessGen> dag;
+    };
+    std::unordered_map<Addr, std::vector<CachedEntry>> m_cachedEntries;
+
   protected:
     // NOTE: Pointer to all sequencers that are upstream to this controller.
     // The list should be of length 1 for a private cache controller, and
@@ -99,7 +110,20 @@ class AbstractController : public ClockedObject, public Consumer
 
     std::string getName() { return name(); }
 
-    RequestPtr getDependentReq(RequestPtr &og_req, DataBlock &index_data);
+    // Pop the front entry for lineAddr, use DataBlock to extract the
+    // index value, and return the generated Phase 2 RequestPtr.
+    // Attaches a DepAccessType extension to the returned request.
+    RequestPtr getDependentReq(Addr line_addr, DataBlock &index_data);
+
+    // Extract extensions from a Request and append to m_cachedEntries[lineAddr].
+    void extractExtensions(bool read, Addr line_addr, Addr acc_addr, RequestPtr req);
+
+    // Check if there are remaining entries for this lineAddr.
+    bool hasDependentWork(Addr line_addr);
+
+    // Clear all entries for lineAddr.
+    void clearExtensions(Addr line_addr);
+
   public:
     bool disambiguated(Addr alias) { return aliasToAddrMap.find(alias) != aliasToAddrMap.end(); }
     void setAliasForAddr(Addr alias, Addr address) { addrToAliasMap[address] = alias; aliasToAddrMap[alias] = address; }

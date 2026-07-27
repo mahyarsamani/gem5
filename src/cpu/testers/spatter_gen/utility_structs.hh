@@ -35,6 +35,7 @@
 
 #include "base/random.hh"
 #include "base/types.hh"
+#include "enums/SpatterAccessMode.hh"
 #include "enums/SpatterKernelType.hh"
 #include "mem/packet.hh"
 #include "mem/request.hh"
@@ -82,40 +83,76 @@ class TimedQueue
 };
 
 
+/**
+ * Minimal DependentAccessGen subclass for SpatterGen.
+ *
+ * SpatterGen pre-computes Phase 2 addresses in the access pair queue,
+ * so genNextRequest simply returns a request for the stored data address
+ * (ignoring the index_value extracted from the cache line).
+ */
+class SpatterDAG : public DependentAccessGen
+{
+  private:
+    Addr _dataAddr;
 
-// // Represents a single access to a SpatterKernel.
-// // It supports multiple levels of indirection.
-// // However, the SpatterKernel class only works with one level of
-// // indirection (i.e. accessing value[index[i]]).
-class SpatterAccess: public DependentAccessGen,
-                    public std::enable_shared_from_this<SpatterAccess>
+  public:
+    SpatterDAG(size_t index_size, size_t data_size,
+               Addr data_addr, RequestorID rid):
+        DependentAccessGen(index_size, data_size), _dataAddr(data_addr)
+    { _requestorId = rid; }
+
+    std::unique_ptr<ExtensionBase> clone() const override {
+        return std::make_unique<SpatterDAG>(
+            _indexSize, _dataSize, _dataAddr, _requestorId);
+    }
+
+    RequestPtr genNextRequest(uint64_t index_value) override {
+        return std::make_shared<Request>(_dataAddr, _dataSize, 0, _requestorId);
+    }
+};
+
+// Represents a single access to a SpatterKernel.
+// It supports multiple levels of indirection.
+// However, the SpatterKernel class only works with one level of
+// indirection (i.e. accessing value[index[i]]).
+class SpatterAccess: public Extension<Request, SpatterAccess>,
+                     public std::enable_shared_from_this<SpatterAccess>
 {
   private:
     friend class SpatterKernel;
 
-    typedef std::tuple<Addr, size_t> AccessPair;
-    typedef enums::SpatterKernelType SpatterKernelType;
+    using AccessPair = std::tuple<Addr, size_t>;
 
-    RequestorID requestorId;
+    using SpatterAccessMode = enums::SpatterAccessMode;
+    using SpatterKernelType = enums::SpatterKernelType;
+
+    static constexpr Addr InstructionSize = 4;
+
+    RequestorID _requestorId;
     SpatterKernelType _kernelType;
+
     Tick accTripTime;
 
     Addr emulatedPC;
     std::queue<AccessPair> accessPairs;
 
-    mutable Random::RandomPtr rng = Random::genRandom();
+    std::shared_ptr<IndirectAccessAlias> _alias;
 
-    AccessPair nextAccessPair()
+    Random::RandomPtr rng = Random::genRandom();
+
+    AccessPair nextAccessPair(bool advance)
     {
         assert(tripsLeft() > 0);
         AccessPair access_pair = accessPairs.front();
-        accessPairs.pop();
+        if (advance) {
+            accessPairs.pop();
+        }
         return access_pair;
     }
 
-    RequestPtr createRequest(Addr addr, size_t size, MemCmd cmd, Addr pc)
+    RequestPtr createRequest(Addr addr, size_t size, Addr pc)
     {
-        RequestPtr req = std::make_shared<Request>(addr, size, 0, requestorId);
+        RequestPtr req = std::make_shared<Request>(addr, size, 0, _requestorId);
         req->setExtension<SpatterAccess>(shared_from_this());
         // Dummy PC to have PC-based prefetchers latch on;
         // get entropy into higher bits
@@ -125,9 +162,8 @@ class SpatterAccess: public DependentAccessGen,
         return req;
     }
 
-    PacketPtr createPacket(Addr addr, size_t size, MemCmd cmd, Addr pc)
+    PacketPtr createPacket(RequestPtr req, MemCmd cmd)
     {
-        RequestPtr req = createRequest(addr, size, cmd, pc);
         PacketPtr pkt = new Packet(req, cmd);
         uint8_t* pkt_data = new uint8_t[req->getSize()];
         // Randomly intialize pkt_data, for testing cache coherence.
@@ -144,10 +180,12 @@ class SpatterAccess: public DependentAccessGen,
         SpatterKernelType kernel_type,
         const std::queue<AccessPair> &access_pairs
     ):
-        DependentAccessGen(),
-        requestorId(requestor_id), _kernelType(kernel_type),
+        Extension<Request, SpatterAccess>(), _requestorId(requestor_id),
+        _kernelType(kernel_type),
         accTripTime(0), emulatedPC(0), accessPairs(access_pairs)
     {}
+
+    void setAlias(std::shared_ptr<IndirectAccessAlias> alias) { _alias = alias; }
 
     SpatterKernelType type() const { return _kernelType; }
 
@@ -159,70 +197,51 @@ class SpatterAccess: public DependentAccessGen,
 
     Tick tripTimeSoFar() const { return accTripTime; }
 
-    virtual std::unique_ptr<ExtensionBase> clone() const override
+    std::unique_ptr<ExtensionBase> clone() const override
     {
-        std::unique_ptr<SpatterAccess> clone = \
-            std::make_unique<SpatterAccess>(
-                requestorId, _kernelType, accessPairs
-            );
-        clone->setAccTripTime(accTripTime);
-        return clone;
+        auto copy = std::make_unique<SpatterAccess>(
+            _requestorId, _kernelType, accessPairs
+        );
+        copy->setAccTripTime(accTripTime);
+        copy->emulatedPC = emulatedPC;
+        copy->_alias = _alias;
+        return copy;
     }
 
-    RequestPtr nextRequestAsNormal()
+
+    RequestPtr nextRequest(bool attach_dag, bool attach_iaa) {
+        auto [addr, size] = nextAccessPair(true);
+
+        emulatedPC += InstructionSize;
+        RequestPtr req = createRequest(addr, size, emulatedPC - InstructionSize);
+        if (attach_dag) {
+            auto [data_addr, data_size] = nextAccessPair(false);
+            auto dag = std::make_shared<SpatterDAG>(size, data_size, data_addr, _requestorId);
+            req->setExtension<DependentAccessGen>(dag);
+        }
+        if (attach_iaa) {
+            req->setExtension<IndirectAccessAlias>(_alias);
+        }
+        return req;
+    }
+
+    PacketPtr nextPacket(SpatterAccessMode access_mode)
     {
-        Addr addr;
-        size_t size;
-        std::tie(addr, size) = nextAccessPair();
         MemCmd cmd;
-        if (tripsLeft() >= 1){
-            cmd = MemCmd::ReadReq;
+        if (tripsLeft() > 2) {
+            cmd = access_mode == SpatterAccessMode::normal ? MemCmd::ReadReq : MemCmd::ReadIndReq;
+        } else if (tripsLeft() == 2) {
+            cmd = access_mode == SpatterAccessMode::normal ? MemCmd::ReadReq :
+            (_kernelType == SpatterKernelType::gather ? MemCmd::ReadIndReq : MemCmd::WriteIndReq);
         } else {
             cmd = _kernelType == \
                 SpatterKernelType::gather ? MemCmd::ReadReq : MemCmd::WriteReq;
         }
-        return createRequest(addr, size, cmd, emulatedPC++);
-    }
 
-    PacketPtr nextPacketAsNormal()
-    {
-        Addr addr;
-        size_t size;
-        std::tie(addr, size) = nextAccessPair();
-        MemCmd cmd;
-        if (tripsLeft() >= 1){
-            cmd = MemCmd::ReadReq;
-        } else {
-            cmd = _kernelType == \
-                SpatterKernelType::gather ? MemCmd::ReadReq : MemCmd::WriteReq;
-        }
-        return createPacket(addr, size, cmd, emulatedPC++);
-    }
+        bool indirect = access_mode == SpatterAccessMode::indirect;
+        RequestPtr req = nextRequest(indirect && (tripsLeft() > 1), indirect);
 
-    RequestPtr nextRequestAsInd()
-    {
-        Addr addr;
-        size_t size;
-        std::tie(addr, size) = nextAccessPair();
-        MemCmd cmd;
-        cmd = _kernelType == SpatterKernelType::gather ? \
-            MemCmd::ReadIndReq : MemCmd::WriteIndReq;
-        return createRequest(addr, size, cmd, emulatedPC++);
-    }
-
-    virtual RequestPtr genNextRequest(RequestPtr og_req, uint64_t index_value) override {
-        return nextRequestAsInd();
-    }
-
-    PacketPtr nextPacketAsInd()
-    {
-        Addr addr;
-        size_t size;
-        std::tie(addr, size) = nextAccessPair();
-        MemCmd cmd;
-        cmd = _kernelType == SpatterKernelType::gather ? \
-            MemCmd::ReadIndReq : MemCmd::WriteIndReq;
-        return createPacket(addr, size, cmd, emulatedPC++);
+        return createPacket(req, cmd);
     }
 
     void startNextTrip()
@@ -235,8 +254,8 @@ class SpatterAccess: public DependentAccessGen,
 class SpatterKernel
 {
   private:
-    typedef enums::SpatterKernelType SpatterKernelType;
-    typedef SpatterAccess::AccessPair AccessPair;
+    using SpatterKernelType = enums::SpatterKernelType;
+    using AccessPair = SpatterAccess::AccessPair;
 
     template <typename T>
     class RollingDeque : public std::deque<T> { // Fixed: added <T>
@@ -353,12 +372,6 @@ class SpatterKernel
         uint32_t value_index = (delta * iteration) + front;
         Addr value_addr = baseValueAddr + (value_index * valueSize);
 
-        // Addr alias_addr = baseAliasAddr + (index * valueSize);
-        // MYSTUFF: FIXME: NOTE: This is temporary.
-        // alias_addr does  not work outside of vector accesses.
-        Addr alias_addr = baseAliasAddr + (index * 64);
-
-        access_pairs.emplace(alias_addr, valueSize);
         access_pairs.emplace(index_addr, indexSize);
         access_pairs.emplace(value_addr, valueSize);
 
@@ -367,7 +380,10 @@ class SpatterKernel
             iteration++;
         }
 
-        return std::make_shared<SpatterAccess>(requestorId, _type, access_pairs);
+        auto spatter_access = std::make_shared<SpatterAccess>(requestorId, _type, access_pairs);
+        auto alias = std::make_shared<IndirectAccessAlias>(baseAliasAddr + (index * valueSize));
+        spatter_access->setAlias(alias);
+        return spatter_access;
     }
 };
 

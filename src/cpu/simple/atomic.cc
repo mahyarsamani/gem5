@@ -577,6 +577,7 @@ AtomicSimpleCPU::amoMem(Addr addr, uint8_t* data, unsigned size,
 
     auto ext = t_info.getDAGExt();
     if (ext) {
+        ext->setRequestorId(req->requestorId());
         req->setExtension<DependentAccessGen>(ext);
         t_info.setDAGExt(nullptr);
     }

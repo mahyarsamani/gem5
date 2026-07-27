@@ -61,11 +61,13 @@ namespace ruby
 class RubyRequest : public Message
 {
   public:
+    // MYSTUFF
+    std::string m_accessName;
+    Addr m_alias;
+    // FFUTSYM
     Addr m_PhysicalAddress;
     Addr m_LineAddress;
-    // MYSTUFF
-    Addr m_Alias;
-    // FFUTSYM
+
     RubyRequestType m_Type;
     Addr m_ProgramCounter;
     RubyAccessMode m_AccessMode;

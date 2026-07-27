@@ -966,8 +966,7 @@ transition({BUSY_BLKD,BUSY_INTR},
             WriteUniqueZero,
             AtomicReturn,AtomicReturn_PoC, AtomicReturn_PoC_Alloc
             AtomicNoReturn,AtomicNoReturn_PoC, AtomicNoReturn_PoC_Alloc
-            StashOnceShared,StashOnceUnique,
-            FwdIndirect}) {
+            StashOnceShared,StashOnceUnique}) {
   StallRequest;
 }
 
@@ -1000,26 +999,6 @@ transition(UD_T, {SnpCleanInvalid,SnpShared,SnpUnique,SnpSharedFwd,SnpUniqueFwd,
 transition({BUSY_BLKD,BUSY_INTR}, ActionStalledOnHazard) {
   StallActionOnHazard;
 }
-
-
-// MYSTUFF
-transition(I, FwdIndirect, BUSY_BLKD) {
-    Initiate_Request;
-    delayFwdIndirect;
-    Fwd_Indirect;
-    Pop_ReqRdyQueue;
-    ProcessNextState;
-}
-
-// FwdIndirect arriving at a cache that has the index block cached.
-// Enqueue a replacement to evict the block, stall the FwdIndirect.
-// When the eviction completes (block → I), the FwdIndirect replays
-// against state I and the existing (I, FwdIndirect) transition
-// forwards it downstream.
-transition({SC, UC, SD, UD}, FwdIndirect) {
-    Evict_ForIndirect;
-}
-// FFUTSYM
 
 // Trigger-specifc transitions
 
@@ -1818,3 +1797,15 @@ transition(DvmExtOp_Finished, Final, I) {
   Pop_TriggerQueue;
   Finalize_DeallocateDvmSnoop;
 }
+
+// MYSTUFF
+// For the case we have accessed a cache upstream to gather unit
+// and it has the index line cached in a stable state.
+// Notice that the eviction cascades down stream until it reaches
+// the gather_unit. Now, because the eviction cascades, we will
+// never have the block in a state where the line is cached upstream.
+// Therefore, no need to account for .*_R.* states.
+transition({SC, UC, SD, UD}, EvictIdxLine) {
+    Evict_IdxLine;
+}
+// FFUTSYM

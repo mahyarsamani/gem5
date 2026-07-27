@@ -487,16 +487,14 @@ TimingSimpleCPU::initiateMemRead(Addr addr, unsigned size,
 
     auto iaa = t_info.getIAAExt();
     auto dag = t_info.getDAGExt();
-    auto iar = t_info.getIARExt();
-    assert((iaa == nullptr && dag == nullptr && iar == nullptr) ||
-            (iaa != nullptr && dag != nullptr && iar != nullptr));
-    if (iaa && dag && iar) {
+    assert((iaa == nullptr && dag == nullptr) ||
+            (iaa != nullptr && dag != nullptr));
+    if (iaa && dag) {
         req->setExtension<IndirectAccessAlias>(iaa);
+        dag->setRequestorId(req->requestorId());
         req->setExtension<DependentAccessGen>(dag);
-        req->setExtension<IndependentAccessResp>(iar);
         t_info.setIAAExt(nullptr);
         t_info.setDAGExt(nullptr);
-        t_info.setIARExt(nullptr);
     }
 
     req->taskId(taskId());
@@ -583,16 +581,14 @@ TimingSimpleCPU::writeMem(uint8_t *data, unsigned size,
 
     auto iaa = t_info.getIAAExt();
     auto dag = t_info.getDAGExt();
-    auto iar = t_info.getIARExt();
-    assert((iaa == nullptr && dag == nullptr && iar == nullptr) ||
-        (iaa != nullptr && dag != nullptr && iar != nullptr));
+    assert((iaa == nullptr && dag == nullptr) ||
+        (iaa != nullptr && dag != nullptr));
     if (iaa && dag) {
         req->setExtension<IndirectAccessAlias>(iaa);
+        dag->setRequestorId(req->requestorId());
         req->setExtension<DependentAccessGen>(dag);
-        req->setExtension<IndependentAccessResp>(iar);
         t_info.setIAAExt(nullptr);
         t_info.setDAGExt(nullptr);
-        t_info.setIARExt(nullptr);
     }
 
     req->taskId(taskId());
@@ -655,16 +651,14 @@ TimingSimpleCPU::initiateMemAMO(Addr addr, unsigned size,
 
     auto iaa = t_info.getIAAExt();
     auto dag = t_info.getDAGExt();
-    auto iar = t_info.getIARExt();
-    assert((iaa == nullptr && dag == nullptr && iar == nullptr) ||
-        (iaa != nullptr && dag != nullptr && iar != nullptr));
+    assert((iaa == nullptr && dag == nullptr) ||
+        (iaa != nullptr && dag != nullptr));
     if (iaa && dag) {
         req->setExtension<IndirectAccessAlias>(iaa);
+        dag->setRequestorId(req->requestorId());
         req->setExtension<DependentAccessGen>(dag);
-        req->setExtension<IndependentAccessResp>(iar);
         t_info.setIAAExt(nullptr);
         t_info.setDAGExt(nullptr);
-        t_info.setIARExt(nullptr);
     }
 
     req->taskId(taskId());

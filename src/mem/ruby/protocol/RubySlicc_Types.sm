@@ -180,7 +180,8 @@ structure(RubyRequest, desc="...", interface="Message", external="yes") {
   Addr LineAddress,       desc="Line address for this request";
   Addr PhysicalAddress,   desc="Physical address for this request";
   // MYSTUFF
-  Addr Alias;
+  std::string accessName;
+  Addr alias;
   // FFUTSYM
   RubyRequestType Type,      desc="Type of request (LD, ST, etc)";
   Addr ProgramCounter,    desc="Program counter of the instruction that caused the miss";

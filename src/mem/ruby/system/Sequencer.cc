@@ -630,7 +630,8 @@ Sequencer::processReadCallback(SequencerRequest &seq_req,
         (seq_req.m_type != RubyRequestType_IFETCH) &&
         (seq_req.m_type != RubyRequestType_REPLACEMENT) &&
         // MYSTUFF
-        (seq_req.m_type != RubyRequestType_LDIND)) {
+        (seq_req.m_type != RubyRequestType_LDIND) &&
+        (seq_req.m_type != RubyRequestType_STIND)) {
         // FFUTSYM
         // Write request: reissue request to the cache hierarchy
         issueRequest(seq_req.pkt, seq_req.m_second_type);
@@ -675,7 +676,8 @@ Sequencer::readCallback(Addr address, DataBlock& data,
                    (seq_req.m_type == RubyRequestType_Load_Linked) ||
                    (seq_req.m_type == RubyRequestType_IFETCH) ||
                    // MYSTUFF
-                   (seq_req.m_type == RubyRequestType_LDIND));
+                   (seq_req.m_type == RubyRequestType_LDIND) ||
+                   (seq_req.m_type == RubyRequestType_STIND));
                    // FFUTSYM
         }
         if (ruby_request) {
@@ -1385,10 +1387,6 @@ Sequencer::makeRequest(PacketPtr pkt)
                     "addr 0x%x in m_IndirectRequestTable\n",
                     pkt->getAddr());
 
-            // MYSTUFF
-            handleIndExit(pkt);
-            // FFUTSYM
-
             return RequestStatus_Issued;
         }
     }
@@ -1399,6 +1397,19 @@ Sequencer::makeRequest(PacketPtr pkt)
     // It is OK to receive RequestStatus_Aliased, it can be considered Issued
     if (status != RequestStatus_Ready && status != RequestStatus_Aliased)
         return status;
+
+    // Log VA→PA mapping for indirect accesses (for trace analysis)
+    if (primary_type == RubyRequestType_LDIND ||
+        primary_type == RubyRequestType_STIND) {
+        DPRINTF(IndirectAccess, "SEQ: va=%#x pa=%#x line_pa=%#x type=%s "
+                "aliased=%d\n",
+                pkt->req->hasVaddr() ? pkt->req->getVaddr() : 0,
+                pkt->getAddr(),
+                makeLineAddress(pkt->getAddr()),
+                primary_type == RubyRequestType_LDIND ? "LDIND" : "STIND",
+                status == RequestStatus_Aliased ? 1 : 0);
+    }
+
     // non-aliased with any existing request in the request table, just issue
     // to the cache
     if (status != RequestStatus_Aliased)
@@ -1531,6 +1542,7 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
     // MYSTUFF
     RequestPtr request = msg->getRequestPtr();
     assert(request == pkt->req);
+    std::string access_name = "";
     if (m_sequencer_type == SequencerType::Data) {
         std::optional<std::string> label = labelCache->lookup(request->getPaddr());
         std::shared_ptr<MemAccessName> from_cpu = request->getExtension<MemAccessName>();
@@ -1539,6 +1551,7 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
             if (from_cpu != nullptr && from_cpu->name() != label.value()) {
                 // NOTE: Warn only once due to performance reasons.
                 // It helps to know that such cases exist though.
+                access_name = from_cpu->name();
                 warn_once("%s: %s: Label mismatch between label cache (%s) and"
                      " from CPU (%s) for addr %#lx. This does not influence the"
                      " current access name. However, it does influence those "
@@ -1547,9 +1560,7 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
             }
 
             if (from_cpu == nullptr) {
-                std::shared_ptr<MemAccessName> mem_access_name =
-                    std::make_shared<MemAccessName>(label.value());
-                request->setExtension<MemAccessName>(mem_access_name);
+                access_name = label.value();
             }
         }
 
@@ -1559,10 +1570,15 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
                     __func__, from_cpu->name(), request->getPaddr());
             labelCache->onFirstTouch(from_cpu->name(), request->getPaddr());
         }
+
+        if (from_cpu != nullptr) {
+            request->removeExtension<MemAccessName>();
+        }
     }
+    msg->m_accessName = access_name;
     auto iaa = pkt->req->getExtension<IndirectAccessAlias>();
     if (iaa) {
-        msg->m_Alias = iaa->alias();
+        msg->m_alias = iaa->alias();
     }
     // FFUTSYM
 

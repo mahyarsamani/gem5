@@ -336,18 +336,6 @@ isInvalid(MachineID m_id)
     return !m_id.isValid();
 }
 
-inline std::string
-getMemAccessName(RequestPtr req)
-{
-    std::shared_ptr<MemAccessName> mem_access_name = req->getExtension<MemAccessName>();
-    if (mem_access_name != nullptr) {
-        return mem_access_name->name();
-        req->removeExtension<MemAccessName>();
-    } else {
-        return "";
-    }
-}
-
 inline Addr
 getAddr(RequestPtr req)
 {
@@ -358,6 +346,14 @@ inline int
 getSize(RequestPtr req)
 {
     return req->getSize();
+}
+
+inline bool
+isDepReadReq(RequestPtr req)
+{
+    auto dat = req->getExtension<DepAccessType>();
+    panic_if(!dat, "isDepReadReq: request has no DepAccessType extension.");
+    return dat->isRead();
 }
 
 // FFUTSYM

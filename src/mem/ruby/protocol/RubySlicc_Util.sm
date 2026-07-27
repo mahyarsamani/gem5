@@ -63,8 +63,9 @@ structure(BoolVec, external="yes") {
 int countBoolVec(BoolVec bVec);
 RequestorID getRequestorID(RequestPtr req);
 // MYSTUFF:
+bool isInvalid(MachineID mid);
+
 Addr getAddr(RequestPtr req);
 int getSize(RequestPtr req);
-bool isInvalid(MachineID mid);
-std::string getMemAccessName(RequestPtr req);
+bool isDepReadReq(RequestPtr req);
 // FFUTSYM:

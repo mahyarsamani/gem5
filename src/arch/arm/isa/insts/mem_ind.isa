@@ -110,6 +110,8 @@ let {{
                           "w" if size_data  == 4 else "x")
             s_idx_str  = "w" if size_index == 4 else "x"
 
+            self.idx_suffix  = s_idx_str
+            self.data_suffix = s_data_str
             self.Name = "LDIND" + s_data_str.upper() + "_" + s_idx_str.upper()
 
         def emit(self):
@@ -138,6 +140,8 @@ let {{
                     "wb_decl"         : None,
                     "pc_decl"         : None,
                     "is_ras_pop"      : "0",
+                    "idx_suffix"      : self.idx_suffix,
+                    "data_suffix"     : self.data_suffix,
                 },
                 ['IsLoad']
             )
@@ -162,6 +166,8 @@ let {{
                           "w" if size_data  == 4 else "x")
             s_idx_str  = "w" if size_index == 4 else "x"
 
+            self.idx_suffix  = s_idx_str
+            self.data_suffix = s_data_str
             self.Name = "STIND" + s_data_str.upper() + "_" + s_idx_str.upper()
 
         def emit(self):
@@ -188,6 +194,8 @@ let {{
                     "wb_decl"         : None,
                     "pc_decl"         : None,
                     "is_ras_pop"      : "0",
+                    "idx_suffix"      : self.idx_suffix,
+                    "data_suffix"     : self.data_suffix,
                 },
                 ['IsStore']
             )

@@ -45,6 +45,9 @@ bool disambiguated(Addr);
 void setAliasForAddr(Addr, Addr);
 Addr getAddr(Addr);
 
-RequestPtr getDependentReq(RequestPtr, DataBlock);
+RequestPtr getDependentReq(Addr, DataBlock);
+void extractExtensions(bool, Addr, Addr, RequestPtr);
+bool hasDependentWork(Addr);
+void clearExtensions(Addr);
 // FFUTSYM
 void dequeueMemRespQueue();

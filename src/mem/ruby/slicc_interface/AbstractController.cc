@@ -550,52 +550,82 @@ AbstractController::canOverride(std::string label, Addr address)
 }
 
 RequestPtr
-AbstractController::getDependentReq(RequestPtr &og_request, DataBlock &index_data)
+AbstractController::getDependentReq(Addr line_addr, DataBlock &index_data)
 {
-    int offset = getOffset(og_request->getPaddr());
-    int size   = og_request->getSize();   // = size_index (e.g. 4 for _w variant)
-    const uint8_t *raw = index_data.getData(offset, size);
-    DPRINTF(MSDebug, "%s: Generating dependent request from %s.\n",
-            __func__, index_data);
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end() || it->second.empty(),
+             "getDependentReq: no cached entries for line_addr %#x. "
+             "Ensure extractExtensions() was called when the TBE was "
+             "allocated.", line_addr);
+
+    // Pop the front entry.
+    CachedEntry entry = std::move(it->second.front());
+    it->second.erase(it->second.begin());
+
+    panic_if(!entry.dag, "getDependentReq: cached DependentAccessGen is null for "
+            "line_addr %#x offset %d.", line_addr, entry.offset);
+
+    // Use the index element size from the DAG, not the request size
+    // (which may be the full block size at higher cache levels).
+    size_t index_size = entry.dag->indexSize();
+    panic_if(index_size == 0, "getDependentReq: DAG has no indexSize set for line_addr %#x.", line_addr);
+
+    // Extract the index value from the DataBlock at the entry's offset.
+    const uint8_t *raw = index_data.getData(entry.offset, index_size);
+    DPRINTF(MSDebug, "%s: Generating dependent request from %s.\n", __func__, index_data);
 
     uint64_t index_value = 0;
-    switch (size) {
+    switch (index_size) {
         case 4: index_value = *reinterpret_cast<const uint32_t *>(raw); break;
         case 8: index_value = *reinterpret_cast<const uint64_t *>(raw); break;
         default:
-            panic("getDependentReq: unsupported index element size %u bytes",
-                  size);
+            panic("getDependentReq: unsupported index element size %u bytes", index_size);
     }
-    DPRINTF(MSDebug, "%s: offset=%d size=%d index_value=%" PRIu64 "\n",
-            __func__, offset, size, index_value);
+    DPRINTF(MSDebug, "%s: line_addr=%#x offset=%d index_size=%d index_value=%" PRIu64
+            " read=%d\n", __func__, line_addr, entry.offset, index_size, index_value, entry.read);
 
-    // Generate the Phase 2 (data-fetch) request via the ISA-supplied generator.
-    RequestPtr phase2 =
-        og_request->getExtension<DependentAccessGen>()
-                  ->genNextRequest(og_request, index_value);
+    // Generate the Phase 2 (data-fetch) request using the cached DAG.
+    RequestPtr phase2 = entry.dag->genNextRequest(index_value);
 
-    // Fill in the index value on the IAR extension that the CPU attached to
-    // og_request (Phase 1). This is the "blank" the cache fills in:
-    //   _destReg and _seqNum were set by the CPU at initiateAcc time.
-    //   _indexValue is now known — we just read it from the DataBlock.
-    auto iar = og_request->getExtension<IndependentAccessResp>();
-    assert(iar != nullptr);
-    iar->setIndexValue(index_value);
-
-    // Copy all relevant extensions from Phase 1 to Phase 2 so they are not lost.
-    phase2->setExtension<IndependentAccessResp>(iar);
-
-    if (auto iaa = og_request->getExtension<IndirectAccessAlias>())
-        phase2->setExtension<IndirectAccessAlias>(iaa);
-    if (auto dag = og_request->getExtension<DependentAccessGen>())
-        phase2->setExtension<DependentAccessGen>(dag);
-    if (auto name = og_request->getExtension<MemAccessName>())
-        phase2->setExtension<MemAccessName>(name);
-
-    assert(og_request->getExtension<IndAccProd>() == nullptr);
-    assert(og_request->getExtension<IndAccCons>() == nullptr);
+    // Attach DepAccessType so .sm files can determine ReadValue vs WriteValue.
+    auto dat = std::make_shared<DepAccessType>(entry.read);
+    phase2->setExtension<DepAccessType>(dat);
 
     return phase2;
+}
+
+void
+AbstractController::extractExtensions(bool read, Addr line_addr, Addr acc_addr, RequestPtr req)
+{
+    CachedEntry entry;
+    entry.read = read;
+    entry.offset = getOffset(acc_addr);
+
+    if (auto dag = req->getExtension<DependentAccessGen>()) {
+        // Deep copy so we're independent of the original Request's lifetime.
+        auto cloned = dag->clone();
+        entry.dag = std::shared_ptr<DependentAccessGen>(
+            static_cast<DependentAccessGen*>(cloned.release()));
+    }
+
+    DPRINTF(MSDebug, "%s: Cached entry for line_addr %#x (read=%d, offset=%d, dag=%p)\n",
+            __func__, line_addr, entry.read, entry.offset, entry.dag.get());
+
+    m_cachedEntries[line_addr].push_back(std::move(entry));
+}
+
+bool
+AbstractController::hasDependentWork(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    return it != m_cachedEntries.end() && !it->second.empty();
+}
+
+void
+AbstractController::clearExtensions(Addr line_addr)
+{
+    DPRINTF(MSDebug, "%s: Clearing cached entries for line_addr %#x\n", __func__, line_addr);
+    m_cachedEntries.erase(line_addr);
 }
 // FFUTSYM
 

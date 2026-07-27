@@ -436,6 +436,19 @@ void initializeTBE(TBE tbe, Addr addr, int storSlot) {
   tbe.is_stale := false;
 }
 
+// MYSTUFF
+bool isIndirect(CHIRequestType type, CHIRequestType second_type) {
+    return ((type == CHIRequestType:ReadIndirect) ||
+            (type == CHIRequestType:WriteIndirect) ||
+            (type == CHIRequestType:ReadValue) ||
+            (type == CHIRequestType:WriteValue)
+    ) || ((second_type == CHIRequestType:ReadIndirect) ||
+        (second_type == CHIRequestType:WriteIndirect) ||
+        (second_type == CHIRequestType:ReadValue) ||
+        (second_type == CHIRequestType:WriteValue)
+    );
+}
+// FFUTSYM
 
 TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes" {
   // We must have reserved resources for this allocation
@@ -492,6 +505,13 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   tbe.indirect_unit_id := in_msg.indirect_unit_id;
   tbe.value_unit_id := in_msg.value_unit_id;
   tbe.gather_unit_id := in_msg.gather_unit_id;
+
+  // Extract and cache Request extensions (DependentAccessGen, etc.)
+  // so getDependentReq can use them after seqReq may be freed.
+  if (gather_unit && tbe.isSeqReqValid && isIndirect(tbe.reqType, tbe.secondType)) {
+    bool is_read := (tbe.secondType == CHIRequestType:ReadIndirect);
+    extractExtensions(is_read, addr, tbe.accAddr, tbe.seqReq);
+  }
 
   DPRINTF(Usefulness, "Setting access_name for tbe for addr: %#lx from %s to %s.\n", addr, tbe.access_name, in_msg.access_name);
   tbe.access_name := in_msg.access_name;
@@ -879,7 +899,7 @@ bool needCacheEntry(CHIRequestType req_type, CHIRequestType second_type,
   // Apply HOV specific cache allocation criteria
   if (second_type != CHIRequestType:null) {
     // Positive whitelist: Only allow requests that actively fetch or write data
-    // to allocate blocks based on indirect criteria. This prevents crashes with 
+    // to allocate blocks based on indirect criteria. This prevents crashes with
     // dataless requests like CleanUnique or CMOs.
     bool is_data_request := (req_type == CHIRequestType:ReadShared) ||
                             (req_type == CHIRequestType:ReadNotSharedDirty) ||
@@ -895,11 +915,9 @@ bool needCacheEntry(CHIRequestType req_type, CHIRequestType second_type,
       // array cache lines when they see ReadValue/WriteValue. The per-level
       // alloc_for_read_value/alloc_for_write_value booleans (set in config)
       // control which levels actually allocate.
-      bool value_unit_criterion := (((alloc_for_read_value && second_type == CHIRequestType:ReadValue) ||
-                                      (alloc_for_write_value && second_type == CHIRequestType:WriteValue)));
-      if (gather_unit_criterion || value_unit_criterion) {
-          return true;
-      }
+      bool value_unit_criterion := ((alloc_for_read_value && second_type == CHIRequestType:ReadValue) ||
+                                      (alloc_for_write_value && second_type == CHIRequestType:WriteValue));
+      return gather_unit_criterion || value_unit_criterion;
     }
   }
   // FFUTSYM
@@ -1069,6 +1087,10 @@ void copyCacheAndDirTBEs(TBE src, TBE dst) {
 void deallocateReqTBE(TBE tbe) {
   assert(is_valid(tbe));
   assert(tbe.is_req_tbe);
+  // Clear any cached Request extensions for this TBE's line address.
+  if (gather_unit) {
+      clearExtensions(tbe.addr);
+  }
   storTBEs.removeEntryFromSlot(tbe.storSlot);
   TBEs.deallocate(tbe.addr);
 }
@@ -1399,10 +1421,6 @@ Event reqToEvent(CHIRequestType type, bool is_prefetch) {
     } else {
       return Event:AtomicNoReturn;
     }
-  } else if (type == CHIRequestType:ReadIndirect) {
-    return Event:FwdIndirect;
-  } else if (type == CHIRequestType:WriteIndirect) {
-    return Event:FwdIndirect;
   } else {
     error("Invalid CHIRequestType");
   }
@@ -1658,7 +1676,7 @@ void replicateTBE(TBE src, TBE dst) {
   dst.is_remote_pf := src.is_remote_pf;
 
   dst.atomic_op := src.atomic_op;
-dst.atomic_to_be_done := src.atomic_to_be_done;
+  dst.atomic_to_be_done := src.atomic_to_be_done;
   dst.atomic_to_be_wb := src.atomic_to_be_wb;
 
   dst.seqReq := src.seqReq;
@@ -1738,6 +1756,8 @@ dst.atomic_to_be_done := src.atomic_to_be_done;
 
 CHIRequestType manipulateType(CHIRequestMsg msg)
 {
+    // NOTE: Take the state of the line as an argument and if stable
+    // we should convert the notifyindreadidx/notifyindwriteidx to a load.
     if (indirect_unit && msg.type == CHIRequestType:ReadIndirect) {
         return CHIRequestType:Load;
     } else if (indirect_unit && msg.type == CHIRequestType:WriteIndirect) {
@@ -1753,6 +1773,8 @@ CHIRequestType manipulateType(CHIRequestMsg msg)
 
 CHIRequestType manipulateSecondType(CHIRequestMsg msg)
 {
+     // NOTE: Take the state of the line as an argument and if stable
+    // we should convert the notifyindreadidx/notifyindwriteidx to a read/writeindirect respectively.
     if (indirect_unit && msg.type == CHIRequestType:ReadIndirect) {
         return CHIRequestType:ReadIndirect;
     } else if (indirect_unit && msg.type == CHIRequestType:WriteIndirect) {
@@ -1793,18 +1815,6 @@ void indirectDependentBoilerPlate(CHIRequestMsg &out_msg)
     out_msg.secondType := CHIRequestType:null;
 }
 
-bool isIndirect(CHIRequestType type, CHIRequestType second_type) {
-    return ((type == CHIRequestType:ReadIndirect) ||
-            (type == CHIRequestType:WriteIndirect) ||
-            (type == CHIRequestType:ReadValue) ||
-            (type == CHIRequestType:WriteValue)
-    ) || ((second_type == CHIRequestType:ReadIndirect) ||
-        (second_type == CHIRequestType:WriteIndirect) ||
-        (second_type == CHIRequestType:ReadValue) ||
-        (second_type == CHIRequestType:WriteValue)
-    );
-}
-
 bool shouldNotifyPrefetcher(CHIRequestType type, CHIRequestType second_type) {
     if (isIndirect(type, second_type)) {
         // Gather unit: index accesses are sequential — useful for prefetcher training
@@ -1829,4 +1839,28 @@ void fillInMsgFromReq(CHIRequestMsg &out_msg, RequestPtr req)
     out_msg.accSize := getSize(req);
 }
 
+bool isStable(State state)
+{
+    return (state != State:BUSY_BLKD) && (state != State:BUSY_INTR);
+}
+
+bool needEvictIdxLine(CacheEntry cache_entry, DirEntry dir_entry, TBE tbe, CHIRequestType type, CHIRequestType second_type)
+{
+    // NOTE: We may want this to include ReadOnce.
+    // This is to ensure the eviction cascade downstream
+    // until it reaches the gather unit.
+    if (((type == CHIRequestType:Load) ||(type == CHIRequestType:ReadOnce)) &&
+        ((second_type == CHIRequestType:ReadIndirect) || (second_type == CHIRequestType:WriteIndirect))) {
+        if (is_valid(tbe)) {
+            return isStable(tbe.state) && isInvalid(tbe.gather_unit_id);
+        }
+        if (is_valid(cache_entry)) {
+            return isStable(cache_entry.state) && isInvalid(cache_entry.gather_unit_id);
+        }
+        if (is_valid(dir_entry)) {
+            return isStable(dir_entry.state) && isInvalid(dir_entry.gather_unit_id);
+        }
+    }
+    return false;
+}
 // FFUTSYM

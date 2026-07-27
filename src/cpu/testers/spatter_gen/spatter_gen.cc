@@ -357,149 +357,98 @@ SpatterGen::processNextGenEvent()
             nextGenEvent.sleep();
             break;
         }
-        if (accessMode == SpatterAccessMode::normal) {
-            // Now we know that AGU[i] is available and there is room
-            // in the requestBuffer to put the packet.
-            if (ultAccessOk(int_regs_now, fp_regs_now, curTick())) {
-                // occupy one fp register
-                fp_regs_now--;
-                fp_used_now++;
-                // make AGU busy for the next requestGenLatency cycles.
-                generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
+        // Now we know that AGU[i] is available and there is room
+        // in the requestBuffer to put the packet.
+        if (ultAccessOk(int_regs_now, fp_regs_now, curTick())) {
+            // occupy one fp register
+            fp_regs_now--;
+            fp_used_now++;
+            // make AGU busy for the next requestGenLatency cycles.
+            generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
 
-                // create a new packet to access
-                std::shared_ptr<SpatterAccess> spatter_access = receiveBuffer.front();
-                // NOTE: FUTUREME: SpatterAccess::nextPacketAs* adds the
-                // SpatterAccess object as an Extension to the Request in
-                // the Packet that it creates.
-                PacketPtr pkt = spatter_access->nextPacketAsNormal();
+            // create a new packet to access
+            std::shared_ptr<SpatterAccess> spatter_access = receiveBuffer.front();
+            // NOTE: FUTUREME: SpatterAccess::nextPacket adds the
+            // SpatterAccess object as an Extension to the Request in
+            // the Packet that it creates.
+            PacketPtr pkt = spatter_access->nextPacket(accessMode);
 
-                // push to requestBuffer
-                requestBuffer.push(pkt, curTick());
+            // push to requestBuffer
+            requestBuffer.push(pkt, curTick());
+            DPRINTF(
+                SpatterGen,
+                "%s: Pushed pkt: %s to requestBuffer.\n",
+                __func__, pkt->print()
+            );
+
+            // now deallocate resources for reading the index
+            int_used_now--;
+            receiveBuffer.pop();
+        } else if (interAccessOk(int_regs_now, fp_regs_now, curTick())) {
+            // occupy one int register
+            int_regs_now--;
+            int_used_now++;
+            // make AGU busy for the next requestGenLatency cycles.
+            generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
+
+            // create a new packet to access
+            std::shared_ptr<SpatterAccess> spatter_access = receiveBuffer.front();
+            PacketPtr pkt = spatter_access->nextPacket(accessMode);
+
+            // push to requestBuffer
+            requestBuffer.push(pkt, curTick());
+            DPRINTF(
+                SpatterGen,
+                "%s: Pushed pkt: %s to requestBuffer.\n",
+                __func__, pkt->print()
+            );
+
+            // now deallocate resources for reading the index
+            int_used_now--;
+            receiveBuffer.pop();
+        } else if (initAccessOk(int_regs_now, fp_regs_now, curTick())) {
+            // occupy one int register
+            int_regs_now--;
+            int_used_now++;
+            generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
+
+            SpatterKernel& front = kernels.front();
+            std::shared_ptr<SpatterAccess> spatter_access = front.nextSpatterAccess();
+            PacketPtr pkt = spatter_access->nextPacket(accessMode);
+
+            requestBuffer.push(pkt, curTick());
+            DPRINTF(
+                SpatterGen,
+                "%s: Pushed pkt: %s to requestBuffer.\n",
+                __func__, pkt->print()
+            );
+
+            if (front.done()) {
                 DPRINTF(
-                    SpatterGen,
-                    "%s: Pushed pkt: %s to requestBuffer.\n",
-                    __func__, pkt->print()
+                    SpatterKernel,
+                    "%s: Done with kernel %d type: %s.\n",
+                    __func__, front.id(),
+                    SpatterKernelTypeStrings[front.type()]
                 );
-
-                // now deallocate resources for reading the index
-                int_used_now--;
-                receiveBuffer.pop();
-            } else if (interAccessOk(int_regs_now, fp_regs_now, curTick())) {
-                // occupy one int register
-                int_regs_now--;
-                int_used_now++;
-                // make AGU busy for the next requestGenLatency cycles.
-                generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
-
-                // create a new packet to access
-                std::shared_ptr<SpatterAccess> spatter_access = receiveBuffer.front();
-                PacketPtr pkt = spatter_access->nextPacketAsNormal();
-
-                // push to requestBuffer
-                requestBuffer.push(pkt, curTick());
-                DPRINTF(
-                    SpatterGen,
-                    "%s: Pushed pkt: %s to requestBuffer.\n",
-                    __func__, pkt->print()
-                );
-
-                // now deallocate resources for reading the index
-                int_used_now--;
-                receiveBuffer.pop();
-            } else if (initAccessOk(int_regs_now, fp_regs_now, curTick())) {
-                // occupy one int register
-                int_regs_now--;
-                int_used_now++;
-                generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
-
-                SpatterKernel& front = kernels.front();
-                std::shared_ptr<SpatterAccess> spatter_access = front.nextSpatterAccess();
-                PacketPtr pkt = spatter_access->nextPacketAsNormal();
-
-                requestBuffer.push(pkt, curTick());
-                DPRINTF(
-                    SpatterGen,
-                    "%s: Pushed pkt: %s to requestBuffer.\n",
-                    __func__, pkt->print()
-                );
-
-                if (front.done()) {
-                    DPRINTF(
-                        SpatterKernel,
-                        "%s: Done with kernel %d type: %s.\n",
-                        __func__, front.id(),
-                        SpatterKernelTypeStrings[front.type()]
-                    );
-                    kernels.pop();
-                    // If we're processing synchronously we now have to stop
-                    // making intial accesses and wait everyone to receive
-                    // all expected responses.
-                    if (processingMode == SpatterProcessingMode::synchronous) {
-                        state = SpatterGenState::DRAINING;
-                    }
+                kernels.pop();
+                // If we're processing synchronously we now have to stop
+                // making intial accesses and wait everyone to receive
+                // all expected responses.
+                if (processingMode == SpatterProcessingMode::synchronous) {
+                    state = SpatterGenState::DRAINING;
                 }
-            } else {
-                DPRINTF(
-                    SpatterGen,
-                    "%s: Nothing more could be done this cycle.\n", __func__
-                    );
-                DPRINTF(SpatterGen, "%s: Here is h/w status report: "
-                    "{KERNELS_REMAIN: %d, INDEXES_REMAIN: %d, INT_REG_USED: %d, "
-                    "FP_REG_USED: %d, REQ_BUFF_SIZE: %d}.\n",
-                    __func__, kernels.size(), receiveBuffer.size(),
-                    intRegUsed, fpRegUsed, requestBuffer.size());
-                break;
-            }
-        } else if (accessMode == SpatterAccessMode::indirect) {
-            // We're in SpatterAccessMode::indirect mode.
-            // every access is ultimate access.
-            if (indirAccessOk(int_regs_now, fp_regs_now, curTick())) {
-                // occupy one fp register
-                fp_regs_now--;
-                fp_used_now++;
-                generatorBusyUntil[i] = clockEdge(Cycles(requestGenLatency));
-
-                SpatterKernel& front = kernels.front();
-                std::shared_ptr<SpatterAccess> spatter_access = front.nextSpatterAccess();
-                PacketPtr pkt = spatter_access->nextPacketAsInd();
-
-                requestBuffer.push(pkt, curTick());
-                DPRINTF(
-                    SpatterGen,
-                    "%s: Pushed pkt: %s to requestBuffer.\n",
-                    __func__, pkt->print()
-                );
-
-                if (front.done()) {
-                    DPRINTF(
-                        SpatterKernel,
-                        "%s: Done with kernel %d type: %s.\n",
-                        __func__, front.id(),
-                        SpatterKernelTypeStrings[front.type()]
-                    );
-                    kernels.pop();
-                    // If we're processing synchronously we now have to stop
-                    // making intial accesses and wait everyone to receive
-                    // all expected responses.
-                    if (processingMode == SpatterProcessingMode::synchronous) {
-                        state = SpatterGenState::DRAINING;
-                    }
-                }
-            } else {
-                DPRINTF(
-                    SpatterGen,
-                    "%s: Nothing more could be done this cycle.\n", __func__
-                    );
-                DPRINTF(SpatterGen, "%s: Here is h/w status report: "
-                    "{KERNELS_REMAIN: %d, INDEXES_REMAIN: %d, INT_REG_USED: %d, "
-                    "FP_REG_USED: %d, REQ_BUFF_SIZE: %d}.\n",
-                    __func__, kernels.size(), receiveBuffer.size(),
-                    intRegUsed, fpRegUsed, requestBuffer.size());
-                break;
             }
         } else {
-            panic("Unknown access mode.");
+            DPRINTF(
+                SpatterGen,
+                "%s: Nothing more could be done this cycle.\n", __func__
+                );
+            DPRINTF(SpatterGen, "%s: Here is h/w status report: "
+                "{KERNELS_REMAIN: %d, INDEXES_REMAIN: %d, INT_REG_USED: %d, "
+                "FP_REG_USED: %d, REQ_BUFF_SIZE: %d}.\n",
+                __func__, kernels.size(), receiveBuffer.size(),
+                intRegUsed, fpRegUsed, requestBuffer.size());
+            break;
         }
     }
 

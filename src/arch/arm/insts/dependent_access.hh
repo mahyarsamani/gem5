@@ -6,7 +6,6 @@
 #include <memory>
 
 #include "base/types.hh"
-#include "cpu/inst_seq.hh"
 #include "mem/request.hh"
 
 namespace gem5
@@ -27,34 +26,17 @@ class ARMDependentAccessGen: public DependentAccessGen
 {
   private:
     Addr _baseAddr;
-    Addr _size;
 
   public:
-    ARMDependentAccessGen(Addr base_addr, Addr size);
+    ARMDependentAccessGen(size_t index_size, size_t data_size, Addr base_addr);
     virtual std::unique_ptr<ExtensionBase> clone() const override;
-    virtual RequestPtr genNextRequest(RequestPtr og_req, uint64_t index_value) override;
+    virtual RequestPtr genNextRequest(uint64_t index_value) override;
 
     Addr getBaseAddr() const { return _baseAddr; }
-};
-
-class ARMIndependentAccessResp: public IndependentAccessResp
-{
-  private:
-    RegIndex _destReg;
-    InstSeqNum _seqNum;
-
-  public:
-    ARMIndependentAccessResp(RegIndex dest_reg);
-
-    std::unique_ptr<ExtensionBase> clone() const override;
-
-    RegIndex destReg() const;
-
-    InstSeqNum seqNum() const;
-    void setSeqNum(InstSeqNum seq_num);
 };
 
 } // namespace ArmISA
 } // namespace gem5
 
 #endif // __ARCH_ARM_INSTS_DEPENDENT_ACCESS_HH__
+

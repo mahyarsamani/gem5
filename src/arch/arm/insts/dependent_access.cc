@@ -10,30 +10,28 @@ namespace gem5
 namespace ArmISA
 {
 
-ARMDependentAccessGen::ARMDependentAccessGen(Addr base_addr, Addr size)
-    : DependentAccessGen(), _baseAddr(base_addr), _size(size)
+ARMDependentAccessGen::ARMDependentAccessGen(size_t index_size, size_t data_size, Addr base_addr):
+    DependentAccessGen(index_size, data_size), _baseAddr(base_addr)
 {}
-
-
-
-
 
 std::unique_ptr<ExtensionBase>
 ARMDependentAccessGen::clone() const
 {
-    auto copy = std::make_unique<ARMDependentAccessGen>(_baseAddr, _size);
+    auto copy = std::make_unique<ARMDependentAccessGen>(_indexSize, _dataSize, _baseAddr);
     if (hasData()) {
-        copy->setStoreData(getStoreData(), getStoreDataSize());
+        copy->setStoreData(getStoreData(), _dataSize);
     }
     // Preserve the translator callback so the clone can also call
     // genNextRequest without needing setTranslator() again.
     if (hasTranslator())
         copy->setTranslator(_translateFn);
+    // Preserve requestorId.
+    copy->setRequestorId(_requestorId);
     return copy;
 }
 
 RequestPtr
-ARMDependentAccessGen::genNextRequest(RequestPtr og_req, uint64_t index_value)
+ARMDependentAccessGen::genNextRequest(uint64_t index_value)
 {
     panic_if(!hasTranslator(),
         "ARMDependentAccessGen::genNextRequest called without a translator. "
@@ -41,45 +39,13 @@ ARMDependentAccessGen::genNextRequest(RequestPtr og_req, uint64_t index_value)
         "Phase 1 address translation.");
 
     // Compute the virtual address of the gather target element.
-    Addr value_vaddr = _baseAddr + (index_value * _size);
+    Addr value_vaddr = _baseAddr + (index_value * _dataSize);
 
     // Translate VA -> PA via the callback set at instruction execute time.
     Addr value_paddr = _translateFn(value_vaddr);
 
-    // Build a physical-address Request so Ruby can use it directly.
-    return std::make_shared<Request>(
-        value_paddr, _size, og_req->getFlags(), og_req->requestorId());
-}
-
-ARMIndependentAccessResp::ARMIndependentAccessResp(RegIndex dest_reg)
-    : IndependentAccessResp(), _destReg(dest_reg), _seqNum(-1)
-{}
-
-std::unique_ptr<ExtensionBase>
-ARMIndependentAccessResp::clone() const
-{
-    auto ret = std::make_unique<ARMIndependentAccessResp>(_destReg);
-    ret->setSeqNum(_seqNum);
-    ret->setIndexValue(getIndexValue());
-    return ret;
-}
-
-RegIndex
-ARMIndependentAccessResp::destReg() const
-{
-    return _destReg;
-}
-
-InstSeqNum
-ARMIndependentAccessResp::seqNum() const
-{
-    return _seqNum;
-}
-
-void
-ARMIndependentAccessResp::setSeqNum(InstSeqNum seq_num)
-{
-    _seqNum = seq_num;
+    // Build a physical-address Request.
+    return std::make_shared<Request>(value_paddr, _dataSize, 0, _requestorId);
 }
 
 } // namespace ArmISA
