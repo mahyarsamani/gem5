@@ -4320,40 +4320,58 @@ action(Evict_IdxLine,
     stall_and_wait(reqRdyPort, address);
 }
 
-action(Initiate_Dependent_Requests, desc="Issue one dependent request from cached entries")
+action(Trigger_IDR_Or_Dealloc,
+       desc="Push FinalIDR if dependent work exists, else push FinalDealloc")
 {
     if (gather_unit && hasDependentWork(address)) {
-        enqueue(reqOutPort, CHIRequestMsg, request_latency) {
-            indirectDependentBoilerPlate(out_msg);
-            RequestPtr depReq := getDependentReq(address, cache_entry.DataBlk);
-            fillInMsgFromReq(out_msg, depReq);
+        tbe.actions.push(Event:FinalIDR);
+    } else {
+        tbe.actions.push(Event:FinalDealloc);
+    }
+}
 
-            if (isDepReadReq(depReq)) {
-                out_msg.type := CHIRequestType:ReadValue;
-            } else {
-                out_msg.type := CHIRequestType:WriteValue;
-            }
+action(Initiate_One_Dependent_Request,
+       desc="Issue one Phase 2 request, then push FinalIDR or FinalDealloc")
+{
+    assert(gather_unit);
+    assert(hasDependentWork(address));
 
-            out_msg.indirect_unit_id := tbe.indirect_unit_id;
-            out_msg.value_unit_id := tbe.value_unit_id;
-            out_msg.gather_unit_id := tbe.gather_unit_id;
-            out_msg.alias := tbe.alias;
+    enqueue(reqOutPort, CHIRequestMsg, request_latency) {
+        indirectDependentBoilerPlate(out_msg);
+        RequestPtr depReq := getDependentReq(address, cache_entry.DataBlk);
+        fillInMsgFromReq(out_msg, depReq);
 
-            DPRINTF(IndirectAccess,
-                "IDR: index_line=%#x -> data_addr=%#x alias=%d isRead=%d\n",
-                address, out_msg.addr, tbe.alias, isDepReadReq(depReq)
-            );
-
-            if (isInvalid(tbe.indirect_unit_id)) {
-                DPRINTF(IndirectAccess, "Indirect unit id not set yet. Sending downstream.\n");
-                out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
-            } else {
-                DPRINTF(IndirectAccess, "Indirect unit id set. Sending upstream.\n");
-                out_msg.Destination.add(tbe.indirect_unit_id);
-            }
+        if (isDepReadReq(depReq)) {
+            out_msg.type := CHIRequestType:ReadValue;
+        } else {
+            out_msg.type := CHIRequestType:WriteValue;
         }
-        // TODO: If hasDependentWork(address) still true, re-trigger this
-        // action via the TBE's transition queue to issue with delay.
+
+        out_msg.indirect_unit_id := tbe.indirect_unit_id;
+        out_msg.value_unit_id := tbe.value_unit_id;
+        out_msg.gather_unit_id := tbe.gather_unit_id;
+        out_msg.alias := tbe.alias;
+
+        DPRINTF(IndirectAccess,
+            "IDR: index_line=%#x -> data_addr=%#x alias=%d isRead=%d\n",
+            address, out_msg.addr, tbe.alias, isDepReadReq(depReq)
+        );
+
+        if (isInvalid(tbe.indirect_unit_id)) {
+            DPRINTF(IndirectAccess, "Indirect unit id not set yet. Sending downstream.\n");
+            out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
+        } else {
+            DPRINTF(IndirectAccess, "Indirect unit id set. Sending upstream.\n");
+            out_msg.Destination.add(tbe.indirect_unit_id);
+        }
+    }
+
+    // Self-chain: more work → FinalIDR, done → FinalDealloc
+    if (hasDependentWork(address)) {
+        tbe.actions.push(Event:FinalIDR);
+    } else {
+        tbe.actions.push(Event:FinalDealloc);
     }
 }
 // FFUTSYM
+

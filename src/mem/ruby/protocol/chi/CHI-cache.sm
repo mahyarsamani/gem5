@@ -581,6 +581,8 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     // MYSTUFF
     EvictIdxLine, desc="Evict a Line holding index elements in a cache upstream to gather unit.";
+    FinalIDR, desc="Issue one dependent request during finalization";
+    FinalDealloc, desc="Deallocate TBE and transition to final stable state";
     // FFUTSYM
     // This is triggered once a transaction doesn't have
     // any queued action and is not expecting responses/data. The transaction
