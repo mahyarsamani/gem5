@@ -1826,7 +1826,17 @@ transition(DvmExtOp_Finished, Final, I) {
 // the gather_unit. Now, because the eviction cascades, we will
 // never have the block in a state where the line is cached upstream.
 // Therefore, no need to account for .*_R.* states.
-transition({SC, UC, SD, UD}, EvictIdxLine) {
-    Evict_IdxLine;
+// transition({BUSY_BLKD}, PostEvictIdxLine) {
+//     Evict_IdxLine;
+// }
+
+
+transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD,
+            UC_RSC, UC_RU, UD_RU, UD_RSD, UD_RSC}, UpdateDAG, BUSY_BLKD) {
+    Initiate_Request;
+    Extract_Extensions;
+    Pop_ReqRdyQueue;
+    ProcessNextState;
 }
+
 // FFUTSYM

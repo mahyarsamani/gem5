@@ -436,20 +436,6 @@ void initializeTBE(TBE tbe, Addr addr, int storSlot) {
   tbe.is_stale := false;
 }
 
-// MYSTUFF
-bool isIndirect(CHIRequestType type, CHIRequestType second_type) {
-    return ((type == CHIRequestType:ReadIndirect) ||
-            (type == CHIRequestType:WriteIndirect) ||
-            (type == CHIRequestType:ReadValue) ||
-            (type == CHIRequestType:WriteValue)
-    ) || ((second_type == CHIRequestType:ReadIndirect) ||
-        (second_type == CHIRequestType:WriteIndirect) ||
-        (second_type == CHIRequestType:ReadValue) ||
-        (second_type == CHIRequestType:WriteValue)
-    );
-}
-// FFUTSYM
-
 TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes" {
   // We must have reserved resources for this allocation
   storTBEs.decrementReserved();
@@ -505,13 +491,6 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   tbe.indirect_unit_id := in_msg.indirect_unit_id;
   tbe.value_unit_id := in_msg.value_unit_id;
   tbe.gather_unit_id := in_msg.gather_unit_id;
-
-  // Extract and cache Request extensions (DependentAccessGen, etc.)
-  // so getDependentReq can use them after seqReq may be freed.
-  if (gather_unit && tbe.isSeqReqValid && isIndirect(tbe.reqType, tbe.secondType)) {
-    bool is_read := (tbe.secondType == CHIRequestType:ReadIndirect);
-    extractExtensions(is_read, addr, tbe.accAddr, tbe.seqReq);
-  }
 
   DPRINTF(Usefulness, "Setting access_name for tbe for addr: %#lx from %s to %s.\n", addr, tbe.access_name, in_msg.access_name);
   tbe.access_name := in_msg.access_name;
@@ -1421,6 +1400,10 @@ Event reqToEvent(CHIRequestType type, bool is_prefetch) {
     } else {
       return Event:AtomicNoReturn;
     }
+  } else if ((type == CHIRequestType:NotifyReadIndIdx) || (type == CHIRequestType:NotifyWriteIndIdx)) {
+    return Event:Fwd_NotifyIndIdx;
+  } else if (type == CHIRequestType:ProcessNotif) {
+    return Event:UpdateDAG;
   } else {
     error("Invalid CHIRequestType");
   }
@@ -1754,39 +1737,6 @@ void replicateTBE(TBE src, TBE dst) {
 
 }
 
-CHIRequestType manipulateType(CHIRequestMsg msg)
-{
-    // NOTE: Take the state of the line as an argument and if stable
-    // we should convert the notifyindreadidx/notifyindwriteidx to a load.
-    if (indirect_unit && msg.type == CHIRequestType:ReadIndirect) {
-        return CHIRequestType:Load;
-    } else if (indirect_unit && msg.type == CHIRequestType:WriteIndirect) {
-        return CHIRequestType:Load;
-    } else if (indirect_unit && msg.type == CHIRequestType:ReadValue) {
-        return CHIRequestType:Load;
-    } else if (indirect_unit && msg.type == CHIRequestType:WriteValue) {
-        return CHIRequestType:Store;
-    } else {
-        return msg.type;
-    }
-}
-
-CHIRequestType manipulateSecondType(CHIRequestMsg msg)
-{
-     // NOTE: Take the state of the line as an argument and if stable
-    // we should convert the notifyindreadidx/notifyindwriteidx to a read/writeindirect respectively.
-    if (indirect_unit && msg.type == CHIRequestType:ReadIndirect) {
-        return CHIRequestType:ReadIndirect;
-    } else if (indirect_unit && msg.type == CHIRequestType:WriteIndirect) {
-        return CHIRequestType:WriteIndirect;
-    } else if (indirect_unit && msg.type == CHIRequestType:ReadValue) {
-        return CHIRequestType:ReadValue;
-    } else if (indirect_unit && msg.type == CHIRequestType:WriteValue) {
-        return CHIRequestType:WriteValue;
-    } else {
-        return msg.secondType;
-    }
-}
 
 void indirectDependentBoilerPlate(CHIRequestMsg &out_msg)
 {
@@ -1815,19 +1765,42 @@ void indirectDependentBoilerPlate(CHIRequestMsg &out_msg)
     out_msg.secondType := CHIRequestType:null;
 }
 
-bool shouldNotifyPrefetcher(CHIRequestType type, CHIRequestType second_type) {
-    if (isIndirect(type, second_type)) {
-        // Gather unit: index accesses are sequential — useful for prefetcher training
-        if (gather_unit && ((second_type == CHIRequestType:ReadIndirect) ||
-                             (second_type == CHIRequestType:WriteIndirect))) {
-            return true;
-        }
-        // Two-uop model: Phase 2 (ReadValue) is a silent prefetch with irregular
-        // data addresses. Don't train the prefetcher — it would pollute its history.
-        // Value unit: also don't train since these are indirect data addresses.
-        return false;
+CHIRequestType figureOutNotifType(TBE tbe)
+{
+    if (tbe.secondType == CHIRequestType:ReadIndirect) {
+        return CHIRequestType:NotifyReadIndIdx;
     }
-    return true;
+    if (tbe.secondType == CHIRequestType:WriteIndirect) {
+        return CHIRequestType:NotifyWriteIndIdx;
+    }
+    error("The corresponding second from the TBE does not have a notif type.");
+}
+
+void indirectNotifBoilerPlate(CHIRequestMsg &out_msg)
+{
+    out_msg.requestor := machineID;
+
+    out_msg.dataToFwdRequestor := false;
+    // NOTE: I don't know what to set for this right now. Might be able to set
+    // this to true later if we have compaction. I am starting to believe that
+    // I really need a HOVHelper SimObject at this point.
+    // out_msg.fwdRequestor :=
+
+    out_msg.allowRetry := true;
+    out_msg.isSeqReqValid := false;
+    // NOTE: Defaults to nullptr.
+    // out_msg.seqReq := null;
+    out_msg.is_local_pf := false;
+    out_msg.is_remote_pf := false;
+
+    // NOTE: Maybe able to use this for access id;
+    // NOTE: Defaults to false;
+    // out_msg.usesTxnId := false;
+    // NOTE: Defaults to 0;
+    out_msg.txnId := max_outstanding_transactions;
+
+
+    out_msg.secondType := CHIRequestType:null;
 }
 
 void fillInMsgFromReq(CHIRequestMsg &out_msg, RequestPtr req)
@@ -1839,28 +1812,102 @@ void fillInMsgFromReq(CHIRequestMsg &out_msg, RequestPtr req)
     out_msg.accSize := getSize(req);
 }
 
-bool isStable(State state)
-{
-    return (state != State:BUSY_BLKD) && (state != State:BUSY_INTR);
+// DEPRECATED
+// bool isStable(State state)
+// {
+//     return (state != State:BUSY_BLKD) && (state != State:BUSY_INTR);
+// }
+// DEPRECATED
+// bool cachedHere_NotUpstream(State state)
+// {
+//     return (state == State:SC) || (state == State:SD) ||
+//         (state == State:UC) || (state == State:UD) || (state == State:UD_T);
+// }
+
+bool isIndirectIdx(CHIRequestType type, CHIRequestType second_type) {
+    return (
+        ((type == CHIRequestType:Load) || (type == CHIRequestType:ReadOnce)) &&
+        ((second_type == CHIRequestType:ReadIndirect) ||
+        (second_type == CHIRequestType:WriteIndirect))
+    );
 }
 
-bool needEvictIdxLine(CacheEntry cache_entry, DirEntry dir_entry, TBE tbe, CHIRequestType type, CHIRequestType second_type)
+bool isIndirectVal(CHIRequestType type, CHIRequestType second_type)
 {
-    // NOTE: We may want this to include ReadOnce.
-    // This is to ensure the eviction cascade downstream
-    // until it reaches the gather unit.
-    if (((type == CHIRequestType:Load) ||(type == CHIRequestType:ReadOnce)) &&
-        ((second_type == CHIRequestType:ReadIndirect) || (second_type == CHIRequestType:WriteIndirect))) {
-        if (is_valid(tbe)) {
-            return isStable(tbe.state) && isInvalid(tbe.gather_unit_id);
-        }
-        if (is_valid(cache_entry)) {
-            return isStable(cache_entry.state) && isInvalid(cache_entry.gather_unit_id);
-        }
-        if (is_valid(dir_entry)) {
-            return isStable(dir_entry.state) && isInvalid(dir_entry.gather_unit_id);
-        }
-    }
-    return false;
+    return (
+        (second_type == CHIRequestType:ReadValue) ||
+        (second_type == CHIRequestType:WriteValue)
+    );
 }
+
+bool isIndirectNotify(CHIRequestType type, CHIRequestType second_type)
+{
+    return (
+        (type == CHIRequestType:NotifyReadIndIdx) ||
+        (second_type == CHIRequestType:NotifyReadIndIdx) ||
+        (type == CHIRequestType:NotifyWriteIndIdx) ||
+        (second_type == CHIRequestType:NotifyWriteIndIdx)
+    );
+}
+
+bool isIndirect(CHIRequestType type, CHIRequestType second_type)
+{
+    return isIndirectIdx(type, second_type) || isIndirectVal(type, second_type);
+}
+
+CHIRequestType manipulateType(CHIRequestMsg msg)
+{
+    // NOTE: Take the state of the line as an argument and if stable
+    // we should convert the notifyindreadidx/notifyindwriteidx to a load.
+    if (indirect_unit && msg.type == CHIRequestType:ReadIndirect) {
+        return CHIRequestType:Load;
+    } else if (indirect_unit && msg.type == CHIRequestType:WriteIndirect) {
+        return CHIRequestType:Load;
+    } else if (indirect_unit && msg.type == CHIRequestType:ReadValue) {
+        return CHIRequestType:Load;
+    } else if (indirect_unit && msg.type == CHIRequestType:WriteValue) {
+        return CHIRequestType:Store;
+    } else if (gather_unit && isIndirectNotify(msg.type, msg.secondType)) {
+        return CHIRequestType:ProcessNotif;
+    } else {
+        return msg.type;
+    }
+}
+
+CHIRequestType manipulateSecondType(CHIRequestMsg msg)
+{
+     // NOTE: Take the state of the line as an argument and if stable
+    // we should convert the notifyindreadidx/notifyindwriteidx to a read/writeindirect respectively.
+    if (indirect_unit && msg.type == CHIRequestType:ReadIndirect) {
+        return CHIRequestType:ReadIndirect;
+    } else if (indirect_unit && msg.type == CHIRequestType:WriteIndirect) {
+        return CHIRequestType:WriteIndirect;
+    } else if (indirect_unit && msg.type == CHIRequestType:ReadValue) {
+        return CHIRequestType:ReadValue;
+    } else if (indirect_unit && msg.type == CHIRequestType:WriteValue) {
+        return CHIRequestType:WriteValue;
+    } else if (gather_unit && msg.type == CHIRequestType:NotifyReadIndIdx) {
+        return CHIRequestType:NotifyReadIndIdx;
+    } else if (gather_unit && msg.type == CHIRequestType:NotifyWriteIndIdx) {
+        return CHIRequestType:NotifyWriteIndIdx;
+    } else {
+        return msg.secondType;
+    }
+}
+
+bool shouldNotifyPrefetcher(CHIRequestType type, CHIRequestType second_type) {
+    if (isIndirectVal(type, second_type)) {
+        return value_unit;
+    }
+    if (isIndirectIdx(type, second_type)) {
+        return gather_unit;
+    }
+    return true;
+}
+
+bool needPostEvictIdxLine(TBE tbe, CHIRequestType type, CHIRequestType second_type)
+{
+    return isInvalid(tbe.gather_unit_id) && isIndirectIdx(type, second_type);
+}
+
 // FFUTSYM

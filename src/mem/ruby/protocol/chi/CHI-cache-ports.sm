@@ -347,25 +347,8 @@ in_port(reqRdyPort, CHIRequestMsg, reqRdy, rank=3,
               (dir_entry.sharers.isElement(in_msg.requestor) == false)) {
             trigger(Event:CleanUnique_Stale, in_msg.addr, cache_entry, tbe);
           }
-        // MYSTUFF
-        } else if (needEvictIdxLine(cache_entry, dir_entry, tbe, in_msg.type, in_msg.secondType)) {
-            // If in stable state & upstream to gather unit (gather_unit_id should be invalid) and Load + ReadIndirect/WriteIndirect;
-            // Also have to make sure to reprocess the access after eviction.
-            trigger(Event:EvictIdxLine, in_msg.addr, cache_entry, tbe);
         }
-        // else if (needForwardNotify(cache_entry, dir_entry, tbe, in_msg.type, in_msg.secondType)) {
-        //     // If message is notify and we are in BUSY_.*,
-        //     // What if indirect unit and gather unit are the same cache level?
-        //     // What if LDIND/STIND aliased by a prior LD/ST?
-        //     // Anyway we should add assertions to catch them.
-        //     // Make sure to add comments about that.
-        //     trigger(Event:ForwardNotifyIndIdx, in_msg.addr, cache_entry, tbe);
-        // } else if (needUpdateDependentMask(cache_entry, dir_entry, tbe, in_msg.type, in_msg.secondType)) {
-        //     // If in BUSY_.* and we are gather and we get a notify.
-        //     // we should separate dependent mask for read/write.
-        //     trigger(Event:UpdateDependentMask, in_msg.addr, cache_entry.tbe);
-        // }
-        // FFUTSYM
+
         // Normal request path
         trigger(reqToEvent(in_msg.type, in_msg.is_local_pf), in_msg.addr, cache_entry, tbe);
       }

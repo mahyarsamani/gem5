@@ -919,6 +919,12 @@ action(Initiate_LoadHit, desc="") {
     tbe.actions.push(Event:DataArrayRead);
   }
   tbe.actions.push(Event:LoadHit);
+  // MYSTUFF
+  if (needPostEvictIdxLine(tbe, tbe.reqType, tbe.secondType)) {
+    tbe.need_post_evict := true;
+    tbe.need_post_notif := true;
+  }
+  //
 }
 
 action(Initiate_LoadMiss, desc="") {
@@ -3653,9 +3659,39 @@ action(CheckCacheFill, desc="") {
 action(Finalize_DeallocateRequest, desc="") {
   assert(is_valid(tbe));
   assert(tbe.actions.empty());
+
   wakeupPendingReqs(tbe);
   wakeupPendingSnps(tbe);
+
+  if (tbe.need_post_evict) {
+    enqueue(replTriggerOutPort, ReplacementMsg, 0) {
+        out_msg.addr := address;
+        out_msg.from_addr := address;
+        out_msg.has_pending_req := true;
+    }
+  }
   wakeupPendingTgrs(tbe);
+
+  if (tbe.need_post_notif) {
+    enqueue(reqOutPort, CHIRequestMsg, request_latency) {
+        out_msg.addr := tbe.addr;
+        out_msg.accAddr := tbe.accAddr;
+
+        indirectNotifBoilerPlate(out_msg);
+
+        out_msg.type := figureOutNotifType(tbe);
+        out_msg.secondType := tbe.secondType;
+        out_msg.seqReq := tbe.seqReq;
+
+        out_msg.indirect_unit_id := tbe.indirect_unit_id;
+        out_msg.value_unit_id := tbe.value_unit_id;
+        out_msg.gather_unit_id := tbe.gather_unit_id;
+        out_msg.alias := tbe.alias;
+
+        out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
+        DPRINTF(IndirectAccess, "Sending a notif for %#lx.\n", out_msg.accAddr);
+    }
+  }
 
   if (tbe.is_req_tbe) {
     deallocateReqTBE(tbe);
@@ -4310,16 +4346,6 @@ action(Profile_OutgoingEnd_DVM, desc="") {
 
 // MYSTUFF
 
-action(Evict_IdxLine,
-       desc="Enqueue replacement for index block and stall FwdIndirect") {
-    enqueue(replTriggerOutPort, ReplacementMsg, 0) {
-        out_msg.addr := address;
-        out_msg.from_addr := address;
-        out_msg.has_pending_req := true;
-    }
-    stall_and_wait(reqRdyPort, address);
-}
-
 action(Trigger_IDR_Or_Dealloc,
        desc="Push FinalIDR if dependent work exists, else push FinalDealloc")
 {
@@ -4373,5 +4399,13 @@ action(Initiate_One_Dependent_Request,
         tbe.actions.push(Event:FinalDealloc);
     }
 }
-// FFUTSYM
 
+action(Extract_Extensions, desc="") {
+    // NOTE: We may want to remove this assertion and put the
+    // entire functionality inside an if statement.
+    assert(isIndirectIdx(tbe.reqType, tbe.secondType) || isIndirectNotify(tbe.reqType, tbe.secondType));
+    bool read := (tbe.secondType == CHIRequestType:ReadIndirect) ||
+                (tbe.secondType == CHIRequestType:NotifyReadIndIdx);
+    extractExtensions(read, tbe.addr, tbe.accAddr, tbe.seqReq);
+}
+// FFUTSYM

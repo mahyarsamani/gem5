@@ -104,6 +104,12 @@ enumeration(CHIRequestType, desc="") {
   ReadValue;
   WriteValue;
 
+  NotifyReadIndIdx;
+  NotifyWriteIndIdx;
+
+  ProcessNotif;
+  // FFUTSYM
+
   null;
 }
 

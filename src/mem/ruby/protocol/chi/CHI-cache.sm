@@ -357,7 +357,6 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     SnpStalled,                  desc="", in_trans="yes"; // A snoop stall triggered from the inport
     StashOnceShared,             desc="", in_trans="yes"; // Just discarding the hint
     StashOnceUnique,             desc="", in_trans="yes"; // Just discarding the hint
-    // MYSTUFF:
 
     // DVM sequencer requests
     DvmTlbi_Initiate, desc="", out_trans="yes", in_trans="yes"; // triggered when a CPU core wants to send a TLBI
@@ -580,9 +579,12 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     WriteZero, desc="Stall a trigger action because until finish handling snoop hazard";
 
     // MYSTUFF
-    EvictIdxLine, desc="Evict a Line holding index elements in a cache upstream to gather unit.";
-    FinalIDR, desc="Issue one dependent request during finalization";
-    FinalDealloc, desc="Deallocate TBE and transition to final stable state";
+    Fwd_NotifyIndIdx, desc="";
+    PostEvictIdxLine, desc="Evict a Line holding index elements in a cache upstream to gather unit.";
+
+    UpdateDAG,        in_trans="yes", desc="";
+    FinalIDR,         desc="Issue one dependent request during finalization";
+    FinalDealloc,     desc="Deallocate TBE and transition to final stable state";
     // FFUTSYM
     // This is triggered once a transaction doesn't have
     // any queued action and is not expecting responses/data. The transaction
@@ -801,7 +803,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     // MYSTUFF:
     Addr value_base,                default="0", desc="Base address for the value array being accessed";
     Addr value_size,                default="0", desc="Size of each value element";
-    Addr alias,                    default="0", desct="Alias";
+    Addr alias,                     default="0", desc="Alias";
 
     MachineID indirect_unit_id,      desc="MachineID of the indirect unit for an indirect request";
     MachineID value_unit_id,         desc="MachineID of the value unit for an indirect request";
@@ -812,6 +814,8 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     WriteMask read_usefulness,     desc="Mask denoting bytes that were useful for read.";
     WriteMask write_usefulness,    desc="Mask denoting bytes that were useful for write.";
 
+    bool need_post_evict,          default="false", desc="";
+    bool need_post_notif,          default="false", desc="";
     std::string access_name,       desc="Name of the access from high level program.";
     // FFUTSYM:
   }
