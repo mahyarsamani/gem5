@@ -71,7 +71,6 @@ operator<<(std::ostream& out, const CacheMemory& obj)
 
 CacheMemory::CacheMemory(const Params &p)
     : SimObject(p),
-    m_sparse_access_size(p.sparse_access_size),
     dataArray(p.dataArrayBanks, p.dataAccessLatency, p.start_index_bit),
     tagArray(p.tagArrayBanks, p.tagAccessLatency, p.start_index_bit),
     atomicALUArray(p.atomicALUs, p.atomicLatency),
@@ -114,11 +113,6 @@ CacheMemory::init()
 
     m_cache.resize(m_cache_num_sets,
                     std::vector<AbstractCacheEntry*>(m_cache_assoc, nullptr));
-
-    // MYSTUFF:
-    m_set_capacity = m_cache_assoc * m_block_size;
-    m_used_set_capacity.resize(m_cache_num_sets, 0);
-    // FFUTSYM:
 
     replacement_data.resize(m_cache_num_sets,
                                std::vector<ReplData>(m_cache_assoc, nullptr));
@@ -192,12 +186,6 @@ CacheMemory::getAddressAtIdx(int idx) const
     assert(set < m_cache_num_sets);
 
     int way = idx - set * m_cache_assoc;
-    // MYSTUFF: Got to change this to something that is equivalent to the same
-    // assertion but doesn't break since we are letting allocation go past
-    // the associativity of the cache.
-    // assert (way < m_cache_assoc);
-    assert(m_used_set_capacity[set] < m_set_capacity);
-
     AbstractCacheEntry* entry = m_cache[set][way];
     if (entry == NULL ||
         entry->m_Permission == AccessPermission_Invalid ||
@@ -354,10 +342,6 @@ CacheMemory::deallocate(Addr address)
     m_replacementPolicy_ptr->invalidate(entry->replacementData);
     uint32_t cache_set = entry->getSet();
     uint32_t way = entry->getWay();
-    // MYSTUFF:
-    int access_size = entry->isSparse() ? m_sparse_access_size : m_block_size;
-    m_used_set_capacity[cache_set] -= access_size;
-    // FFUTSYM:
     delete entry;
     m_cache[cache_set][way] = NULL;
 

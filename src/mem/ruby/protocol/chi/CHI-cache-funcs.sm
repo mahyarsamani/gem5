@@ -484,8 +484,6 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   tbe.hasUseTimeout := false;
 
   // MYSTUFF
-  tbe.value_base := in_msg.value_base;
-  tbe.value_size := in_msg.value_size;
   tbe.alias := in_msg.alias;
 
   tbe.indirect_unit_id := in_msg.indirect_unit_id;
@@ -712,9 +710,10 @@ void prepareRequest(TBE tbe, CHIRequestType type, CHIRequestMsg & out_msg) {
   if (isConsideredEvict(out_msg.type)) {
     DPRINTF(Usefulness, "Sending read usefulness mask for name %s with count %d with evict message.\n", out_msg.access_name, out_msg.read_usefulness.count());
     DPRINTF(Usefulness, "Sending write usefulness mask for name %s with count %d with evict message.\n", out_msg.access_name, out_msg.write_usefulness.count());
+    if (tbe.post_evict) {
+        out_msg.secondType := CHIRequestType:PropagateEvict;
+    }
   }
-  out_msg.value_base := tbe.value_base;
-  out_msg.value_size := tbe.value_size;
   out_msg.alias := tbe.alias;
 
   out_msg.indirect_unit_id := tbe.indirect_unit_id;
@@ -928,6 +927,7 @@ bool needDeallocCacheEntry(CHIRequestType req_type) {
                                 (req_type == CHIRequestType:MakeReadUnique) ||
                                 (req_type == CHIRequestType:CleanUnique)));
 }
+
 
 bool upstreamHasUnique(State state) {
   return (state == State:RU) || (state == State:UD_RU) || (state == State:UC_RU);
@@ -1737,6 +1737,39 @@ void replicateTBE(TBE src, TBE dst) {
 
 }
 
+void replicateRequestMsg(CHIRequestMsg &out_msg, CHIRequestMsg in_msg)
+{
+    out_msg.addr := in_msg.addr;
+    out_msg.accAddr := in_msg.accAddr;
+    out_msg.accSize := in_msg.accSize;
+    out_msg.type := in_msg.type;
+
+    out_msg.requestor := machineID;
+    out_msg.fwdRequestor := in_msg.fwdRequestor;
+    out_msg.dataToFwdRequestor := in_msg.dataToFwdRequestor;
+    out_msg.retToSrc := in_msg.retToSrc;
+    out_msg.allowRetry := in_msg.allowRetry;
+
+    out_msg.seqReq := in_msg.seqReq;
+    out_msg.isSeqReqValid := in_msg.isSeqReqValid;
+    out_msg.is_local_pf := in_msg.is_local_pf;
+    out_msg.is_remote_pf := in_msg.is_remote_pf;
+    out_msg.atomic_op := in_msg.atomic_op;
+    out_msg.usesTxnId := in_msg.usesTxnId;
+    out_msg.txnId := in_msg.txnId;
+    out_msg.ns := in_msg.ns;
+    out_msg.MessageSize := in_msg.MessageSize;
+
+    out_msg.alias := in_msg.alias;
+    out_msg.indirect_unit_id := in_msg.indirect_unit_id;
+    out_msg.value_unit_id := in_msg.value_unit_id;
+    out_msg.gather_unit_id := in_msg.gather_unit_id;
+    out_msg.secondType := in_msg.secondType;
+    out_msg.read_usefulness := in_msg.read_usefulness;
+    out_msg.write_usefulness := in_msg.write_usefulness;
+    out_msg.access_name := in_msg.access_name;
+}
+
 
 void indirectDependentBoilerPlate(CHIRequestMsg &out_msg)
 {
@@ -1812,17 +1845,25 @@ void fillInMsgFromReq(CHIRequestMsg &out_msg, RequestPtr req)
     out_msg.accSize := getSize(req);
 }
 
-// DEPRECATED
-// bool isStable(State state)
-// {
-//     return (state != State:BUSY_BLKD) && (state != State:BUSY_INTR);
-// }
-// DEPRECATED
-// bool cachedHere_NotUpstream(State state)
-// {
-//     return (state == State:SC) || (state == State:SD) ||
-//         (state == State:UC) || (state == State:UD) || (state == State:UD_T);
-// }
+bool cachedHere(State state)
+{
+    return (
+        (state == State:SC)     ||
+        (state == State:UC)     ||
+        (state == State:SD)     ||
+        (state == State:UD)     ||
+        (state == State:UD_T)   ||
+        (state == State:SC_RSC) ||
+        (state == State:SD_RSC) ||
+        (state == State:SD_RSD) ||
+        (state == State:UC_RSC) ||
+        (state == State:UC_RU)  ||
+        (state == State:UD_RU)  ||
+        (state == State:UD_RSD) ||
+        (state == State:UD_RSC)
+    );
+}
+
 
 bool isIndirectIdx(CHIRequestType type, CHIRequestType second_type) {
     return (
@@ -1853,6 +1894,11 @@ bool isIndirectNotify(CHIRequestType type, CHIRequestType second_type)
 bool isIndirect(CHIRequestType type, CHIRequestType second_type)
 {
     return isIndirectIdx(type, second_type) || isIndirectVal(type, second_type);
+}
+
+bool isPropagateEvict(CHIRequestType type, CHIRequestType second_type)
+{
+    return isConsideredEvict(type) && (second_type == CHIRequestType:PropagateEvict);
 }
 
 CHIRequestType manipulateType(CHIRequestMsg msg)
@@ -1907,7 +1953,11 @@ bool shouldNotifyPrefetcher(CHIRequestType type, CHIRequestType second_type) {
 
 bool needPostEvictIdxLine(TBE tbe, CHIRequestType type, CHIRequestType second_type)
 {
-    return isInvalid(tbe.gather_unit_id) && isIndirectIdx(type, second_type);
+    return isInvalid(tbe.gather_unit_id) && (isIndirectIdx(type, second_type) || isPropagateEvict(type, second_type));
 }
 
+bool needPostNotif(TBE tbe, CHIRequestType type, CHIRequestType second_type)
+{
+    return isInvalid(tbe.gather_unit_id) && (isIndirectIdx(type, second_type) || isIndirectNotify(type, second_type));
+}
 // FFUTSYM

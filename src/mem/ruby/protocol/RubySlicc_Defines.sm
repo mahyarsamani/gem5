@@ -49,5 +49,9 @@ RequestPtr getDependentReq(Addr, DataBlock);
 void extractExtensions(bool, Addr, Addr, RequestPtr);
 bool hasDependentWork(Addr);
 void clearExtensions(Addr);
+
+bool hasPostEvict(Addr);
+void postEvict(Addr);
+void evict(Addr);
 // FFUTSYM
 void dequeueMemRespQueue();

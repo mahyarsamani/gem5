@@ -75,6 +75,9 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   Cycles response_latency := 1;
   Cycles snoop_latency := 1;
   Cycles data_latency := 1;
+  // MYSTUFF
+  Cycles post_evict_delay := 1;
+  // FFUTSYM
   Cycles dvm_ext_tlbi_latency := 6;
 
   // When an SC fails, unique lines are locked to this controller for a period
@@ -579,7 +582,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     WriteZero, desc="Stall a trigger action because until finish handling snoop hazard";
 
     // MYSTUFF
-    Fwd_NotifyIndIdx, desc="";
+    Fwd_NotifyIndIdx, in_trans="yes", desc="";
     PostEvictIdxLine, desc="Evict a Line holding index elements in a cache upstream to gather unit.";
 
     UpdateDAG,        in_trans="yes", desc="";
@@ -760,8 +763,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     CHIResponseType slicchack1; // fix compiler not including headers
     CHIDataType slicchack2; // fix compiler not including headers
 
-    // Tracks pending data messages that need to be generated when sending
-    // a line
+    // Tracks pending data messages that need to be generated when sending a line.
     bool snd_pendEv,            desc="Is there a pending tx event ?";
     WriteMask snd_pendBytes,    desc="Which bytes are pending transmission";
     CHIDataType snd_msgType,    desc="Type of message being sent";
@@ -801,8 +803,6 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     bool wakeup_pending_tgr;
 
     // MYSTUFF:
-    Addr value_base,                default="0", desc="Base address for the value array being accessed";
-    Addr value_size,                default="0", desc="Size of each value element";
     Addr alias,                     default="0", desc="Alias";
 
     MachineID indirect_unit_id,      desc="MachineID of the indirect unit for an indirect request";
@@ -816,6 +816,8 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     bool need_post_evict,          default="false", desc="";
     bool need_post_notif,          default="false", desc="";
+
+    bool post_evict,               default="false", desc="";
     std::string access_name,       desc="Name of the access from high level program.";
     // FFUTSYM:
   }
@@ -940,8 +942,9 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     // Initiate_Replacement must inherit the wakeup obligation so that
     // Finalize_DeallocateRequest wakes the stalled request when the
     // eviction completes.
-    bool has_pending_req, default="false",
-         desc="Replacement TBE should set wakeup_pending_req";
+    //bool has_pending_req, default="false",
+    //     desc="Replacement TBE should set wakeup_pending_req";
+    bool post_evict, default="false", desc="";
     bool functionalRead(Packet *pkt) { return false; }
     bool functionalRead(Packet *pkt, WriteMask &mask) { return false; }
     bool functionalWrite(Packet *pkt) { return false; }

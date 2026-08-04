@@ -510,23 +510,21 @@ action(Initiate_Replacement, desc="") {
 
   State initial := getState(tbe, cache_entry, address);
 
+  bool post_evict := false;
   if (unify_repl_TBEs) {
     peek(replTriggerInPort, ReplacementMsg) {
       set_tbe(allocateReplacementTBEOnSlot(address, in_msg.slot));
       DPRINTF(RubySlicc, "Allocated replacement TBE on slot %d\n", tbe.storSlot);
-      if (in_msg.has_pending_req) {
-        tbe.wakeup_pending_req := true;
-      }
+      post_evict := in_msg.post_evict;
     }
   } else {
     peek(replTriggerInPort, ReplacementMsg) {
       set_tbe(allocateReplacementTBE(address));
       DPRINTF(RubySlicc, "Allocated replacement TBE on new slot %d\n", tbe.storSlot);
-      if (in_msg.has_pending_req) {
-        tbe.wakeup_pending_req := true;
-      }
+      post_evict := in_msg.post_evict;
     }
   }
+  tbe.post_evict := post_evict;
   // MYSTUFF
   tbe.read_usefulness := read_usefulness;
   tbe.write_usefulness := write_usefulness;
@@ -919,12 +917,6 @@ action(Initiate_LoadHit, desc="") {
     tbe.actions.push(Event:DataArrayRead);
   }
   tbe.actions.push(Event:LoadHit);
-  // MYSTUFF
-  if (needPostEvictIdxLine(tbe, tbe.reqType, tbe.secondType)) {
-    tbe.need_post_evict := true;
-    tbe.need_post_notif := true;
-  }
-  //
 }
 
 action(Initiate_LoadMiss, desc="") {
@@ -3662,17 +3654,23 @@ action(Finalize_DeallocateRequest, desc="") {
 
   wakeupPendingReqs(tbe);
   wakeupPendingSnps(tbe);
-
-  if (tbe.need_post_evict) {
-    enqueue(replTriggerOutPort, ReplacementMsg, 0) {
-        out_msg.addr := address;
-        out_msg.from_addr := address;
-        out_msg.has_pending_req := true;
-    }
-  }
   wakeupPendingTgrs(tbe);
 
-  if (tbe.need_post_notif) {
+  if (tbe.need_post_evict) {
+    if (!hasPostEvict(address)) {
+        postEvict(address);
+        enqueue(replTriggerOutPort, ReplacementMsg, post_evict_delay) {
+            out_msg.addr := address;
+            out_msg.from_addr := address;
+
+            //out_msg.has_pending_req := true;
+        }
+    } else {
+        DPRINTF(IndirectAccess, "TBE for %#lx says post evict but already have it.\n", address);
+    }
+  }
+
+  if (tbe.need_post_notif && cachedHere(tbe.finalState)) {
     enqueue(reqOutPort, CHIRequestMsg, request_latency) {
         out_msg.addr := tbe.addr;
         out_msg.accAddr := tbe.accAddr;
@@ -4346,6 +4344,15 @@ action(Profile_OutgoingEnd_DVM, desc="") {
 
 // MYSTUFF
 
+action(Detect_UpstreamGatherIdx_Hit, desc="Check if index line is hit upstream of Gather Unit") {
+  if (needPostNotif(tbe, tbe.reqType, tbe.secondType)) {
+    tbe.need_post_notif := true;
+  }
+  if (needPostEvictIdxLine(tbe, tbe.reqType, tbe.secondType)) {
+    tbe.need_post_evict := true;
+  }
+}
+
 action(Trigger_IDR_Or_Dealloc,
        desc="Push FinalIDR if dependent work exists, else push FinalDealloc")
 {
@@ -4407,5 +4414,15 @@ action(Extract_Extensions, desc="") {
     bool read := (tbe.secondType == CHIRequestType:ReadIndirect) ||
                 (tbe.secondType == CHIRequestType:NotifyReadIndIdx);
     extractExtensions(read, tbe.addr, tbe.accAddr, tbe.seqReq);
+}
+
+action(Fwd_NotifyIndIdx) {
+    peek(reqRdyPort, CHIRequestMsg) {
+        enqueue(reqOutPort, CHIRequestMsg, request_latency) {
+            replicateRequestMsg(out_msg, in_msg);
+            out_msg.Destination.clear();
+            out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
+        }
+    }
 }
 // FFUTSYM

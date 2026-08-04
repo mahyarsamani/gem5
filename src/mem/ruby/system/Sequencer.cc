@@ -700,92 +700,92 @@ Sequencer::readCallback(Addr address, DataBlock& data,
 }
 
 // MYSTUFF
-void
-Sequencer::prepareIndPacket(Addr alias, RequestPtr& final_req)
-{
-    // Locate the Phase 1 SequencerRequest tracked under `alias`
-    // in the indirect request table.
-    auto it = m_IndirectRequestTable.find(alias);
+// void
+// Sequencer::prepareIndPacket(Addr alias, RequestPtr& final_req)
+// {
+//     // Locate the Phase 1 SequencerRequest tracked under `alias`
+//     // in the indirect request table.
+//     auto it = m_IndirectRequestTable.find(alias);
 
-    panic_if(it == m_IndirectRequestTable.end() || it->second.pending.empty(),
-        "prepareIndPacket: no SequencerRequest found for alias 0x%x",alias);
-    SequencerRequest &sreq = it->second.pending.front();
-    PacketPtr old_pkt = sreq.pkt;
+//     panic_if(it == m_IndirectRequestTable.end() || it->second.pending.empty(),
+//         "prepareIndPacket: no SequencerRequest found for alias 0x%x",alias);
+//     SequencerRequest &sreq = it->second.pending.front();
+//     PacketPtr old_pkt = sreq.pkt;
 
-    // Build the Phase 2 packet: correct PA, correct size (sizeData).
-    PacketPtr new_pkt = new Packet(final_req, old_pkt->cmd);
-    new_pkt->allocate();
+//     // Build the Phase 2 packet: correct PA, correct size (sizeData).
+//     PacketPtr new_pkt = new Packet(final_req, old_pkt->cmd);
+//     new_pkt->allocate();
 
-    // MYSTUFF: HOV Collision Stats
-    if (m_hov_measurement_enabled) {
-        Addr phase2_paddr = final_req->getPaddr();
-        uint64_t current_seq = ++m_hov_seq_num;
-        bool has_inst_count = old_pkt->req->hasInstCount();
-        uint64_t current_inst_count = has_inst_count ? old_pkt->req->getInstCount() : 0;
+//     // MYSTUFF: HOV Collision Stats
+//     if (m_hov_measurement_enabled) {
+//         Addr phase2_paddr = final_req->getPaddr();
+//         uint64_t current_seq = ++m_hov_seq_num;
+//         bool has_inst_count = old_pkt->req->hasInstCount();
+//         uint64_t current_inst_count = has_inst_count ? old_pkt->req->getInstCount() : 0;
 
-        auto it = m_hov_addr_iterators.find(phase2_paddr);
-        if (it != m_hov_addr_iterators.end()) {
-            // Address is in history! Calculate distances.
-            uint64_t old_seq = m_hov_access_history[phase2_paddr];
-            if (current_seq >= old_seq) {
-                m_hov_collision_distance.sample(current_seq - old_seq);
-            }
+//         auto it = m_hov_addr_iterators.find(phase2_paddr);
+//         if (it != m_hov_addr_iterators.end()) {
+//             // Address is in history! Calculate distances.
+//             uint64_t old_seq = m_hov_access_history[phase2_paddr];
+//             if (current_seq >= old_seq) {
+//                 m_hov_collision_distance.sample(current_seq - old_seq);
+//             }
 
-            if (has_inst_count && m_hov_inst_history.find(phase2_paddr) != m_hov_inst_history.end()) {
-                uint64_t old_inst_count = m_hov_inst_history[phase2_paddr];
-                if (current_inst_count >= old_inst_count) {
-                    m_hov_inst_distance.sample(current_inst_count - old_inst_count);
-                }
-            }
+//             if (has_inst_count && m_hov_inst_history.find(phase2_paddr) != m_hov_inst_history.end()) {
+//                 uint64_t old_inst_count = m_hov_inst_history[phase2_paddr];
+//                 if (current_inst_count >= old_inst_count) {
+//                     m_hov_inst_distance.sample(current_inst_count - old_inst_count);
+//                 }
+//             }
 
-            // LRU Move: move existing element to the back (youngest)
-            m_hov_addr_history.splice(m_hov_addr_history.end(), m_hov_addr_history, it->second);
-        } else {
-            // New entry: push to back and record iterator
-            m_hov_addr_history.push_back(phase2_paddr);
-            m_hov_addr_iterators[phase2_paddr] = std::prev(m_hov_addr_history.end());
-        }
+//             // LRU Move: move existing element to the back (youngest)
+//             m_hov_addr_history.splice(m_hov_addr_history.end(), m_hov_addr_history, it->second);
+//         } else {
+//             // New entry: push to back and record iterator
+//             m_hov_addr_history.push_back(phase2_paddr);
+//             m_hov_addr_iterators[phase2_paddr] = std::prev(m_hov_addr_history.end());
+//         }
 
-        // Update histories with latest sequences
-        m_hov_access_history[phase2_paddr] = current_seq;
-        if (has_inst_count) {
-            m_hov_inst_history[phase2_paddr] = current_inst_count;
-        }
+//         // Update histories with latest sequences
+//         m_hov_access_history[phase2_paddr] = current_seq;
+//         if (has_inst_count) {
+//             m_hov_inst_history[phase2_paddr] = current_inst_count;
+//         }
 
-        // LRU Eviction: pop from front if size exceeded
-        if (m_hov_addr_history.size() > m_hov_history_size) {
-            Addr oldest_paddr = m_hov_addr_history.front();
-            m_hov_addr_history.pop_front();
-            m_hov_addr_iterators.erase(oldest_paddr);
-            m_hov_access_history.erase(oldest_paddr);
-            m_hov_inst_history.erase(oldest_paddr);
-        }
-    }
+//         // LRU Eviction: pop from front if size exceeded
+//         if (m_hov_addr_history.size() > m_hov_history_size) {
+//             Addr oldest_paddr = m_hov_addr_history.front();
+//             m_hov_addr_history.pop_front();
+//             m_hov_addr_iterators.erase(oldest_paddr);
+//             m_hov_access_history.erase(oldest_paddr);
+//             m_hov_inst_history.erase(oldest_paddr);
+//         }
+//     }
 
-    // For stores, we must copy the payload into the new packet.
-    // The O3 pipeline truncates the payload because writeMem() uses sizeIndex.
-    // The full payload is preserved in the DependentAccessGen extension.
-    // It's not actually needed to be sent to the caches.
-    if (auto dag = final_req->getExtension<DependentAccessGen>()) {
-        if (dag->hasData()) {
-            assert(new_pkt->isWrite());
-            new_pkt->setData(dag->getStoreData());
-        }
-    }
+//     // For stores, we must copy the payload into the new packet.
+//     // The O3 pipeline truncates the payload because writeMem() uses sizeIndex.
+//     // The full payload is preserved in the DependentAccessGen extension.
+//     // It's not actually needed to be sent to the caches.
+//     if (auto dag = final_req->getExtension<DependentAccessGen>()) {
+//         if (dag->hasData()) {
+//             assert(new_pkt->isWrite());
+//             new_pkt->setData(dag->getStoreData());
+//         }
+//     }
 
-    DPRINTF(IndirectAccess, "%s: alias=0x%x Phase2 PA=0x%x size=%d\n",
-            __func__, alias, final_req->getPaddr(), final_req->getSize());
+//     DPRINTF(IndirectAccess, "%s: alias=0x%x Phase2 PA=0x%x size=%d\n",
+//             __func__, alias, final_req->getPaddr(), final_req->getSize());
 
-    // Transfer the senderState chain so RubyPort can route the response
-    // back to the correct CPU port, and so O3 (if used) can match the
-    // returning packet via dynamic_cast<LSQRequest*>(pkt->senderState).
-    new_pkt->senderState = old_pkt->senderState;
-    old_pkt->senderState = nullptr;
+//     // Transfer the senderState chain so RubyPort can route the response
+//     // back to the correct CPU port, and so O3 (if used) can match the
+//     // returning packet via dynamic_cast<LSQRequest*>(pkt->senderState).
+//     new_pkt->senderState = old_pkt->senderState;
+//     old_pkt->senderState = nullptr;
 
-    // Replace the tracked packet; the old one is no longer needed.
-    delete old_pkt;
-    sreq.pkt = new_pkt;
-}
+//     // Replace the tracked packet; the old one is no longer needed.
+//     delete old_pkt;
+//     sreq.pkt = new_pkt;
+// }
 // FFUTSYM
 
 // MYSTUFF: Specialized callbacks for indirect-value accesses (Phase 2).
@@ -804,7 +804,8 @@ Sequencer::indirectReadCallback(Addr address, DataBlock& data)
                 "uop1 for addr 0x%x\n", address);
         hitCallback(&sreq, data, true, MachineType_NULL, true,
                     sreq.issue_time, Cycles(0), Cycles(0), false);
-        markRemoved();
+        // FIXME: We should fix this.
+        // markRemoved();
         it->second.pending.pop_front();
         if (it->second.pending.empty()) {
             m_IndirectRequestTable.erase(it);
@@ -831,7 +832,8 @@ Sequencer::indirectWriteCallback(Addr address, DataBlock& data)
                 "uop1 for addr 0x%x\n", address);
         hitCallback(&sreq, data, true, MachineType_NULL, true,
                     sreq.issue_time, Cycles(0), Cycles(0), false);
-        markRemoved();
+        // FIXME: We should fix this.
+        // markRemoved();
         it->second.pending.pop_front();
         if (it->second.pending.empty()) {
             m_IndirectRequestTable.erase(it);
@@ -1382,7 +1384,7 @@ Sequencer::makeRequest(PacketPtr pkt)
             entry.cacheReady = false;
             entry.pending.emplace_back(pkt, primary_type,
                 secondary_type, curCycle());
-            m_outstanding_count++;
+            // m_outstanding_count++;
             DPRINTF(IndirectAccess, "Holding indirect-value req for "
                     "addr 0x%x in m_IndirectRequestTable\n",
                     pkt->getAddr());

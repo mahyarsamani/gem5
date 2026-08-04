@@ -74,7 +74,6 @@ namespace ruby
 class CacheMemory : public SimObject
 {
   private:
-    int m_sparse_access_size;
 
   public:
     typedef RubyCacheParams Params;
@@ -199,11 +198,6 @@ class CacheMemory : public SimObject
     // The second index is the the amount associativity.
     std::unordered_map<Addr, int> m_tag_index;
     std::vector<std::vector<AbstractCacheEntry*> > m_cache;
-
-    // MYSTUFF:
-    int m_set_capacity;
-    std::vector<int> m_used_set_capacity;
-    // FFUTSYM:
 
     /** We use the replacement policies from the Classic memory system. */
     replacement_policy::Base *m_replacementPolicy_ptr;

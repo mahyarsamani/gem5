@@ -143,7 +143,7 @@ class Sequencer : public RubyPort
      * @param alias     The alias key used in m_RequestTable for this LDIND.
      * @param final_req The Phase 2 RequestPtr (carries PA and sizeData).
      */
-    void prepareIndPacket(Addr alias, RequestPtr& final_req);
+    // void prepareIndPacket(Addr alias, RequestPtr& final_req);
 
     /**
      * Specialized callbacks for indirect-value accesses (Phase 2).
@@ -351,7 +351,7 @@ class Sequencer : public RubyPort
     // MYSTUFF: HOV Stats
     bool m_hov_measurement_enabled;
     size_t m_hov_history_size;
-    
+
     uint64_t m_hov_seq_num;
     std::unordered_map<Addr, uint64_t> m_hov_access_history;
     std::unordered_map<Addr, uint64_t> m_hov_inst_history;

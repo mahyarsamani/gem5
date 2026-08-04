@@ -242,6 +242,9 @@ transition(I, ReadOnce, BUSY_BLKD) {
 transition({UD,SD,UC,SC,UD_RSC,SD_RSC,UC_RSC,SC_RSC,UD_RSD,SD_RSD}, ReadOnce, BUSY_BLKD) {
   Initiate_Request;
   Initiate_ReadOnce_Hit;
+  // MYSTUFF
+  Detect_UpstreamGatherIdx_Hit;
+  // FFUTSYM
   Profile_Hit;
   Pop_ReqRdyQueue;
   ProcessNextState;
@@ -250,6 +253,9 @@ transition({UD,SD,UC,SC,UD_RSC,SD_RSC,UC_RSC,SC_RSC,UD_RSD,SD_RSD}, ReadOnce, BU
 transition({UD_RU,UC_RU,RU,RSD,RUSD,RSC,RUSC}, ReadOnce, BUSY_BLKD) {
   Initiate_Request;
   Initiate_ReadOnce_HitUpstream;
+  // MYSTUFF
+  Detect_UpstreamGatherIdx_Hit;
+  // FFUTSYM
   Profile_Miss;
   Pop_ReqRdyQueue;
   ProcessNextState;
@@ -609,6 +615,9 @@ transition(I, AtomicNoReturn_PoC, BUSY_BLKD) {
 transition({UD,UD_T,SD,UC,SC}, Load, BUSY_BLKD) {
   Initiate_Request;
   Initiate_LoadHit;
+  // MYSTUFF
+  Detect_UpstreamGatherIdx_Hit;
+  // FFUTSYM
   Profile_Hit;
   Pop_ReqRdyQueue;
   ProcessNextState;
@@ -752,14 +761,18 @@ transition(SC, AtomicStore, BUSY_BLKD) {
 
 // Evict from Upstream
 
-transition({UD_RSC,SD_RSC,UC_RSC,SC_RSC,RSC,RSD,RUSD,RUSC,UD_RSD,SD_RSD}, Evict, BUSY_BLKD) {
+transition({UD_RSC,SD_RSC,UC_RSC,SC_RSC,UD_RSD,SD_RSD,RSC,RSD,RUSD,RUSC}, Evict, BUSY_BLKD) {
   Initiate_Request;
   Initiate_Evict;
+  // MYSTUFF
+  Detect_UpstreamGatherIdx_Hit;
+  // FFUTSYM
   Pop_ReqRdyQueue;
   ProcessNextState;
 }
 
-transition({UD, UD_RSC, SD_RSC, UC_RSC, SC_RSC, UD_RU, UC_RU, UD_RSD, SD_RSD, RU, RSC, RSD, RUSD, RUSC, SD, UC, SC, I},
+
+transition({UD,UD_RSC,SD_RSC,UC_RSC,SC_RSC,UD_RU,UC_RU, UD_RSD, SD_RSD, RU, RSC, RSD, RUSD, RUSC, SD, UC, SC, I},
             Evict_Stale) {
   Initiate_Request_Stale;
   Send_CompI_Stale;
@@ -772,6 +785,9 @@ transition({UD, UD_RSC, SD_RSC, UC_RSC, SC_RSC, UD_RU, UC_RU, UD_RSD, SD_RSD, RU
 transition({UD_RU, UC_RU, RU, UD_RSD, SD_RSD, RSD, RUSD}, {WriteBackFull, WriteCleanFull}, BUSY_BLKD) {
   Initiate_Request;
   Initiate_CopyBack;
+  // MYSTUFF
+  Detect_UpstreamGatherIdx_Hit;
+  // FFUTSYM
   Pop_ReqRdyQueue;
   ProcessNextState;
 }
@@ -966,7 +982,8 @@ transition({BUSY_BLKD,BUSY_INTR},
             WriteUniqueZero,
             AtomicReturn,AtomicReturn_PoC, AtomicReturn_PoC_Alloc
             AtomicNoReturn,AtomicNoReturn_PoC, AtomicNoReturn_PoC_Alloc
-            StashOnceShared,StashOnceUnique}) {
+            StashOnceShared,StashOnceUnique,
+            Fwd_NotifyIndIdx, UpdateDAG}) {
   StallRequest;
 }
 
@@ -1835,6 +1852,15 @@ transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD,
             UC_RSC, UC_RU, UD_RU, UD_RSD, UD_RSC}, UpdateDAG, BUSY_BLKD) {
     Initiate_Request;
     Extract_Extensions;
+    Pop_ReqRdyQueue;
+    ProcessNextState;
+}
+
+transition({I, SC_RSC, SD_RSC, SD_RSD, UC_RSC, UC_RU, UD_RU,
+        UD_RSD, UD_RSC, RU, RSC, RSD, RUSC, RUSD}, Fwd_NotifyIndIdx, BUSY_BLKD)
+{
+    Initiate_Request;
+    Fwd_NotifyIndIdx;
     Pop_ReqRdyQueue;
     ProcessNextState;
 }

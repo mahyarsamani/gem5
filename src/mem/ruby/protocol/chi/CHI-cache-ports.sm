@@ -293,6 +293,19 @@ in_port(replTriggerInPort, ReplacementMsg, replTriggerQueue, rank=4) {
           trigger := Event:Local_Eviction;
         }
       }
+
+      if (trigger == Event:null) {
+        DPRINTF(IndirectAccess, "Faced null trigger in repl for %#lx.\n", in_msg.addr);
+        if (hasPostEvict(in_msg.addr)) {
+            DPRINTF(IndirectAccess, "Aha! It has a postEvict already.\n");
+        } else {
+            DPRINTF(IndirectAccess, "It doesn't even have postEvict.\n");
+        }
+      }
+      if (hasPostEvict(in_msg.addr)) {
+        DPRINTF(IndirectAccess, "%#lx has post evict.\n", in_msg.addr);
+        evict(in_msg.addr);
+      }
       trigger(trigger, in_msg.addr, cache_entry, tbe);
     }
   }

@@ -44,6 +44,7 @@
 #include <exception>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -87,6 +88,7 @@ class AbstractController : public ClockedObject, public Consumer
 {
   // MYSTUFF
   private:
+    std::set<Addr> postEvicts;
     std::unordered_map<Addr, Addr> addrToAliasMap;
     std::unordered_map<Addr, Addr> aliasToAddrMap;
 
@@ -123,6 +125,10 @@ class AbstractController : public ClockedObject, public Consumer
 
     // Clear all entries for lineAddr.
     void clearExtensions(Addr line_addr);
+
+    bool hasPostEvict(Addr addr) { return postEvicts.find(addr) != postEvicts.end(); }
+    void postEvict(Addr addr) { postEvicts.insert(addr); }
+    void evict(Addr addr) { postEvicts.erase(addr); }
 
   public:
     bool disambiguated(Addr alias) { return aliasToAddrMap.find(alias) != aliasToAddrMap.end(); }
