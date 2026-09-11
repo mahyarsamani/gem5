@@ -153,6 +153,7 @@ SpatterGen::recvTimingResp(PacketPtr pkt)
     int trips_left = spatter_access->tripsLeft();
     assert(trips_left >= 0);
     if (trips_left > 0) {
+        DPRINTF(SpatterGen, "INDEX_RCV: %s addr %#lx size %d\n", pkt->print(), pkt->getAddr(), pkt->getSize());
         stats.numIndexReads++;
         stats.indexBytesRead += pkt->getSize();
         stats.totalIndexReadLatency += trip_time;
@@ -160,6 +161,7 @@ SpatterGen::recvTimingResp(PacketPtr pkt)
         stats.indexAccessLatency.sample(trip_time);
         receiveBuffer.push(spatter_access, curTick());
     } else {
+        DPRINTF(SpatterGen, "VALUE_RCV: %s addr %#lx size %d\n", pkt->print(), pkt->getAddr(), pkt->getSize());
         stats.valueAccessLatency.sample(trip_time);
         stats.totalIndirectAccessLatency.sample(
                                             spatter_access->tripTimeSoFar()
@@ -297,26 +299,14 @@ SpatterGen::ultAccessOk(int int_regs, int fp_regs, Tick when) const
     return val_idx && have_fp_reg;
 }
 
-bool
-SpatterGen::indirAccessOk(int int_regs, int fp_regs, Tick when) const
-{
-    bool have_fp_reg = fp_regs > 0;
-    bool have_kernel = !kernels.empty() && (state == SpatterGenState::RUNNING);
-    return have_kernel && have_fp_reg;
-}
-
 void
 SpatterGen::scheduleNextGenEvent(Tick when)
 {
     int avail_int_regs = intRegFileSize - intRegUsed;
     int avail_fp_regs = fpRegFileSize - fpRegUsed;
-    bool have_work = (
-                    accessMode == SpatterAccessMode::normal &&
-                        (initAccessOk(avail_int_regs, avail_fp_regs, curTick()) ||
-                        interAccessOk(avail_int_regs, avail_fp_regs, curTick()) ||
-                        ultAccessOk(avail_int_regs, avail_fp_regs, curTick())))
-                    ||
-                    (accessMode == SpatterAccessMode::indirect && indirAccessOk(avail_int_regs, avail_fp_regs, curTick()));
+    bool have_work = initAccessOk(avail_int_regs, avail_fp_regs, curTick()) ||
+                     interAccessOk(avail_int_regs, avail_fp_regs, curTick()) ||
+                     ultAccessOk(avail_int_regs, avail_fp_regs, curTick());
     Tick schedule_tick = std::max(when, firstGeneratorAvailableTime);
     if (have_work && (!nextGenEvent.scheduled())) {
         schedule(nextGenEvent, schedule_tick);
@@ -380,6 +370,7 @@ SpatterGen::processNextGenEvent()
                 "%s: Pushed pkt: %s to requestBuffer.\n",
                 __func__, pkt->print()
             );
+            DPRINTF(SpatterGen, "VALUE_PUSH: %s addr %#lx size %d\n", pkt->print(), pkt->getAddr(), pkt->getSize());
 
             // now deallocate resources for reading the index
             int_used_now--;
@@ -402,6 +393,7 @@ SpatterGen::processNextGenEvent()
                 "%s: Pushed pkt: %s to requestBuffer.\n",
                 __func__, pkt->print()
             );
+            DPRINTF(SpatterGen, "INDEX_PUSH: %s addr %#lx size %d\n", pkt->print(), pkt->getAddr(), pkt->getSize());
 
             // now deallocate resources for reading the index
             int_used_now--;
@@ -422,6 +414,7 @@ SpatterGen::processNextGenEvent()
                 "%s: Pushed pkt: %s to requestBuffer.\n",
                 __func__, pkt->print()
             );
+            DPRINTF(SpatterGen, "INDEX_PUSH: %s addr %#lx size %d\n", pkt->print(), pkt->getAddr(), pkt->getSize());
 
             if (front.done()) {
                 DPRINTF(
@@ -515,6 +508,7 @@ SpatterGen::processNextSendEvent()
             break;
         }
         PacketPtr pkt = requestBuffer.front();
+
         DPRINTF(
             SpatterGen,
             "%s: Sending pkt: %s to port[%d].\n",
@@ -528,6 +522,13 @@ SpatterGen::processNextSendEvent()
         numPendingMemRequests++;
         // record packet departure time
         requestDepartureTime[pkt->req] = curTick();
+
+        std::shared_ptr<SpatterAccess> spatter_access = pkt->req->getExtension<SpatterAccess>();
+        if (spatter_access && spatter_access->tripsLeft() > 0) {
+            DPRINTF(SpatterGen, "INDEX_SEND: %s addr %#lx size %d\n", pkt->print(), pkt->getAddr(), pkt->getSize());
+        } else {
+            DPRINTF(SpatterGen, "VALUE_SEND: %s addr %#lx size %d\n", pkt->print(), pkt->getAddr(), pkt->getSize());
+        }
         // Now if we put the port in blocked state no point in continuing
         // the loop. also no point in scheduling nextSendEvent.
         if (port.blocked()) {

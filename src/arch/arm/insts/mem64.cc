@@ -275,14 +275,16 @@ MicroIndIdx::MicroIndIdx(const char *mnem, ExtMachInst machInst,
                          RegIndex _destIdx, RegIndex _baseIndex,
                          RegIndex _indexReg, RegIndex _aliasReg,
                          RegIndex _baseData,
-                         unsigned _sizeIndex, unsigned _sizeData)
+                         unsigned _sizeIndex, unsigned _sizeData,
+                         bool isLoad)
     : MightBeMicro64(mnem, machInst, MemReadOp),
       destIdx(_destIdx), baseIndex(_baseIndex),
       indexReg(_indexReg), aliasReg(_aliasReg),
       baseData(_baseData),
       sizeIndex(_sizeIndex), sizeData(_sizeData),
       shiftAmtIndex(ceilLog2(_sizeIndex)),
-      memAccessFlags(MMU::AllowUnaligned)
+      memAccessFlags(MMU::AllowUnaligned),
+      _isLoad(isLoad)
 {
     flags[IsLoad] = true;
     flags[IsMicroop] = true;
@@ -335,7 +337,9 @@ MicroIndIdx::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
     // Attach IndirectAccessAlias so CHI protocol recognizes this as indirect
     auto iaa = std::make_shared<IndirectAccessAlias>(alias_val);
     // Attach DependentAccessGen so CHI can generate Phase 2 (ReadValue)
-    auto dag = std::make_shared<ARMDependentAccessGen>(sizeIndex, sizeData, base_data_val);
+    auto intent = _isLoad ? DependentAccessGen::AccessIntent::Read
+                          : DependentAccessGen::AccessIntent::Write;
+    auto dag = std::make_shared<ARMDependentAccessGen>(intent, sizeIndex, EA, base_data_val, sizeData);
     xc->setIAAExt(iaa);
     xc->setDAGExt(dag);
 

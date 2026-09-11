@@ -104,8 +104,7 @@ enumeration(CHIRequestType, desc="") {
   ReadValue;
   WriteValue;
 
-  NotifyReadIndIdx;
-  NotifyWriteIndIdx;
+  NotifyIndIdx;
 
   ProcessNotif;
 
@@ -189,12 +188,19 @@ enumeration(CHIResponseType, desc="...") {
   RetryAck;
   PCrdGrant;
 
+  // HOV-specific ack for ReadValue/WriteValue acceptance
+  HovAck;
+
+  // HOV-specific ack for NotifyIndIdx
+  NotifAck;
+
   null;
 }
 
 structure(CHIResponseMsg, desc="", interface="Message") {
   Addr addr,            desc="Line address";
   CHIResponseType type, desc="Response type";
+  CHIRequestType secondType, desc="Original request type (for HOV dispatch)", default="CHIRequestType_null";
   MachineID responder,  desc="Responder ID";
   NetDest Destination,  desc="Response destination";
   bool stale,           desc="Response to a stale request";

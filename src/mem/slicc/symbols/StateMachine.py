@@ -835,8 +835,9 @@ $c_ident::init()
                     # For objects that require knowing the cache line size,
                     # set the value here.
                     if vtype.c_ident in ("TBETable"):
-                        block_size_func = "m_ruby_system->getBlockSizeBytes()"
-                        code(f"(*{vid}).setBlockSize({block_size_func});")
+                        if "no_auto_block_size" not in var:
+                            block_size_func = "m_ruby_system->getBlockSizeBytes()"
+                            code(f"(*{vid}).setBlockSize({block_size_func});")
 
                     if vtype.c_ident in ("NetDest", "PerfectCacheMemory"):
                         code(f"(*{vid}).setRubySystem(m_ruby_system);")

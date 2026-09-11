@@ -407,14 +407,31 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType primary_type,
     // Normal path — unchanged
     // Check if there is any outstanding request for the same cache line.
     auto &seq_req_list = m_RequestTable[line_addr];
-    // Create a default entry
+
+    if (!seq_req_list.empty()) {
+        // Aliased — another request is already outstanding for this line.
+
+        // If the new request is indirect (has a DAG), merge its
+        // descriptors into the first indirect request's DAG for this line.
+        if (auto new_dag = pkt->req->getExtension<DependentAccessGen>()) {
+            auto it = m_IndirectDAGTable.find(line_addr);
+            if (it != m_IndirectDAGTable.end()) {
+                it->second->merge(*new_dag);
+            } else {
+                // First indirect for this line (prior requests were normal).
+                m_IndirectDAGTable[line_addr] = new_dag;
+            }
+        }
+        seq_req_list.emplace_back(pkt, primary_type,
+            secondary_type, curCycle());
+        m_outstanding_count++;
+        return RequestStatus_Aliased;
+    }
+
+    // First request for this line.
     seq_req_list.emplace_back(pkt, primary_type,
         secondary_type, curCycle());
     m_outstanding_count++;
-
-    if (seq_req_list.size() > 1) {
-        return RequestStatus_Aliased;
-    }
 
     m_outstandReqHist.sample(m_outstanding_count);
 
@@ -497,11 +514,14 @@ void
 Sequencer::writeCallbackScFail(Addr address, DataBlock& data)
 {
     llscClearMonitor(address);
-    writeCallback(address, data);
+    // MYSTUFF NOTE: I have added the argument accAddr to callbacks for read
+    // and write. However, this does not seem to matter to me now, so just
+    // passing line address as accAddr.
+    writeCallback(address, address, data);
 }
 
 void
-Sequencer::writeCallback(Addr address, DataBlock& data,
+Sequencer::writeCallback(Addr address, Addr accAddress, DataBlock& data,
                          const bool externalHit, const MachineType mach,
                          const Cycles initialRequestTime,
                          const Cycles forwardRequestTime,
@@ -603,6 +623,7 @@ Sequencer::writeCallback(Addr address, DataBlock& data,
     // free all outstanding requests corresponding to this address
     if (seq_req_list.empty()) {
         m_RequestTable.erase(address);
+        m_IndirectDAGTable.erase(address);
     }
 }
 
@@ -642,7 +663,7 @@ Sequencer::processReadCallback(SequencerRequest &seq_req,
 }
 
 void
-Sequencer::readCallback(Addr address, DataBlock& data,
+Sequencer::readCallback(Addr address, Addr accAddress, DataBlock& data,
                         bool externalHit, const MachineType mach,
                         Cycles initialRequestTime,
                         Cycles forwardRequestTime,
@@ -656,7 +677,6 @@ Sequencer::readCallback(Addr address, DataBlock& data,
     // Two-uop model: all requests (including indirect uop1) are in
     // m_RequestTable. No m_IndirectRequestTable lookup needed.
     assert(address == makeLineAddress(address));
-    assert(m_RequestTable.find(address) != m_RequestTable.end());
 
     auto &seq_req_list = m_RequestTable[address];
 
@@ -695,7 +715,39 @@ Sequencer::readCallback(Addr address, DataBlock& data,
 
     // free all outstanding requests corresponding to this address
     if (seq_req_list.empty()) {
+            if (m_IndirectDAGTable.find(address) != m_IndirectDAGTable.end()) {
+                RequestPtr dummy_req = std::make_shared<Request>();
+                dummy_req->setExtension<DependentAccessGen>(m_IndirectDAGTable[address]);
+                PacketPtr dummy_pkt = new Packet(dummy_req, MemCmd::InvalidCmd);
+
+                // Assign a unique notif ID for tracking this dummy_pkt.
+                // The protocol will use this ID (via txnId) to identify
+                // the NotifAck and call cleanupNotifPkt.
+                uint64_t notifId = m_nextNotifId++;
+                m_NotifPktTable[notifId] = dummy_pkt;
+                m_NotifIdTable[dummy_req] = notifId;
+
+                auto msg = std::make_shared<RubyRequest>(
+                                            clockEdge(),
+                                            m_ruby_system->getBlockSizeBytes(),
+                                            m_ruby_system, address,
+                                            m_ruby_system->getBlockSizeBytes(),
+                                            0, RubyRequestType_NOTIFY_INDIDX,
+                                            RubyAccessMode_Supervisor,
+                                            dummy_pkt, PrefetchBit_No, 0, coreId()
+                                        );
+                Cycles latency = m_controller->mandatoryQueueLatency(RubyRequestType_NOTIFY_INDIDX);
+                DPRINTFR(ProtocolTrace, "%15s %3s %10s%20s %6s>%-6s %#x %s\n",
+                        curTick(), m_version, "Seq", "Begin", "", "",
+                        printAddress(msg->getPhysicalAddress()),
+                        RubyRequestType_to_string(RubyRequestType_NOTIFY_INDIDX));
+                m_mandatory_q_ptr->enqueue(msg, clockEdge(), latency,
+                                        m_ruby_system->getRandomization(),
+                                        m_ruby_system->getWarmupEnabled()
+                                    );
+            }
         m_RequestTable.erase(address);
+        m_IndirectDAGTable.erase(address);
     }
 }
 
@@ -788,63 +840,32 @@ Sequencer::readCallback(Addr address, DataBlock& data,
 // }
 // FFUTSYM
 
-// MYSTUFF: Specialized callbacks for indirect-value accesses (Phase 2).
-// Called by the protocol when ReadValue/WriteValue responses arrive.
-
-void
-Sequencer::indirectReadCallback(Addr address, DataBlock& data)
+uint64_t
+Sequencer::getNotifId(const RequestPtr& req) const
 {
-    Addr line_addr = makeLineAddress(address);
-    auto it = m_IndirectRequestTable.find(line_addr);
-
-    if (it != m_IndirectRequestTable.end() && !it->second.pending.empty()) {
-        // Case A: uop1 is waiting — serve it directly.
-        SequencerRequest &sreq = it->second.pending.front();
-        DPRINTF(IndirectAccess, "indirectReadCallback: serving held "
-                "uop1 for addr 0x%x\n", address);
-        hitCallback(&sreq, data, true, MachineType_NULL, true,
-                    sreq.issue_time, Cycles(0), Cycles(0), false);
-        // FIXME: We should fix this.
-        // markRemoved();
-        it->second.pending.pop_front();
-        if (it->second.pending.empty()) {
-            m_IndirectRequestTable.erase(it);
-        }
-    } else {
-        // Case B: uop1 hasn't arrived yet — set sense bit.
-        auto &entry = m_IndirectRequestTable[line_addr];
-        entry.cacheReady = true;
-        DPRINTF(IndirectAccess, "indirectReadCallback: ReadValue arrived "
-                "before uop1 for addr 0x%x — setting sense bit\n", address);
-    }
+    auto it = m_NotifIdTable.find(req);
+    panic_if(it == m_NotifIdTable.end(),
+             "getNotifId: no notif ID found for request %p", req.get());
+    return it->second;
 }
 
 void
-Sequencer::indirectWriteCallback(Addr address, DataBlock& data)
+Sequencer::cleanupNotifPkt(uint64_t notifId)
 {
-    Addr line_addr = makeLineAddress(address);
-    auto it = m_IndirectRequestTable.find(line_addr);
+    auto pkt_it = m_NotifPktTable.find(notifId);
+    panic_if(pkt_it == m_NotifPktTable.end(),
+             "cleanupNotifPkt: no dummy_pkt for notifId %llu", notifId);
 
-    if (it != m_IndirectRequestTable.end() && !it->second.pending.empty()) {
-        // Case A: uop1 (store) is waiting — serve it directly.
-        SequencerRequest &sreq = it->second.pending.front();
-        DPRINTF(IndirectAccess, "indirectWriteCallback: serving held "
-                "uop1 for addr 0x%x\n", address);
-        hitCallback(&sreq, data, true, MachineType_NULL, true,
-                    sreq.issue_time, Cycles(0), Cycles(0), false);
-        // FIXME: We should fix this.
-        // markRemoved();
-        it->second.pending.pop_front();
-        if (it->second.pending.empty()) {
-            m_IndirectRequestTable.erase(it);
-        }
-    } else {
-        // Case B: uop1 hasn't arrived yet — set sense bit.
-        auto &entry = m_IndirectRequestTable[line_addr];
-        entry.cacheReady = true;
-        DPRINTF(IndirectAccess, "indirectWriteCallback: WriteValue arrived "
-                "before uop1 for addr 0x%x — setting sense bit\n", address);
-    }
+    // Remove the RequestPtr → notifId mapping
+    RequestPtr req = pkt_it->second->req;
+    m_NotifIdTable.erase(req);
+
+    // Delete the leaked dummy_pkt and remove from table
+    delete pkt_it->second;
+    m_NotifPktTable.erase(pkt_it);
+
+    DPRINTF(IndirectAccess, "cleanupNotifPkt: cleaned up notifId %llu\n",
+            notifId);
 }
 // FFUTSYM
 
@@ -901,6 +922,7 @@ Sequencer::atomicCallback(Addr address, DataBlock& data,
     // free all outstanding requests corresponding to this address
     if (seq_req_list.empty()) {
         m_RequestTable.erase(address);
+        m_IndirectDAGTable.erase(address);
     }
 }
 
@@ -976,6 +998,9 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
                        const Cycles firstResponseTime,
                        const bool was_coalesced)
 {
+    DPRINTF(IndirectAccess, "hitCallback for %s addr %#lx\n",
+            RubyRequestType_to_string(srequest->m_type), srequest->pkt->getAddr());
+
     warn_once("Replacement policy updates recently became the responsibility "
               "of SLICC state machines. Make sure to setMRU() near callbacks "
               "in .sm files!");
@@ -1013,7 +1038,8 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
             (type == RubyRequestType_Load_Linked) ||
             (type == RubyRequestType_ATOMIC_RETURN) ||
             // MYSTUFF
-            (type == RubyRequestType_LDIND)
+            (type == RubyRequestType_LDIND) ||
+            (type == RubyRequestType_STIND)
             // FFUTSYM
             ) {
             pkt->setData(
@@ -1362,36 +1388,7 @@ Sequencer::makeRequest(PacketPtr pkt)
 
     // MYSTUFF: Indirect-value access routing (uop1 for ldind/stind).
     // uop1 has IAA extension but is NOT LDIND/STIND (those are uop0 types).
-    // Route through m_IndirectRequestTable instead of normal path.
-    if (pkt->req->getExtension<IndirectAccessAlias>() != nullptr &&
-        primary_type != RubyRequestType_LDIND &&
-        primary_type != RubyRequestType_STIND) {
-
-        Addr line_addr = makeLineAddress(pkt->getAddr());
-        auto it = m_IndirectRequestTable.find(line_addr);
-
-        if (it != m_IndirectRequestTable.end() && it->second.cacheReady) {
-            // Case B: ReadValue already completed (sense bit set).
-            // Issue to cache normally — guaranteed hit.
-            DPRINTF(IndirectAccess, "Indirect-value req for addr 0x%x: "
-                    "sense bit set, issuing to cache (will hit)\n",
-                    pkt->getAddr());
-            m_IndirectRequestTable.erase(it);
-            // Fall through to normal insertRequest + issueRequest below
-        } else {
-            // Case A: ReadValue hasn't arrived yet — hold uop1.
-            auto &entry = m_IndirectRequestTable[line_addr];
-            entry.cacheReady = false;
-            entry.pending.emplace_back(pkt, primary_type,
-                secondary_type, curCycle());
-            // m_outstanding_count++;
-            DPRINTF(IndirectAccess, "Holding indirect-value req for "
-                    "addr 0x%x in m_IndirectRequestTable\n",
-                    pkt->getAddr());
-
-            return RequestStatus_Issued;
-        }
-    }
+    // MYSTUFF
     // FFUTSYM
 
     RequestStatus status = insertRequest(pkt, primary_type, secondary_type);
@@ -1414,8 +1411,9 @@ Sequencer::makeRequest(PacketPtr pkt)
 
     // non-aliased with any existing request in the request table, just issue
     // to the cache
-    if (status != RequestStatus_Aliased)
+    if (status != RequestStatus_Aliased) {
         issueRequest(pkt, secondary_type);
+    }
 
     // MYSTUFF
     handleIndExit(pkt);

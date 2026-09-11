@@ -276,7 +276,7 @@ class CacheMemory : public SimObject
     std::unordered_map<std::string, statistics::Histogram*> usefulBytes;
     std::unordered_map<std::string, statistics::Histogram*> readUsefulBytes;
     std::unordered_map<std::string, statistics::Histogram*> writeUsefulBytes;
-    std::unordered_map<std::string, std::unordered_map<MachineID, statistics::Scalar*>> bytesTransferred;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::unordered_map<MachineID, statistics::Scalar*>>> bytesTransferred;
     // FFUTSYM
 
     public:
@@ -292,7 +292,7 @@ class CacheMemory : public SimObject
       void profilePrefetchMiss();
 
       // MYSTUFF
-      void profileTransfer(MachineID dst, std::string acc_name, int num_bytes);
+      void profileTransfer(MachineID dst, std::string acc_name, int num_bytes, std::string transfer_type);
       // FFUTSYM
 
 };

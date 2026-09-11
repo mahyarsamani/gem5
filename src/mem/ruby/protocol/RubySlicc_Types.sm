@@ -126,16 +126,16 @@ structure (NetDest, external = "yes", non_obj="yes", implicit_ctor="m_ruby_syste
 }
 
 structure (Sequencer, external = "yes") {
-  void readCallback(Addr, DataBlock);
-  void readCallback(Addr, DataBlock, bool);
-  void readCallback(Addr, DataBlock, bool, MachineType);
-  void readCallback(Addr, DataBlock, bool, MachineType,
+  void readCallback(Addr, Addr, DataBlock);
+  void readCallback(Addr, Addr, DataBlock, bool);
+  void readCallback(Addr, Addr, DataBlock, bool, MachineType);
+  void readCallback(Addr, Addr, DataBlock, bool, MachineType,
                     Cycles, Cycles, Cycles);
 
-  void writeCallback(Addr, DataBlock);
-  void writeCallback(Addr, DataBlock, bool);
-  void writeCallback(Addr, DataBlock, bool, MachineType);
-  void writeCallback(Addr, DataBlock, bool, MachineType,
+  void writeCallback(Addr, Addr, DataBlock);
+  void writeCallback(Addr, Addr, DataBlock, bool);
+  void writeCallback(Addr, Addr, DataBlock, bool, MachineType);
+  void writeCallback(Addr, Addr, DataBlock, bool, MachineType,
                      Cycles, Cycles, Cycles);
   void writeUniqueCallback(Addr, DataBlock);
 
@@ -164,10 +164,15 @@ structure (Sequencer, external = "yes") {
   bool checkResourceAvailable(CacheResourceType, Addr);
 
   // MYSTUFF
-  void prepareIndPacket(Addr, RequestPtr);
-  void indirectReadCallback(Addr, DataBlock);
-  void indirectWriteCallback(Addr, DataBlock);
+  // void prepareIndPacket(Addr, RequestPtr);
+  // void indirectReadCallback(Addr, DataBlock);
+  // void indirectWriteCallback(Addr, DataBlock);
+  void trackIndirectValueCached(Addr);
+  void checkIndirectValueEvicted(Addr);
+  void expectStalledIndirectRequest(Addr);
   bool canOverride(std::string name);
+  Addr getNotifId(RequestPtr);
+  void cleanupNotifPkt(Addr);
   // FFUTSYM
 }
 
@@ -260,7 +265,7 @@ structure (CacheMemory, external = "yes") {
   void profilePrefetchHit();
   void profilePrefetchMiss();
   // MYSTUFF
-  void profileTransfer(MachineID, std::string, int);
+  void profileTransfer(MachineID, std::string, int, std::string);
   // FFUTSYM
 }
 

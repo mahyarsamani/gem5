@@ -105,6 +105,8 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   int number_of_repl_TBEs;
   int number_of_DVM_TBEs;
   int number_of_DVM_snoop_TBEs;
+  int number_of_HOV_TBEs := 16;
+  int idr_collision_delay_cy := 1;
 
   // replacements use the same TBE slot as the request that triggered it
   // in this case the number_of_repl_TBEs parameter is ignored
@@ -586,8 +588,16 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     PostEvictIdxLine, desc="Evict a Line holding index elements in a cache upstream to gather unit.";
 
     UpdateDAG,        in_trans="yes", desc="";
-    FinalIDR,         desc="Issue one dependent request during finalization";
-    FinalDealloc,     desc="Deallocate TBE and transition to final stable state";
+    PostProcess,      desc="Post-processing: push IDR/notif/evict actions one at a time";
+    SendIDR,          in_trans="yes", desc="Send one ReadValue/WriteValue IDR (non-blocking)";
+    SendPostNotif,    desc="Send NotifyIndIdx after all IDRs";
+    TriggerPostEvict,    desc="Trigger propagate evict for index line";
+
+    // HOV-specific events
+    HovAck,           desc="Ack from Indirect Unit for ReadValue/WriteValue acceptance";
+    SendHovAck,       desc="Send HovAck to gather unit for ReadValue/WriteValue acceptance";
+    NotifAck,         desc="Ack from downstream for NotifyIndIdx";
+
     // FFUTSYM
     // This is triggered once a transaction doesn't have
     // any queued action and is not expecting responses/data. The transaction
@@ -814,11 +824,10 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     WriteMask read_usefulness,     desc="Mask denoting bytes that were useful for read.";
     WriteMask write_usefulness,    desc="Mask denoting bytes that were useful for write.";
 
-    bool need_post_evict,          default="false", desc="";
-    bool need_post_notif,          default="false", desc="";
-
-    bool post_evict,               default="false", desc="";
     std::string access_name,       desc="Name of the access from high level program.";
+
+    bool postNotifSent,            default="false", desc="PostNotif has been sent during post-processing";
+    bool postEvictSent,            default="false", desc="PostEvict has been sent during post-processing";
     // FFUTSYM:
   }
 
@@ -885,6 +894,11 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   TBETable dvmSnpTBEs,      template="<Cache_TBE>", constructor="m_number_of_DVM_snoop_TBEs";
   TBEStorage storDvmSnpTBEs, constructor="this, m_number_of_DVM_snoop_TBEs";
 
+  // TBE table for outgoing HOV ReadValue/WriteValue requests (Gather Unit)
+  // Keyed by accAddr (element address) to avoid collisions with main TBEs
+  TBETable hovTBEs,      template="<Cache_TBE>", constructor="m_number_of_HOV_TBEs, 1", no_auto_block_size="true";
+  TBEStorage storHovTBEs, constructor="this, m_number_of_HOV_TBEs";
+
   // Interface to prefetchers
   RubyPrefetcherProxy pfProxy, constructor="this, m_prefetcher_ptr, m_prefetchQueue_ptr";
 
@@ -910,6 +924,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     MachineID retryDest;
     bool usesTxnId;
     Addr txnId;
+    CHIRequestType secondType, default="CHIRequestType_null";
 
     bool functionalRead(Packet *pkt) { return false; }
     bool functionalRead(Packet *pkt, WriteMask &mask) { return false; }

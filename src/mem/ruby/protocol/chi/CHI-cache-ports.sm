@@ -85,6 +85,21 @@ in_port(rspInPort, CHIResponseMsg, rspIn, rank=10,
         TBE tbe := getDvmTBE(in_msg.txnId);
         trigger(respToEvent(in_msg.type, tbe), in_msg.txnId,
                 nullCacheEntry(), tbe);
+      } else if (in_msg.type == CHIResponseType:HovAck) {
+        // HovAck always maps to hovTBEs (keyed by accAddr)
+        TBE tbe := hovTBEs[in_msg.addr];
+        trigger(Event:HovAck, in_msg.addr,
+                getCacheEntry(makeLineAddress(in_msg.addr)), tbe);
+      } else if ((in_msg.type == CHIResponseType:RetryAck ||
+                  in_msg.type == CHIResponseType:PCrdGrant) &&
+                 gather_unit &&
+                 (in_msg.secondType == CHIRequestType:ReadValue ||
+                  in_msg.secondType == CHIRequestType:WriteValue) &&
+                 hovTBEs.isPresent(in_msg.addr)) {
+        // RetryAck/PCrdGrant for a HOV request — dispatch to hovTBE
+        TBE tbe := hovTBEs[in_msg.addr];
+        trigger(respToEvent(in_msg.type, tbe), in_msg.addr,
+                getCacheEntry(makeLineAddress(in_msg.addr)), tbe);
       } else {
         TBE tbe := getCurrentActiveTBE(in_msg.addr);
         trigger(respToEvent(in_msg.type, tbe), in_msg.addr,
@@ -480,8 +495,12 @@ void processNextState(Addr address, TBE tbe, CacheEntry cache_entry) {
 
     tbe.pendAction := Event:null;
     if (tbe.actions.empty()) {
-      // time to go to the final state
-      tbe.pendAction := Event:Final;
+      if (needsPostProcess(address, tbe)) {
+        tbe.pendAction := Event:PostProcess;
+      } else {
+        // time to go to the final state
+        tbe.pendAction := Event:Final;
+      }
     } else {
       tbe.pendAction := tbe.actions.front();
       tbe.actions.pop();

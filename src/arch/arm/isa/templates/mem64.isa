@@ -990,7 +990,8 @@ def template LoadIndirectConstructor {{
             (RegIndex)_index_reg,   // indexReg
             (RegIndex)_src_alias,   // aliasReg (same as dest, for IAA value)
             (RegIndex)_base_data,   // baseData (for DAG extension)
-            %(size_index)d, %(size_data)d);
+            %(size_index)d, %(size_data)d,
+            true /* isLoad */);
 
         // uop1: load data[index[i]] from data array
         // Sources: Rd+1 (index value from uop0), base_data
@@ -1088,7 +1089,8 @@ def template StoreIndirectConstructor {{
             (RegIndex)_index_reg,   // indexReg
             (RegIndex)_src_alias,   // aliasReg
             (RegIndex)_base_data,   // baseData (for DAG extension)
-            %(size_index)d, %(size_data)d);
+            %(size_index)d, %(size_data)d,
+            false /* isLoad */);
 
         // uop1: store data[index[i]] to data array
         // Sources: Rd+1 (index value from uop0), base_data, Rd (data to store)

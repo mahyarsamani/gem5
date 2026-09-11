@@ -1225,80 +1225,119 @@ class IndirectAccessAlias: public Extension<Request, IndirectAccessAlias>
 
 class DependentAccessGen: public Extension<Request, DependentAccessGen>
 {
+  public:
+    using AddrTranslator = std::function<Addr(Addr)>;
+
+    /** Read (gather) or Write (scatter) intent for Phase 2. */
+    enum class AccessIntent { Read, Write };
+
+    /** Descriptor for a single dependent (Phase 2) access. */
+    struct DepDescriptor {
+        AccessIntent intent;        // Read (gather) or Write (scatter)
+        Addr indexAddr;
+        Addr baseAddr;              // base address of data array
+        size_t dataSize;            // sizeof one data element
+        AddrTranslator translateFn; // VA→PA translator for this array
+    };
+
   protected:
     RequestorID _requestorId;
-
     size_t _indexSize;
-    size_t _dataSize;
-
-    bool _hasData;
-    uint8_t* _storeData;
-
-    using AddrTranslator = std::function<Addr(Addr)>;
-    AddrTranslator _translateFn;
+    std::vector<DepDescriptor> _descriptors;
 
   public:
     DependentAccessGen():
         Extension<Request, DependentAccessGen>(),
-        _requestorId(0), _indexSize(0), _dataSize(0),
-        _hasData(false), _storeData(nullptr),
-        _translateFn(nullptr)
+        _requestorId(0), _indexSize(0)
     {}
 
-    DependentAccessGen(size_t index_size, size_t data_size):
+    DependentAccessGen(size_t index_size):
         Extension<Request, DependentAccessGen>(),
-        _requestorId(0), _indexSize(index_size), _dataSize(data_size),
-        _hasData(false), _storeData(nullptr),
-        _translateFn(nullptr)
+        _requestorId(0), _indexSize(index_size)
     {}
 
-    virtual ~DependentAccessGen() {
-        if (_storeData) {
-            delete[] _storeData;
-        }
-    }
+    virtual ~DependentAccessGen() = default;
 
-    DependentAccessGen(const DependentAccessGen& other):
-        Extension<Request, DependentAccessGen>(other),
-        _requestorId(other._requestorId),
-        _indexSize(other._indexSize), _dataSize(other._dataSize),
-        _hasData(other._hasData),
-        _storeData(nullptr),
-        _translateFn(other._translateFn)
+    DependentAccessGen(const DependentAccessGen& other) = default;
+
+    // --- Descriptor management ---
+
+    void addDescriptor(AccessIntent intent, Addr index_addr, Addr base,
+                       size_t data_size, AddrTranslator fn = nullptr)
     {
-        if (other._storeData) {
-            _storeData = new uint8_t[_dataSize];
-            std::memcpy(_storeData, other._storeData, _dataSize);
-        }
+        _descriptors.push_back(
+            {intent, index_addr, base, data_size, std::move(fn)});
     }
 
-    // Store original request's requestorId at DAG creation time
-    // so genNextRequest doesn't need the original request.
+    size_t numDescriptors() const { return _descriptors.size(); }
+    bool isMerged() const { return _descriptors.size() > 1; }
+
+    const DepDescriptor& descriptor(size_t i) const {
+        return _descriptors.at(i);
+    }
+
+    DepDescriptor& mutableDescriptor(size_t i) {
+        return _descriptors.at(i);
+    }
+
+    /** Update indexAddr and baseAddr to physical addresses after
+     *  translation. Asserts this is a single (non-merged) DAG. */
+    void setPhysicalAddrPair(Addr index_paddr, Addr base_paddr) {
+        assert(!isMerged() && "setPhysicalAddrPair on merged DAG — unwrap first");
+        auto& desc = _descriptors.front();
+        desc.indexAddr = index_paddr;
+        desc.baseAddr = base_paddr;
+    }
+
+    // --- Merge & Unwrap ---
+
+    /** Merge another DAG's descriptors into this one. */
+    void merge(const DependentAccessGen& other) {
+        _descriptors.insert(_descriptors.end(),
+                            other._descriptors.begin(),
+                            other._descriptors.end());
+    }
+
+    /** Unwrap into individual single-descriptor DAGs. */
+    virtual std::vector<std::unique_ptr<DependentAccessGen>>
+        unwrap() const = 0;
+
+    // --- Per-access methods (all assert !isMerged()) ---
+
     void setRequestorId(RequestorID rid) {
         _requestorId = rid;
     }
 
-    // Size of the index element (e.g., 4 or 8 bytes) that this DAG
-    // expects to read from the index cache line.
-    size_t indexSize() const { return _indexSize; }
-
-    // Size of the data element (e.g., 4 or 8 bytes) for
-    // the dependent (Phase 2) access.
-    size_t dataSize() const { return _dataSize; }
-
-    bool hasData() const { return _hasData; }
-    const uint8_t* getStoreData() const { return _storeData; }
-    void setStoreData(const uint8_t* data, size_t size) {
-        if (_storeData) delete[] _storeData;
-        _dataSize = size;
-        _storeData = new uint8_t[size];
-        std::memcpy(_storeData, data, size);
-        _hasData = true;
+    size_t indexSize() const {
+        assert(!isMerged() &&
+               "indexSize() called on merged DAG — unwrap first");
+        return _indexSize;
     }
 
-    bool hasTranslator() const { return static_cast<bool>(_translateFn); }
-    void setTranslator(AddrTranslator fn) { _translateFn = std::move(fn); }
+    size_t dataSize() const {
+        assert(!isMerged() &&
+               "dataSize() called on merged DAG — unwrap first");
+        return _descriptors.front().dataSize;
+    }
 
+    bool hasTranslator() const {
+        assert(!isMerged() &&
+               "hasTranslator() called on merged DAG — unwrap first");
+        return static_cast<bool>(_descriptors.front().translateFn);
+    }
+
+    void setTranslator(AddrTranslator fn) {
+        assert(!isMerged() &&
+               "setTranslator() called on merged DAG — unwrap first");
+        _descriptors.front().translateFn = std::move(fn);
+    }
+
+    /** Compute the target address for an index value without creating
+     *  a full Request. Each DAG subclass implements its own address
+     *  computation (with or without translation). */
+    virtual Addr genAddress(uint64_t index_value) const = 0;
+
+    /** Generate Phase 2 request. Asserts single descriptor. */
     virtual RequestPtr genNextRequest(uint64_t index_value) = 0;
 };
 

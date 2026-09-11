@@ -92,15 +92,12 @@ class AbstractController : public ClockedObject, public Consumer
     std::unordered_map<Addr, Addr> addrToAliasMap;
     std::unordered_map<Addr, Addr> aliasToAddrMap;
 
-    // Per-line cache of Request extensions extracted from seqReq on arrival.
+    // Per-line cache of DAGs extracted from seqReq on arrival.
     // Keyed by line address. Supports multiple sub-line entries per line
     // (e.g., index[i] and index[i+1] in the same cache line).
-    struct CachedEntry {
-        bool read;  // true = gather (ReadValue), false = scatter (WriteValue)
-        int offset;   // byte offset of this index element within the line
-        std::shared_ptr<DependentAccessGen> dag;
-    };
-    std::unordered_map<Addr, std::vector<CachedEntry>> m_cachedEntries;
+    // read and offset are derived from the DAG descriptor when needed.
+    std::unordered_map<Addr,
+        std::vector<std::shared_ptr<DependentAccessGen>>> m_cachedEntries;
 
   protected:
     // NOTE: Pointer to all sequencers that are upstream to this controller.
@@ -118,10 +115,16 @@ class AbstractController : public ClockedObject, public Consumer
     RequestPtr getDependentReq(Addr line_addr, DataBlock &index_data);
 
     // Extract extensions from a Request and append to m_cachedEntries[lineAddr].
-    void extractExtensions(bool read, Addr line_addr, Addr acc_addr, RequestPtr req);
+    void extractExtensions(Addr line_addr, RequestPtr req);
 
     // Check if there are remaining entries for this lineAddr.
     bool hasDependentWork(Addr line_addr);
+
+    // Peek at the next dependent request's physical address without popping.
+    Addr peekDependentAddr(Addr line_addr, DataBlock &index_data);
+
+    // Drop the front dependent entry without generating a request.
+    void dropDependentReq(Addr line_addr);
 
     // Clear all entries for lineAddr.
     void clearExtensions(Addr line_addr);

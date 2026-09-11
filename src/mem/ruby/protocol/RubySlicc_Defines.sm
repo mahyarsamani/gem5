@@ -46,8 +46,10 @@ void setAliasForAddr(Addr, Addr);
 Addr getAddr(Addr);
 
 RequestPtr getDependentReq(Addr, DataBlock);
-void extractExtensions(bool, Addr, Addr, RequestPtr);
+void extractExtensions(Addr, RequestPtr);
 bool hasDependentWork(Addr);
+Addr peekDependentAddr(Addr, DataBlock);
+void dropDependentReq(Addr);
 void clearExtensions(Addr);
 
 bool hasPostEvict(Addr);

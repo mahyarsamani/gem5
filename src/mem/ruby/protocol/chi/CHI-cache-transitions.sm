@@ -242,9 +242,6 @@ transition(I, ReadOnce, BUSY_BLKD) {
 transition({UD,SD,UC,SC,UD_RSC,SD_RSC,UC_RSC,SC_RSC,UD_RSD,SD_RSD}, ReadOnce, BUSY_BLKD) {
   Initiate_Request;
   Initiate_ReadOnce_Hit;
-  // MYSTUFF
-  Detect_UpstreamGatherIdx_Hit;
-  // FFUTSYM
   Profile_Hit;
   Pop_ReqRdyQueue;
   ProcessNextState;
@@ -253,9 +250,6 @@ transition({UD,SD,UC,SC,UD_RSC,SD_RSC,UC_RSC,SC_RSC,UD_RSD,SD_RSD}, ReadOnce, BU
 transition({UD_RU,UC_RU,RU,RSD,RUSD,RSC,RUSC}, ReadOnce, BUSY_BLKD) {
   Initiate_Request;
   Initiate_ReadOnce_HitUpstream;
-  // MYSTUFF
-  Detect_UpstreamGatherIdx_Hit;
-  // FFUTSYM
   Profile_Miss;
   Pop_ReqRdyQueue;
   ProcessNextState;
@@ -615,9 +609,6 @@ transition(I, AtomicNoReturn_PoC, BUSY_BLKD) {
 transition({UD,UD_T,SD,UC,SC}, Load, BUSY_BLKD) {
   Initiate_Request;
   Initiate_LoadHit;
-  // MYSTUFF
-  Detect_UpstreamGatherIdx_Hit;
-  // FFUTSYM
   Profile_Hit;
   Pop_ReqRdyQueue;
   ProcessNextState;
@@ -764,9 +755,6 @@ transition(SC, AtomicStore, BUSY_BLKD) {
 transition({UD_RSC,SD_RSC,UC_RSC,SC_RSC,UD_RSD,SD_RSD,RSC,RSD,RUSD,RUSC}, Evict, BUSY_BLKD) {
   Initiate_Request;
   Initiate_Evict;
-  // MYSTUFF
-  Detect_UpstreamGatherIdx_Hit;
-  // FFUTSYM
   Pop_ReqRdyQueue;
   ProcessNextState;
 }
@@ -785,9 +773,6 @@ transition({UD,UD_RSC,SD_RSC,UC_RSC,SC_RSC,UD_RU,UC_RU, UD_RSD, SD_RSD, RU, RSC,
 transition({UD_RU, UC_RU, RU, UD_RSD, SD_RSD, RSD, RUSD}, {WriteBackFull, WriteCleanFull}, BUSY_BLKD) {
   Initiate_Request;
   Initiate_CopyBack;
-  // MYSTUFF
-  Detect_UpstreamGatherIdx_Hit;
-  // FFUTSYM
   Pop_ReqRdyQueue;
   ProcessNextState;
 }
@@ -1621,34 +1606,61 @@ transition(BUSY_INTR, WriteZero) {
   ProcessNextState_ClearPending;
 }
 
-// Finalization transition
-
+// Finalization transition — original form with * for state transition
 transition({BUSY_BLKD,BUSY_INTR}, Final, *) {
   Pop_TriggerQueue;
   Finalize_UpdateCacheFromTBE;
   Finalize_UpdateDirectoryFromTBE;
-  Trigger_IDR_Or_Dealloc;
-  ProcessNextState_ClearPending;
+  Finalize_DeallocateRequest;
 }
 
 // MYSTUFF
-// After Final transitions to stable state via *, FinalIDR and FinalDealloc
-// fire in the stable state. Must match all possible final stable states.
-transition({I, SC, UC, SD, UD, UD_T,
-            RU, RSC, RSD, RUSC, RUSD,
-            SC_RSC, SD_RSC, SD_RSD,
-            UC_RSC, UC_RU, UD_RU, UD_RSD, UD_RSC}, FinalIDR) {
+// PostProcess: auto-pushed by processNextState when needsPostProcess is true.
+// Pushes exactly one action (hierarchical: IDR > notif > evict) per invocation.
+transition({BUSY_BLKD, BUSY_INTR}, PostProcess) {
   Pop_TriggerQueue;
-  Initiate_One_Dependent_Request;
+  PostProcess;
   ProcessNextState_ClearPending;
 }
 
-transition({I, SC, UC, SD, UD, UD_T,
-            RU, RSC, RSD, RUSC, RUSD,
-            SC_RSC, SD_RSC, SD_RSD,
-            UC_RSC, UC_RU, UD_RU, UD_RSD, UD_RSC}, FinalDealloc) {
+// SendIDR: fires in BUSY (NB), sends one ReadValue/WriteValue
+transition({BUSY_BLKD, BUSY_INTR}, SendIDR) {
   Pop_TriggerQueue;
-  Finalize_DeallocateRequest;
+  SendIDR;
+  ProcessNextState_ClearPending;
+}
+
+// SendPostNotif: fires in BUSY, sends NotifyIndIdx
+transition({BUSY_BLKD, BUSY_INTR}, SendPostNotif) {
+  Pop_TriggerQueue;
+  SendPostNotif;
+  ProcessNextState_ClearPending;
+}
+
+// TriggerPostEvict: fires in BUSY, sends propagate evict
+transition({BUSY_BLKD, BUSY_INTR}, TriggerPostEvict) {
+  Pop_TriggerQueue;
+  TriggerPostEvict;
+  ProcessNextState_ClearPending;
+}
+
+// SendHovAck: fires in BUSY, sends HovAck to gather unit
+transition({BUSY_BLKD, BUSY_INTR}, SendHovAck) {
+  Pop_TriggerQueue;
+  Send_HovAck;
+  ProcessNextState_ClearPending;
+}
+
+// HOV ack received — deallocate HOV TBE.
+// HovAck is for the separate hovTBE pool and can arrive regardless of the
+// regular cache state for the data address. Do not change state.
+transition({null, I, SC, UC, SD, UD, UD_T,
+            RU, RSC, RSD, RUSC, RUSD,
+            SC_RSC, SD_RSC, SD_RSD, UC_RSC, UC_RU,
+            UD_RU, UD_RSD, UD_RSC,
+            BUSY_INTR, BUSY_BLKD}, HovAck) {
+  Receive_HovAck;
+  Pop_RespInQueue;
 }
 // FFUTSYM
 
@@ -1851,17 +1863,27 @@ transition(DvmExtOp_Finished, Final, I) {
 transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD,
             UC_RSC, UC_RU, UD_RU, UD_RSD, UD_RSC}, UpdateDAG, BUSY_BLKD) {
     Initiate_Request;
+    Send_NotifAck;
     Extract_Extensions;
     Pop_ReqRdyQueue;
     ProcessNextState;
 }
 
-transition({I, SC_RSC, SD_RSC, SD_RSD, UC_RSC, UC_RU, UD_RU,
+transition({I, SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD, UC_RSC, UC_RU, UD_RU,
         UD_RSD, UD_RSC, RU, RSC, RSD, RUSC, RUSD}, Fwd_NotifyIndIdx, BUSY_BLKD)
 {
     Initiate_Request;
-    Fwd_NotifyIndIdx;
+    Send_NotifAck;
     Pop_ReqRdyQueue;
+    Send_NotifyIndIdx;
+    ProcessNextState;
+}
+
+// NotifAck received — ack from downstream for our NotifyIndIdx
+transition({BUSY_BLKD, BUSY_INTR}, NotifAck) {
+    Receive_ReqResp;
+    Cleanup_NotifPkt;
+    Pop_RespInQueue;
     ProcessNextState;
 }
 

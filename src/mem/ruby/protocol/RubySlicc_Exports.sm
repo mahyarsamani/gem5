@@ -217,8 +217,9 @@ enumeration(RubyRequestType, desc="...", default="RubyRequestType_NULL") {
   hasNoAddr,        desc="Request for timing purposes in VIPERSequencer hitCallback and processReadCallback but reads no address";
   LDIND,             desc="Indirect Load";
   STIND,            desc="Indirect Store";
-  LDINDCOMP,        desc="Indirect Load Compacted";
-  STINDCOMP,        desc="Indirect Store Compacted";
+  VLDIND,        desc="Vector Indirect Load";
+  VSTIND,        desc="Vector Indirect Store";
+  NOTIFY_INDIDX, desc="";
 }
 
 bool isWriteRequest(RubyRequestType type);

@@ -356,6 +356,7 @@ class MicroIndIdx : public MightBeMicro64
     unsigned sizeData;      ///< bytes per data element (for DAG)
     uint64_t shiftAmtIndex; ///< log2(sizeIndex)
     unsigned memAccessFlags;
+    bool _isLoad;           ///< true = gather (ldind), false = scatter (stind)
 
     // Custom register index arrays
     RegId _srcRegIdxArr[4];
@@ -366,7 +367,8 @@ class MicroIndIdx : public MightBeMicro64
                 RegIndex _destIdx, RegIndex _baseIndex,
                 RegIndex _indexReg, RegIndex _aliasReg,
                 RegIndex _baseData,
-                unsigned _sizeIndex, unsigned _sizeData);
+                unsigned _sizeIndex, unsigned _sizeData,
+                bool isLoad);
 
     Fault execute(ExecContext *, trace::InstRecord *) const override;
     Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;

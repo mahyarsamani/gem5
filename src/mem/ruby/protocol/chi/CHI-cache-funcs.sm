@@ -436,6 +436,35 @@ void initializeTBE(TBE tbe, Addr addr, int storSlot) {
   tbe.is_stale := false;
 }
 
+// Initialize a HOV TBE with all fields needed for retry tracking.
+// Unlike initializeTBE, this populates the pendReq* fields so that
+// prepareRequestRetry produces valid messages if the request is retried.
+void initializeHovTBE(TBE hovTbe, Addr acc_addr, int storSlot,
+                      CHIRequestType reqType, RequestPtr depReq,
+                      NetDest dest, TBE parentTbe) {
+  // Base initialization
+  initializeTBE(hovTbe, acc_addr, storSlot);
+
+  // Retry fields — read by prepareRequestRetry
+  hovTbe.pendReqAllowRetry := true;
+  hovTbe.rcvdRetryAck := false;
+  hovTbe.rcvdRetryCredit := false;
+  hovTbe.pendReqType := reqType;
+  hovTbe.pendReqAccAddr := acc_addr;
+  hovTbe.pendReqAccSize := getSize(depReq);
+  hovTbe.pendReqDest := dest;
+
+  // Request pointer for the retry message
+  hovTbe.seqReq := depReq;
+  hovTbe.isSeqReqValid := true;
+
+  // Propagate HOV designation IDs from parent TBE
+  hovTbe.indirect_unit_id := parentTbe.indirect_unit_id;
+  hovTbe.value_unit_id := parentTbe.value_unit_id;
+  hovTbe.gather_unit_id := parentTbe.gather_unit_id;
+  hovTbe.alias := parentTbe.alias;
+}
+
 TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes" {
   // We must have reserved resources for this allocation
   storTBEs.decrementReserved();
@@ -707,20 +736,17 @@ void prepareRequest(TBE tbe, CHIRequestType type, CHIRequestMsg & out_msg) {
   out_msg.read_usefulness := tbe.read_usefulness;
   out_msg.write_usefulness := tbe.write_usefulness;
   out_msg.access_name := tbe.access_name;
+
+  out_msg.secondType := tbe.secondType;
   if (isConsideredEvict(out_msg.type)) {
     DPRINTF(Usefulness, "Sending read usefulness mask for name %s with count %d with evict message.\n", out_msg.access_name, out_msg.read_usefulness.count());
     DPRINTF(Usefulness, "Sending write usefulness mask for name %s with count %d with evict message.\n", out_msg.access_name, out_msg.write_usefulness.count());
-    if (tbe.post_evict) {
-        out_msg.secondType := CHIRequestType:PropagateEvict;
-    }
   }
   out_msg.alias := tbe.alias;
 
   out_msg.indirect_unit_id := tbe.indirect_unit_id;
   out_msg.value_unit_id := tbe.value_unit_id;
   out_msg.gather_unit_id := tbe.gather_unit_id;
-
-  out_msg.secondType := tbe.secondType;
   // FFUTSYM
 
   assert(tbe.txnId != static_cast(Addr, "value", -1));
@@ -1044,6 +1070,15 @@ void copyCacheAndDir(CacheEntry cache_entry, DirEntry dir_entry,
   tbe.dataToBeSharedClean := false;
   tbe.dataToBeInvalid := false;
 
+  // MYSTUFF: Copy designation IDs from cache_entry so that replacement
+  // writebacks and snoop responses carry the correct owner IDs.
+  if (is_valid(cache_entry)) {
+    tbe.indirect_unit_id := cache_entry.indirect_unit_id;
+    tbe.value_unit_id := cache_entry.value_unit_id;
+    tbe.gather_unit_id := cache_entry.gather_unit_id;
+  }
+  // FFUTSYM
+
   printTBEState(tbe);
 }
 
@@ -1060,6 +1095,11 @@ void copyCacheAndDirTBEs(TBE src, TBE dst) {
   dst.dir_owner := src.dir_owner;
   dst.dir_ownerExists := src.dir_ownerExists;
   dst.dir_ownerIsExcl := src.dir_ownerIsExcl;
+  // MYSTUFF: Copy designation IDs between TBEs (e.g. snoop hazard).
+  dst.indirect_unit_id := src.indirect_unit_id;
+  dst.value_unit_id := src.value_unit_id;
+  dst.gather_unit_id := src.gather_unit_id;
+  // FFUTSYM
   printTBEState(dst);
 }
 
@@ -1310,6 +1350,12 @@ bool isWriteReqType(CHIRequestType type) {
   return false;
 }
 
+bool isLoadOrStore(CHIRequestType type) {
+    return isReadReqType(type) || isWriteReqType(type) ||
+           type == CHIRequestType:AtomicLoad ||
+           type == CHIRequestType:AtomicStore;
+}
+
 bool isStashReqType(CHIRequestType type) {
   if (type == CHIRequestType:StashOnceShared ||
       type == CHIRequestType:StashOnceUnique) {
@@ -1400,7 +1446,7 @@ Event reqToEvent(CHIRequestType type, bool is_prefetch) {
     } else {
       return Event:AtomicNoReturn;
     }
-  } else if ((type == CHIRequestType:NotifyReadIndIdx) || (type == CHIRequestType:NotifyWriteIndIdx)) {
+  } else if (type == CHIRequestType:NotifyIndIdx) {
     return Event:Fwd_NotifyIndIdx;
   } else if (type == CHIRequestType:ProcessNotif) {
     return Event:UpdateDAG;
@@ -1477,6 +1523,8 @@ Event respToEvent (CHIResponseType type, TBE tbe) {
         return Event:PCrdGrant;
       }
     }
+  } else if (type == CHIResponseType:NotifAck) {
+    return Event:NotifAck;
   } else {
     error("Invalid CHIResponseType");
   }
@@ -1737,6 +1785,60 @@ void replicateTBE(TBE src, TBE dst) {
 
 }
 
+// Populates common fields of a CHIRequestMsg from a RubyRequest sequencer
+// message. Must be called inside:
+//   peek(seqInPort, RubyRequest) { enqueue(reqRdyOutPort, CHIRequestMsg) { ... } }
+void populateFromSeqReqMsg(CHIRequestMsg &out_msg, RubyRequest in_msg) {
+    out_msg.addr := in_msg.LineAddress;
+    assert((in_msg.Size > 0) && (in_msg.Size <= blockSize));
+    out_msg.accAddr := in_msg.PhysicalAddress;
+    out_msg.accSize := in_msg.Size;
+    out_msg.requestor := machineID;
+    out_msg.fwdRequestor := machineID;
+    out_msg.seqReq := in_msg.getRequestPtr();
+    out_msg.isSeqReqValid := true;
+    assert(in_msg.Prefetch == PrefetchBit:No);
+    out_msg.is_local_pf := false;
+    out_msg.is_remote_pf := false;
+    out_msg.txnId := max_outstanding_transactions;
+    // For NOTIFY_INDIDX, use the sequencer's notif ID for tracking
+    // the dummy_pkt lifecycle. The sequencer maps RequestPtr -> notifId.
+    if (in_msg.Type == RubyRequestType:NOTIFY_INDIDX) {
+        out_msg.txnId := sequencer.getNotifId(out_msg.seqReq);
+    }
+    out_msg.ns := !in_msg.isSecure;
+    out_msg.atomic_op.clear();
+    out_msg.atomic_op.orMask(in_msg.writeMask);
+
+    if ((in_msg.Type == RubyRequestType:LD) ||
+        (in_msg.Type == RubyRequestType:IFETCH)) {
+      out_msg.type := CHIRequestType:Load;
+    } else if (in_msg.Type == RubyRequestType:ST) {
+      if (in_msg.Size == blockSize) {
+        out_msg.type := CHIRequestType:StoreLine;
+      } else {
+        out_msg.type := CHIRequestType:Store;
+      }
+    } else if (in_msg.Type == RubyRequestType:LDIND) {
+      out_msg.type := CHIRequestType:ReadIndirect;
+    } else if (in_msg.Type == RubyRequestType:STIND) {
+      out_msg.type := CHIRequestType:WriteIndirect;
+    } else if (in_msg.Type == RubyRequestType:NOTIFY_INDIDX) {
+      out_msg.type := CHIRequestType:NotifyIndIdx;
+    } else if (in_msg.Type == RubyRequestType:ATOMIC_RETURN) {
+      out_msg.type := CHIRequestType:AtomicLoad;
+    } else if (in_msg.Type == RubyRequestType:ATOMIC_NO_RETURN) {
+      out_msg.type := CHIRequestType:AtomicStore;
+    } else {
+      error("Invalid RubyRequestType");
+    }
+
+    out_msg.access_name := in_msg.accessName;
+    out_msg.alias := in_msg.alias;
+    DPRINTF(Usefulness, "Setting access name for addr %#lx to %s.\n",
+            out_msg.addr, out_msg.access_name);
+}
+
 void replicateRequestMsg(CHIRequestMsg &out_msg, CHIRequestMsg in_msg)
 {
     out_msg.addr := in_msg.addr;
@@ -1781,7 +1883,7 @@ void indirectDependentBoilerPlate(CHIRequestMsg &out_msg)
     // I really need a HOVHelper SimObject at this point.
     // out_msg.fwdRequestor :=
 
-    out_msg.allowRetry := true;
+    // NOTE: allowRetry is set explicitly by the caller (e.g. from hovTbe)
     out_msg.isSeqReqValid := false;
     // NOTE: Defaults to nullptr.
     // out_msg.seqReq := null;
@@ -1798,16 +1900,8 @@ void indirectDependentBoilerPlate(CHIRequestMsg &out_msg)
     out_msg.secondType := CHIRequestType:null;
 }
 
-CHIRequestType figureOutNotifType(TBE tbe)
-{
-    if (tbe.secondType == CHIRequestType:ReadIndirect) {
-        return CHIRequestType:NotifyReadIndIdx;
-    }
-    if (tbe.secondType == CHIRequestType:WriteIndirect) {
-        return CHIRequestType:NotifyWriteIndIdx;
-    }
-    error("The corresponding second from the TBE does not have a notif type.");
-}
+// figureOutNotifType removed — NotifyReadIndIdx/NotifyWriteIndIdx merged
+// into NotifyIndIdx. Read/write intent is in the DAG descriptor.
 
 void indirectNotifBoilerPlate(CHIRequestMsg &out_msg)
 {
@@ -1883,17 +1977,27 @@ bool isIndirectVal(CHIRequestType type, CHIRequestType second_type)
 
 bool isIndirectNotify(CHIRequestType type, CHIRequestType second_type)
 {
-    return (
-        (type == CHIRequestType:NotifyReadIndIdx) ||
-        (second_type == CHIRequestType:NotifyReadIndIdx) ||
-        (type == CHIRequestType:NotifyWriteIndIdx) ||
-        (second_type == CHIRequestType:NotifyWriteIndIdx)
-    );
+    return type == CHIRequestType:NotifyIndIdx;
+}
+
+bool isIndirectNotifyFromCPU(CHIRequestType type, CHIRequestType second_type)
+{
+    return isIndirectNotify(type, second_type) && (second_type == CHIRequestType:null);
+}
+
+bool isIndirectNotifyNotFromCPU(CHIRequestType type, CHIRequestType second_type)
+{
+    return isIndirectNotify(type, second_type) && (second_type == CHIRequestType:NotifyIndIdx);
 }
 
 bool isIndirect(CHIRequestType type, CHIRequestType second_type)
 {
     return isIndirectIdx(type, second_type) || isIndirectVal(type, second_type);
+}
+
+bool isProcessNotify(CHIRequestType type, CHIRequestType second_type)
+{
+    return (type == CHIRequestType:ProcessNotif) && (second_type == CHIRequestType:NotifyIndIdx);
 }
 
 bool isPropagateEvict(CHIRequestType type, CHIRequestType second_type)
@@ -1903,8 +2007,6 @@ bool isPropagateEvict(CHIRequestType type, CHIRequestType second_type)
 
 CHIRequestType manipulateType(CHIRequestMsg msg)
 {
-    // NOTE: Take the state of the line as an argument and if stable
-    // we should convert the notifyindreadidx/notifyindwriteidx to a load.
     if (indirect_unit && msg.type == CHIRequestType:ReadIndirect) {
         return CHIRequestType:Load;
     } else if (indirect_unit && msg.type == CHIRequestType:WriteIndirect) {
@@ -1922,8 +2024,6 @@ CHIRequestType manipulateType(CHIRequestMsg msg)
 
 CHIRequestType manipulateSecondType(CHIRequestMsg msg)
 {
-     // NOTE: Take the state of the line as an argument and if stable
-    // we should convert the notifyindreadidx/notifyindwriteidx to a read/writeindirect respectively.
     if (indirect_unit && msg.type == CHIRequestType:ReadIndirect) {
         return CHIRequestType:ReadIndirect;
     } else if (indirect_unit && msg.type == CHIRequestType:WriteIndirect) {
@@ -1932,10 +2032,8 @@ CHIRequestType manipulateSecondType(CHIRequestMsg msg)
         return CHIRequestType:ReadValue;
     } else if (indirect_unit && msg.type == CHIRequestType:WriteValue) {
         return CHIRequestType:WriteValue;
-    } else if (gather_unit && msg.type == CHIRequestType:NotifyReadIndIdx) {
-        return CHIRequestType:NotifyReadIndIdx;
-    } else if (gather_unit && msg.type == CHIRequestType:NotifyWriteIndIdx) {
-        return CHIRequestType:NotifyWriteIndIdx;
+    } else if (gather_unit && msg.type == CHIRequestType:NotifyIndIdx) {
+        return CHIRequestType:NotifyIndIdx;
     } else {
         return msg.secondType;
     }
@@ -1953,11 +2051,30 @@ bool shouldNotifyPrefetcher(CHIRequestType type, CHIRequestType second_type) {
 
 bool needPostEvictIdxLine(TBE tbe, CHIRequestType type, CHIRequestType second_type)
 {
-    return isInvalid(tbe.gather_unit_id) && (isIndirectIdx(type, second_type) || isPropagateEvict(type, second_type));
+    return isInvalid(tbe.gather_unit_id) && (
+                                            isIndirectIdx(type, second_type) ||
+                                            isIndirectNotifyFromCPU(type, second_type) ||
+                                            isPropagateEvict(type, second_type)
+    );
 }
 
 bool needPostNotif(TBE tbe, CHIRequestType type, CHIRequestType second_type)
 {
-    return isInvalid(tbe.gather_unit_id) && (isIndirectIdx(type, second_type) || isIndirectNotify(type, second_type));
+    return isInvalid(tbe.gather_unit_id) && isIndirectIdx(type, second_type);
+}
+
+// Returns true if post-processing work remains before Final can fire.
+bool needsPostProcess(Addr address, TBE tbe) {
+  if (gather_unit && hasDependentWork(address)) {
+    return true;
+  }
+  State toBeState := makeFinalState(tbe, getCacheEntry(address), getDirEntry(address));
+  if (needPostNotif(tbe, tbe.reqType, tbe.secondType) && cachedHere(toBeState) && (tbe.postNotifSent == false)) {
+    return true;
+  }
+  if (needPostEvictIdxLine(tbe, tbe.reqType, tbe.secondType) && cachedHere(toBeState) && (tbe.postEvictSent == false)) {
+    return true;
+  }
+  return false;
 }
 // FFUTSYM

@@ -45,6 +45,7 @@
 #include <list>
 #include <map>
 #include <deque>
+#include <set>
 #include <unordered_map>
 
 #include "cpu/testers/rubytest/RubyTester.hh"
@@ -108,7 +109,10 @@ class Sequencer : public RubyPort
     void resetStats() override;
     void collateStats();
 
-    void writeCallback(Addr address,
+    // FUTUREME: My change here is that I added accAddress.
+    // Also, there are some call sites that I did not care about
+    // accAddress. For those calls, I just passed `address`.
+    void writeCallback(Addr address, Addr accAddress,
                        DataBlock& data,
                        const bool externalHit = false,
                        const MachineType mach = MachineType_NUM,
@@ -120,11 +124,17 @@ class Sequencer : public RubyPort
     // Write callback that prevents coalescing
     void writeUniqueCallback(Addr address, DataBlock& data)
     {
-        writeCallback(address, data, true, MachineType_NUM, Cycles(0),
+        // MYSTUFF NOTE: I have added the argument accAddr to callbacks for read
+        // and write. However, this does not seem to matter to me now, so just
+        // passing line address as accAddr.
+        writeCallback(address, address, data, true, MachineType_NUM, Cycles(0),
                       Cycles(0), Cycles(0), true);
     }
 
-    void readCallback(Addr address,
+    // FUTUREME: My change here is that I added accAddress.
+    // Also, there are some call sites that I did not care about
+    // accAddress. For those calls, I just passed `address`.
+    void readCallback(Addr address, Addr accAddress,
                       DataBlock& data,
                       const bool externalHit = false,
                       const MachineType mach = MachineType_NUM,
@@ -145,14 +155,12 @@ class Sequencer : public RubyPort
      */
     // void prepareIndPacket(Addr alias, RequestPtr& final_req);
 
-    /**
-     * Specialized callbacks for indirect-value accesses (Phase 2).
-     * Called by the protocol when ReadValue/WriteValue responses arrive
-     * at the Indirect Unit (L1). Serves uop1 via m_IndirectRequestTable.
-     */
-    void indirectReadCallback(Addr address, DataBlock& data);
-    void indirectWriteCallback(Addr address, DataBlock& data);
+    // Look up the notif ID for a given RequestPtr (the dummy_req).
+    // Called by the protocol to set txnId on CHIRequestMsg.
+    uint64_t getNotifId(const RequestPtr& req) const;
 
+    // Delete the dummy_pkt tracked by notifId when NotifAck arrives.
+    void cleanupNotifPkt(uint64_t notifId);
     // FFUTSYM
 
     void atomicCallback(Addr address,
@@ -272,15 +280,20 @@ class Sequencer : public RubyPort
   protected:
     // RequestTable contains both read and write requests, handles aliasing
     std::unordered_map<Addr, std::list<SequencerRequest>> m_RequestTable;
-    // IndirectRequestTable: rendezvous point for uop1 ↔ ReadValue callback.
-    // Keyed by data line address. Supports two orderings:
-    //   Case A (uop1 first): cacheReady=false, pending holds uop1
-    //   Case B (ReadValue first): cacheReady=true, pending empty (sense bit)
-    struct IndirectEntry {
-        bool cacheReady = false;
-        std::list<SequencerRequest> pending;
-    };
-    std::unordered_map<Addr, IndirectEntry> m_IndirectRequestTable;
+    // MYSTUFF
+    // Tracks the first indirect DAG per line address for DAG merging.
+    // When subsequent indirect requests alias the same index cache line,
+    // their descriptors are merged into this DAG.
+    std::unordered_map<Addr,
+        std::shared_ptr<DependentAccessGen>> m_IndirectDAGTable;
+
+    // Notif ID generator and tracking for dummy_pkt cleanup.
+    // When NOTIFY_INDIDX is sent, we assign a unique ID and track the
+    // dummy_pkt so it can be deleted when the NotifAck comes back.
+    uint64_t m_nextNotifId = 0;
+    std::unordered_map<uint64_t, PacketPtr> m_NotifPktTable;
+    std::unordered_map<RequestPtr, uint64_t> m_NotifIdTable;
+    // FFUTSYM
     // UnadressedRequestTable contains "unaddressed" requests,
     // guaranteed not to alias each other
     std::unordered_map<uint64_t, SequencerRequest> m_UnaddressedRequestTable;
@@ -361,6 +374,7 @@ class Sequencer : public RubyPort
     //! Histogram for number of outstanding requests per cycle.
     statistics::Histogram m_hov_collision_distance;
     statistics::Histogram m_hov_inst_distance;
+    // FFUTSYM
 
     statistics::Histogram m_outstandReqHist;
 

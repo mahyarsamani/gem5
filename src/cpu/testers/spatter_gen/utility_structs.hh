@@ -92,22 +92,44 @@ class TimedQueue
  */
 class SpatterDAG : public DependentAccessGen
 {
-  private:
-    Addr _dataAddr;
-
   public:
-    SpatterDAG(size_t index_size, size_t data_size,
-               Addr data_addr, RequestorID rid):
-        DependentAccessGen(index_size, data_size), _dataAddr(data_addr)
-    { _requestorId = rid; }
+    SpatterDAG(AccessIntent intent, size_t index_size,
+               Addr index_addr, Addr data_addr, size_t data_size,
+               RequestorID rid):
+        DependentAccessGen(index_size)
+    {
+        _requestorId = rid;
+        addDescriptor(intent, index_addr, data_addr, data_size);
+    }
 
     std::unique_ptr<ExtensionBase> clone() const override {
-        return std::make_unique<SpatterDAG>(
-            _indexSize, _dataSize, _dataAddr, _requestorId);
+        return std::make_unique<SpatterDAG>(*this);
     }
 
     RequestPtr genNextRequest(uint64_t index_value) override {
-        return std::make_shared<Request>(_dataAddr, _dataSize, 0, _requestorId);
+        assert(!isMerged());
+        const auto& desc = _descriptors.front();
+        return std::make_shared<Request>(
+            desc.baseAddr, desc.dataSize, 0, _requestorId);
+    }
+
+    Addr genAddress(uint64_t index_value) const override {
+        assert(!isMerged());
+        return _descriptors.front().baseAddr;
+    }
+
+    std::vector<std::unique_ptr<DependentAccessGen>>
+        unwrap() const override
+    {
+        std::vector<std::unique_ptr<DependentAccessGen>> result;
+        for (const auto& desc : _descriptors) {
+            auto s = std::make_unique<SpatterDAG>(
+                desc.intent, _indexSize,
+                desc.indexAddr, desc.baseAddr, desc.dataSize,
+                _requestorId);
+            result.push_back(std::move(s));
+        }
+        return result;
     }
 };
 
@@ -216,7 +238,10 @@ class SpatterAccess: public Extension<Request, SpatterAccess>,
         RequestPtr req = createRequest(addr, size, emulatedPC - InstructionSize);
         if (attach_dag) {
             auto [data_addr, data_size] = nextAccessPair(false);
-            auto dag = std::make_shared<SpatterDAG>(size, data_size, data_addr, _requestorId);
+            auto intent = (_kernelType == SpatterKernelType::gather)
+                ? DependentAccessGen::AccessIntent::Read
+                : DependentAccessGen::AccessIntent::Write;
+            auto dag = std::make_shared<SpatterDAG>(intent, size, addr, data_addr, data_size, _requestorId);
             req->setExtension<DependentAccessGen>(dag);
         }
         if (attach_iaa) {

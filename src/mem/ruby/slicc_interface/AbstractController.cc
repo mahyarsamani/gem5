@@ -44,6 +44,7 @@
 // MYSTUFF
 #include "debug/MSDebug.hh"
 // FFUTSYM
+#include "debug/ProtocolTrace.hh"
 #include "debug/RubyQueue.hh"
 // MYSTUFF
 #include "mem/request.hh"
@@ -558,20 +559,24 @@ AbstractController::getDependentReq(Addr line_addr, DataBlock &index_data)
              "Ensure extractExtensions() was called when the TBE was "
              "allocated.", line_addr);
 
-    // Pop the front entry.
-    CachedEntry entry = std::move(it->second.front());
+    // Pop the front DAG (must be single-descriptor, not merged).
+    auto dag = std::move(it->second.front());
     it->second.erase(it->second.begin());
 
-    panic_if(!entry.dag, "getDependentReq: cached DependentAccessGen is null for "
-            "line_addr %#x offset %d.", line_addr, entry.offset);
+    panic_if(!dag, "getDependentReq: cached DependentAccessGen is null for "
+            "line_addr %#x.", line_addr);
+    assert(!dag->isMerged());
 
-    // Use the index element size from the DAG, not the request size
-    // (which may be the full block size at higher cache levels).
-    size_t index_size = entry.dag->indexSize();
+    const auto& desc = dag->descriptor(0);
+    bool read = (desc.intent == DependentAccessGen::AccessIntent::Read);
+    int offset = getOffset(desc.indexAddr);
+
+    // Use the index element size from the DAG.
+    size_t index_size = dag->indexSize();
     panic_if(index_size == 0, "getDependentReq: DAG has no indexSize set for line_addr %#x.", line_addr);
 
-    // Extract the index value from the DataBlock at the entry's offset.
-    const uint8_t *raw = index_data.getData(entry.offset, index_size);
+    // Extract the index value from the DataBlock at the element's offset.
+    const uint8_t *raw = index_data.getData(offset, index_size);
     DPRINTF(MSDebug, "%s: Generating dependent request from %s.\n", __func__, index_data);
 
     uint64_t index_value = 0;
@@ -582,36 +587,49 @@ AbstractController::getDependentReq(Addr line_addr, DataBlock &index_data)
             panic("getDependentReq: unsupported index element size %u bytes", index_size);
     }
     DPRINTF(MSDebug, "%s: line_addr=%#x offset=%d index_size=%d index_value=%" PRIu64
-            " read=%d\n", __func__, line_addr, entry.offset, index_size, index_value, entry.read);
+            " read=%d\n", __func__, line_addr, offset, index_size, index_value, read);
 
     // Generate the Phase 2 (data-fetch) request using the cached DAG.
-    RequestPtr phase2 = entry.dag->genNextRequest(index_value);
+    RequestPtr phase2 = dag->genNextRequest(index_value);
 
     // Attach DepAccessType so .sm files can determine ReadValue vs WriteValue.
-    auto dat = std::make_shared<DepAccessType>(entry.read);
+    auto dat = std::make_shared<DepAccessType>(read);
     phase2->setExtension<DepAccessType>(dat);
+
+    DPRINTFR(ProtocolTrace, "%15s %3s %10s%20s %6s>%-6s %#x %s idx_line=%#x "
+             "offset=%d idx_val=%" PRIu64 "\n",
+             curTick(), m_version, "GatherU", "IDR_Begin", "", "",
+             phase2->getPaddr(),
+             read ? "ReadValue" : "WriteValue",
+             line_addr, offset, index_value);
 
     return phase2;
 }
 
 void
-AbstractController::extractExtensions(bool read, Addr line_addr, Addr acc_addr, RequestPtr req)
+AbstractController::extractExtensions(Addr line_addr, RequestPtr req)
 {
-    CachedEntry entry;
-    entry.read = read;
-    entry.offset = getOffset(acc_addr);
+    auto dag = req->getExtension<DependentAccessGen>();
+    assert(dag && "extractExtensions called without a DependentAccessGen");
 
-    if (auto dag = req->getExtension<DependentAccessGen>()) {
-        // Deep copy so we're independent of the original Request's lifetime.
-        auto cloned = dag->clone();
-        entry.dag = std::shared_ptr<DependentAccessGen>(
-            static_cast<DependentAccessGen*>(cloned.release()));
+    // Unwrap the DAG into individual single-descriptor DAGs.
+    // This works for both single and merged DAGs (single returns
+    // a vector of 1). Each unwrapped DAG is independent of the
+    // original Request's lifetime — no clone needed.
+    auto unwrapped = dag->unwrap();
+    for (auto& single : unwrapped) {
+        auto shared = std::shared_ptr<DependentAccessGen>(single.release());
+
+        DPRINTF(MSDebug, "%s: Cached DAG for line_addr %#x "
+                "(read=%d, offset=%d, dag=%p)\n",
+                __func__, line_addr,
+                shared->descriptor(0).intent ==
+                    DependentAccessGen::AccessIntent::Read,
+                getOffset(shared->descriptor(0).indexAddr),
+                shared.get());
+
+        m_cachedEntries[line_addr].push_back(std::move(shared));
     }
-
-    DPRINTF(MSDebug, "%s: Cached entry for line_addr %#x (read=%d, offset=%d, dag=%p)\n",
-            __func__, line_addr, entry.read, entry.offset, entry.dag.get());
-
-    m_cachedEntries[line_addr].push_back(std::move(entry));
 }
 
 bool
@@ -619,6 +637,53 @@ AbstractController::hasDependentWork(Addr line_addr)
 {
     auto it = m_cachedEntries.find(line_addr);
     return it != m_cachedEntries.end() && !it->second.empty();
+}
+
+Addr
+AbstractController::peekDependentAddr(Addr line_addr, DataBlock &index_data)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end() || it->second.empty(),
+             "peekDependentAddr: no cached entries for line_addr %#x.",
+             line_addr);
+
+    const auto& dag = it->second.front();  // peek, don't pop
+    panic_if(!dag, "peekDependentAddr: cached DAG is null for "
+             "line_addr %#x.", line_addr);
+    assert(!dag->isMerged());
+
+    const auto& desc = dag->descriptor(0);
+    int offset = getOffset(desc.indexAddr);
+
+    size_t index_size = dag->indexSize();
+    panic_if(index_size == 0,
+             "peekDependentAddr: DAG has no indexSize for line_addr %#x.",
+             line_addr);
+
+    const uint8_t *raw = index_data.getData(offset, index_size);
+    uint64_t index_value = 0;
+    switch (index_size) {
+        case 4: index_value = *reinterpret_cast<const uint32_t *>(raw); break;
+        case 8: index_value = *reinterpret_cast<const uint64_t *>(raw); break;
+        default:
+            panic("peekDependentAddr: unsupported index element size %u",
+                  index_size);
+    }
+
+    return dag->genAddress(index_value);
+}
+
+void
+AbstractController::dropDependentReq(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end() || it->second.empty(),
+             "dropDependentReq: no cached entries for line_addr %#x.",
+             line_addr);
+
+    DPRINTF(MSDebug, "%s: Dropping front DAG entry for line_addr %#x "
+            "(collision skip)\n", __func__, line_addr);
+    it->second.erase(it->second.begin());
 }
 
 void

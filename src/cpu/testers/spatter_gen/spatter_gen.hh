@@ -179,12 +179,11 @@ class SpatterGen: public ClockedObject
     bool initAccessOk(int int_regs, int fp_regs, Tick when) const;
     bool interAccessOk(int int_regs, int fp_regs, Tick when) const;
     bool ultAccessOk(int int_regs, int fp_regs, Tick when) const;
-    // NOTE: Indirect accesses do not have multiple stages. So just need
-    // to check if the one indirect access could be started.
-    bool indirAccessOk(int int_regs, int fp_regs, Tick when) const;
+
     // param related members (not necessarily one-to-one with params)
     SpatterAccessMode accessMode;
     SpatterProcessingMode processingMode;
+
     SpatterGenPort port;
     // size of the register files,
     // for every memory instruction we need to allocate one register.

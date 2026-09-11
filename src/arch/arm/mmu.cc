@@ -1249,6 +1249,10 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
                 arm_dag->setTranslator([base_vaddr, base_paddr](Addr req_vaddr) -> Addr {
                     return base_paddr + (req_vaddr - base_vaddr);
                 });
+
+                // Update descriptor addresses to PA now that translation
+                // is complete.
+                arm_dag->setPhysicalAddrPair(req->getPaddr(), base_paddr);
             } else {
                 panic("DependentAccessGen: Base VA->PA faulted during translateComplete!");
             }

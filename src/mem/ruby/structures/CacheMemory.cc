@@ -868,27 +868,38 @@ CacheMemory::profileUnexplainedUselessness(Addr line_addr)
 }
 
 void
-CacheMemory::profileTransfer(MachineID dst, std::string acc_name, int num_bytes)
+CacheMemory::profileTransfer(MachineID dst, std::string acc_name, int num_bytes, std::string transfer_type)
 {
-    if (bytesTransferred.find(acc_name) == bytesTransferred.end())
+    std::string eff_acc_name = acc_name == "" ? "other" : acc_name;
+
+    if (bytesTransferred.find(transfer_type) == bytesTransferred.end())
+    {
+        DPRINTF(Usefulness, "%s: Creating transfer type entry for "
+                "type %s.\n", __func__, transfer_type);
+        bytesTransferred[transfer_type] = {};
+    }
+    if (bytesTransferred[transfer_type].find(eff_acc_name) == bytesTransferred[transfer_type].end())
     {
         DPRINTF(Usefulness, "%s: Creating an entry for tracking per "
-                "machine transfer for name %s.\n", __func__, acc_name);
-        bytesTransferred[acc_name] = std::unordered_map<MachineID, statistics::Scalar*>();
+                "machine transfer for type %s, name %s.\n",
+                __func__, transfer_type, eff_acc_name);
+        bytesTransferred[transfer_type][eff_acc_name] = {};
     }
-    if (bytesTransferred[acc_name].find(dst) == bytesTransferred[acc_name].end())
+    if (bytesTransferred[transfer_type][eff_acc_name].find(dst) == bytesTransferred[transfer_type][eff_acc_name].end())
     {
         DPRINTF(Usefulness, "%s: Creating a scalar for bytes transferred "
-        "to %s for name %s.\n", __func__, MachineIDToString(dst), num_bytes);
-        bytesTransferred[acc_name][dst] = new statistics::Scalar(
+                "to %s for type %s, name %s.\n",
+                __func__, MachineIDToString(dst), transfer_type, eff_acc_name);
+        bytesTransferred[transfer_type][eff_acc_name][dst] = new statistics::Scalar(
             this,
-            csprintf("bytesTransferred[%s][%s]", acc_name, MachineIDToString(dst)).c_str(),
+            csprintf("bytesTransferred.%s.%s.%s",
+                     transfer_type, eff_acc_name,
+                     MachineIDToString(dst)).c_str(),
             statistics::units::Count::get(),
-            "Number of bytes transferred from this machine "
-            "to each specific machine for each name.");
-        *bytesTransferred[acc_name][dst] = 0;
+            "Number of bytes transferred by type, name, and destination.");
+        *bytesTransferred[transfer_type][eff_acc_name][dst] = 0;
     }
-    *bytesTransferred[acc_name][dst] += num_bytes;
+    *bytesTransferred[transfer_type][eff_acc_name][dst] += num_bytes;
 }
 // FFUTSYM
 

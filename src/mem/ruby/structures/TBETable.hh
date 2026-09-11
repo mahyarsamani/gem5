@@ -61,6 +61,11 @@ class TBETable
     {
     }
 
+    TBETable(int number_of_TBEs, int block_size)
+        : m_number_of_TBEs(number_of_TBEs), m_block_size(block_size)
+    {
+    }
+
     bool isPresent(Addr address) const;
     void allocate(Addr address);
     void deallocate(Addr address);

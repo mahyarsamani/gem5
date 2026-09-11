@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "base/types.hh"
 #include "mem/request.hh"
@@ -24,15 +25,20 @@ namespace ArmISA
  */
 class ARMDependentAccessGen: public DependentAccessGen
 {
-  private:
-    Addr _baseAddr;
-
   public:
-    ARMDependentAccessGen(size_t index_size, size_t data_size, Addr base_addr);
+    ARMDependentAccessGen(AccessIntent intent, size_t index_size,
+                          Addr index_addr, Addr base_addr, size_t data_size);
     virtual std::unique_ptr<ExtensionBase> clone() const override;
     virtual RequestPtr genNextRequest(uint64_t index_value) override;
+    virtual Addr genAddress(uint64_t index_value) const override;
+    virtual std::vector<std::unique_ptr<DependentAccessGen>>
+        unwrap() const override;
 
-    Addr getBaseAddr() const { return _baseAddr; }
+    // Convenience accessor (asserts single descriptor)
+    Addr getBaseAddr() const {
+        assert(!isMerged());
+        return _descriptors.front().baseAddr;
+    }
 };
 
 } // namespace ArmISA
