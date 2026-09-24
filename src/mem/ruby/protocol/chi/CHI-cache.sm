@@ -246,10 +246,21 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   // FFUTSYM
 {
 
+
+  check_parameters {
+      if (gather_unit && indirect_unit) {
+        error("Gather unit and Indirect unit cannot be both true");
+      }
+      // if (alloc_on_seq_acc || alloc_on_seq_line_write) {
+      //   if (is_invalid(sequencer)) {
+      //     error("When sequencer is not set, `alloc_on_seq_acc` and `alloc_on_seq_line_write` can not be true.");
+      //   }
+      // }
+  }
+
   ////////////////////////////////////////////////////////////////////////////
   // States
   ////////////////////////////////////////////////////////////////////////////
-
   state_declaration(State, default="Cache_State_null") {
     // Stable states
 
@@ -924,7 +935,11 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     MachineID retryDest;
     bool usesTxnId;
     Addr txnId;
+
+    // MYSTUFF
+    Addr accAddr;
     CHIRequestType secondType, default="CHIRequestType_null";
+    // FFUTSYM
 
     bool functionalRead(Packet *pkt) { return false; }
     bool functionalRead(Packet *pkt, WriteMask &mask) { return false; }

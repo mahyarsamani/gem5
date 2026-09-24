@@ -68,7 +68,10 @@ action(AllocateTBE_Request, desc="") {
         out_msg.event := Event:SendRetryAck;
         out_msg.retryDest := in_msg.requestor;
         out_msg.txnId := in_msg.txnId;
+        // MYSTUFF
+        out_msg.accAddr := in_msg.accAddr;
         out_msg.secondType := in_msg.type;
+        // FFUTSYM
         retryQueue.emplace(in_msg.addr,false,in_msg.requestor);
       }
     }
@@ -519,8 +522,6 @@ action(StallRequest, desc="") {
   // was stalled because of an existing request
   assert(is_valid(tbe));
   assert(tbe.addr == address);
-  // MYSTUFF
-  // FFUTSYM
   // tracks pending
   tbe.wakeup_pending_req := true;
   stall_and_wait(reqRdyPort, address);
@@ -3439,6 +3440,12 @@ action(Send_RetryAck, desc="") {
   peek(retryTriggerInPort, RetryTriggerMsg) {
     enqueue(rspOutPort, CHIResponseMsg, response_latency) {
       out_msg.addr := in_msg.addr;
+      // MYSTUFF
+      if ((in_msg.secondType == CHIRequestType:ReadValue) ||
+          (in_msg.secondType == CHIRequestType:WriteValue)) {
+        out_msg.addr := in_msg.accAddr;
+      }
+      // FFUTSYM
       out_msg.usesTxnId := in_msg.usesTxnId;
       out_msg.type := CHIResponseType:RetryAck;
       out_msg.secondType := in_msg.secondType;
@@ -4324,7 +4331,6 @@ action(PostProcess,
                 "IDR collision at accAddr=%#x, dropping DAG and delaying %d cycles\n",
                 nextAccAddr, idr_collision_delay_cy);
         }
-
     } else if (needPostNotif(tbe, tbe.reqType, tbe.secondType) && cachedHere(toBeState) && (tbe.postNotifSent == false)) {
         tbe.actions.push(Event:SendPostNotif);
 
@@ -4498,6 +4504,11 @@ action(Cleanup_NotifPkt, desc="Clean up dummy_pkt via sequencer callback on Noti
 
 action(Receive_HovAck, desc="Deallocate HOV TBE on acceptance ack") {
     assert(gather_unit);
+    assert(tbe.expected_req_resp.hasExpected());
+    if (tbe.expected_req_resp.receiveResp(CHIResponseType:HovAck) == false) {
+      error("Unexpected response on HOV TBE");
+    }
+    assert(tbe.expected_req_resp.hasExpected() == false);
     hovTBEs.deallocate(address);
     storHovTBEs.removeEntryFromSlot(tbe.storSlot);
 }

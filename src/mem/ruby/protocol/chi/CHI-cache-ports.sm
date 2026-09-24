@@ -78,6 +78,9 @@ in_port(rspInPort, CHIResponseMsg, rspIn, rank=10,
   if (rspInPort.isReady(clockEdge())) {
     printResources();
     peek(rspInPort, CHIResponseMsg) {
+      // MYSTUFF
+      dummy();
+      // FFUTSYM
       if (in_msg.usesTxnId) {
         // A ResponseMsg that uses transaction ID
         // is separate from the memory system,
@@ -96,9 +99,10 @@ in_port(rspInPort, CHIResponseMsg, rspIn, rank=10,
                  (in_msg.secondType == CHIRequestType:ReadValue ||
                   in_msg.secondType == CHIRequestType:WriteValue) &&
                  hovTBEs.isPresent(in_msg.addr)) {
+        DPRINTF(IndirectAccess, "Received a RetryAck/PCrdGrant for a HOV request at %#lx.\n", in_msg.addr);
         // RetryAck/PCrdGrant for a HOV request — dispatch to hovTBE
         TBE tbe := hovTBEs[in_msg.addr];
-        trigger(respToEvent(in_msg.type, tbe), in_msg.addr,
+        trigger(respToEvent(in_msg.type, tbe), makeLineAddress(in_msg.addr),
                 getCacheEntry(makeLineAddress(in_msg.addr)), tbe);
       } else {
         TBE tbe := getCurrentActiveTBE(in_msg.addr);

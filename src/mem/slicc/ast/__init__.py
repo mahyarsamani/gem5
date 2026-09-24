@@ -41,6 +41,7 @@ from slicc.ast.ActionDeclAST import *
 from slicc.ast.AssignStatementAST import *
 from slicc.ast.AST import *
 from slicc.ast.CheckAllocateStatementAST import *
+from slicc.ast.CheckParametersAST import *
 from slicc.ast.CheckNextCycleAST import *
 from slicc.ast.CheckProbeStatementAST import *
 from slicc.ast.DeclAST import *

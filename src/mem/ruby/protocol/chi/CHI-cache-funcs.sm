@@ -445,6 +445,20 @@ void initializeHovTBE(TBE hovTbe, Addr acc_addr, int storSlot,
   // Base initialization
   initializeTBE(hovTbe, acc_addr, storSlot);
 
+  hovTbe.state := State:BUSY_INTR;
+
+  // A HOV TBE only waits for the HovAck from the Indirect Unit.
+  // RetryAck/PCrdGrant are tracked by rcvdRetryAck/rcvdRetryCredit,
+  // as for regular requests, and are not counted here.
+  hovTbe.expected_req_resp.addExpectedRespType(CHIResponseType:HovAck);
+  hovTbe.expected_req_resp.setExpectedCount(1);
+
+  // hovTbe never goes through set_tbe(), so its NetDest fields have no
+  // RubySystem. Size dir_sharers from dest and clear it so debug prints
+  // (printTBEState) don't assert.
+  hovTbe.dir_sharers := dest;
+  hovTbe.dir_sharers.clear();
+
   // Retry fields — read by prepareRequestRetry
   hovTbe.pendReqAllowRetry := true;
   hovTbe.rcvdRetryAck := false;
@@ -2076,5 +2090,9 @@ bool needsPostProcess(Addr address, TBE tbe) {
     return true;
   }
   return false;
+}
+
+void dummy() {
+    DPRINTF(IndirectAccess, "Dummy function to place a breakpoint on for debugging.\n");
 }
 // FFUTSYM

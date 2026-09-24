@@ -154,6 +154,7 @@ class SLICC(Grammar):
         "stall_and_wait": "STALL_AND_WAIT",
         "wakeup_port": "WAKEUP_PORT",
         "enqueue": "ENQUEUE",
+        "check_parameters": "CHECK_PARAMETERS",
         "check_allocate": "CHECK_ALLOCATE",
         "check_next_cycle": "CHECK_NEXT_CYCLE",
         "check_stop_slots": "CHECK_STOP_SLOTS",
@@ -429,6 +430,10 @@ class SLICC(Grammar):
     def p_decl__obj_decl(self, p):
         "decl : obj_decl"
         p[0] = p[1]
+
+    def p_decl__check_parameters(self, p):
+        "decl : CHECK_PARAMETERS statements"
+        p[0] = ast.CheckParametersAST(self, p[2])
 
     def p_obj_decl__0(self, p):
         "obj_decl : type ident pairs SEMI"

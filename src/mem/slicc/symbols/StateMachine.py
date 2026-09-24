@@ -73,6 +73,7 @@ class StateMachine(Symbol):
     def __init__(self, symtab, ident, location, pairs, config_parameters):
         super().__init__(symtab, ident, location, pairs)
         self.table = None
+        self.check_parameters = []
 
         # Data members in the State Machine that have been declared before
         # the opening brace '{'  of the machine.  Note that these along with
@@ -162,6 +163,9 @@ class StateMachine(Symbol):
                 action.error(f"    shorthand = {action.short}")
 
         self.actions[action.ident] = action
+
+    def addCheckParameters(self, statements_ast):
+        self.check_parameters.append(statements_ast)
 
     def addDebugFlag(self, flag):
         self.debug_flags.add(flag)
@@ -731,6 +735,9 @@ if (m_${{param.ident}}_ptr != NULL) {
 }
 """
                 )
+
+        for check in self.check_parameters:
+            code(check)
 
         code(
             """
