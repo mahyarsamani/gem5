@@ -348,6 +348,16 @@ DataBlock::reduceUsefulness(const WriteMask read_usefulness, const WriteMask wri
             proxy_simobject_name, __func__, addr, accessName, read_usefulness.count(), write_usefulness.count());
 }
 
+void
+DataBlock::clearUsefulness()
+{
+    if (!m_alloc) {
+        return;
+    }
+    readUsefulness->clear();
+    writeUsefulness->clear();
+}
+
 WriteMask
 DataBlock::getReadUsefulness(std::string proxy_simobject_name, Addr addr) const
 {

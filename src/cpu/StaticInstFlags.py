@@ -99,5 +99,8 @@ class StaticInstFlags(Enum):
         "IsHtmStart",  # Starts a HTM transaction
         "IsHtmStop",  # Stops (commits) a HTM transaction
         "IsHtmCancel",  # Explicitely aborts a HTM transaction
+        # MYSTUFF
+        "IsHovIndirectMem",  # A micro-op of an LDIND/STIND (hov) macro-op
+        # FFUTSYM
         "IsInvalid",  # An invalid instruction
     ]

@@ -1036,6 +1036,16 @@ CommitCPUStats::CommitCPUStats(statistics::Group *parent, int thread_id)
             "Number of store instructions"),
     ADD_STAT(numVecInsts, statistics::units::Count::get(),
             "Number of vector instructions"),
+    // MYSTUFF
+    ADD_STAT(numHovLdind, statistics::units::Count::get(),
+            "Number of committed LDIND (hov) instructions"),
+    ADD_STAT(numHovStind, statistics::units::Count::get(),
+            "Number of committed STIND (hov) instructions"),
+    ADD_STAT(numArchMemRefs, statistics::units::Count::get(),
+            "Committed memory references, LDIND/STIND counted once"),
+    ADD_STAT(hovIndirectFrac, statistics::units::Ratio::get(),
+            "Fraction of committed memory references that are LDIND/STIND"),
+    // FFUTSYM
     ADD_STAT(committedInstType, statistics::units::Count::get(),
             "Class of committed instruction."),
     ADD_STAT(committedControl, statistics::units::Count::get(),
@@ -1046,6 +1056,12 @@ CommitCPUStats::CommitCPUStats(statistics::Group *parent, int thread_id)
 
     cpi.precision(6);
     ipc.precision(6);
+
+    // MYSTUFF: each LDIND/STIND commits two memory uops but is one access
+    numArchMemRefs = numMemRefs - numHovLdind - numHovStind;
+    hovIndirectFrac = (numHovLdind + numHovStind) / numArchMemRefs;
+    hovIndirectFrac.precision(6);
+    // FFUTSYM
 
     committedInstType
         .init(enums::Num_OpClass)

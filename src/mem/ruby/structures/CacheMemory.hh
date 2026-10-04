@@ -276,11 +276,21 @@ class CacheMemory : public SimObject
     std::unordered_map<std::string, statistics::Histogram*> usefulBytes;
     std::unordered_map<std::string, statistics::Histogram*> readUsefulBytes;
     std::unordered_map<std::string, statistics::Histogram*> writeUsefulBytes;
-    std::unordered_map<std::string, std::unordered_map<std::string, std::unordered_map<MachineID, statistics::Scalar*>>> bytesTransferred;
+    // Snapshot of lines still resident at each stats dump (never evicted
+    // lines are otherwise not sampled); rebuilt at every dump.
+    std::unordered_map<std::string, statistics::Histogram*>
+        residentUsefulBytes;
+    std::unordered_map<std::string,
+        std::unordered_map<std::string,
+            std::unordered_map<MachineID, statistics::Scalar*>>>
+        bytesTransferred;
     // FFUTSYM
 
     public:
       void resetStats() override;
+      // MYSTUFF
+      void preDumpStats() override;
+      // FFUTSYM
       // These function increment the number of demand hits/misses by one
       // each time they are called
       // TODO: Implement this function.

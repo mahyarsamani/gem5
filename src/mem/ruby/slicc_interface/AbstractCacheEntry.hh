@@ -91,6 +91,9 @@ class AbstractCacheEntry : public ReplaceableEntry
     {
         panic("getDataBlk() not implemented!");
     }
+    // MYSTUFF: true iff getDataBlk() is overridden (SLICC-generated)
+    virtual bool hasDataBlk() const { return false; }
+    // FFUTSYM
 
     virtual void initBlockSize(int block_size) { };
     virtual void setRubySystem(RubySystem *rs) { };

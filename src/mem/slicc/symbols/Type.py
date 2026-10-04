@@ -469,6 +469,18 @@ clone() const
                     code(f"\tm_{dm.ident}.setRubySystem(ruby_system);")
             code("}\n")
 
+            # MYSTUFF: cache entries with a DataBlk field get the accessor
+            # getDataBlk() below, which overrides AbstractCacheEntry's
+            # panicking default; tell CacheMemory it is safe to call.
+            if (
+                "interface" in self
+                and self["interface"] == "AbstractCacheEntry"
+                and "DataBlk" in self.data_members
+                and self.data_members["DataBlk"].real_c_type == "DataBlock"
+            ):
+                code("\nbool hasDataBlk() const override { return true; }\n")
+            # FFUTSYM
+
             # const Get methods for each field
             code("// Const accessors methods for each field")
             for dm in self.data_members.values():

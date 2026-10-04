@@ -1389,6 +1389,16 @@ Commit::updateComInstStats(const DynInstPtr &inst)
         if (inst->isStore()) {
             cpu->commitStats[tid]->numStoreInsts++;
         }
+
+        // MYSTUFF: once per architectural LDIND/STIND (on its last uop)
+        if (inst->staticInst->isHovIndirectMem() && inst->isLastMicroop()) {
+            if (inst->isLoad()) {
+                cpu->commitStats[tid]->numHovLdind++;
+            } else if (inst->isStore()) {
+                cpu->commitStats[tid]->numHovStind++;
+            }
+        }
+        // FFUTSYM
     }
 
     if (inst->isFullMemBarrier()) {

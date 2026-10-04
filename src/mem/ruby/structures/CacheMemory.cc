@@ -649,8 +649,66 @@ void
 CacheMemory::resetStats()
 {
     statistics::Group::resetStats();
-    // MYSTUFF: NOTE: Maybe reset usefulness here?
+    // MYSTUFF: drop the usefulness recorded before this reset (e.g. before
+    // the ROI) for every resident line, so it is not counted at eviction.
+    for (auto &set : m_cache) {
+        for (AbstractCacheEntry *entry : set) {
+            if (entry && entry->hasDataBlk()) {
+                entry->getDataBlk().clearUsefulness();
+            }
+        }
+    }
+    // FFUTSYM
 }
+
+// MYSTUFF
+void
+CacheMemory::preDumpStats()
+{
+    statistics::Group::preDumpStats();
+    // Point-in-time snapshot of the lines still resident; no mask is
+    // cleared, and the snapshot is rebuilt at every dump so a line is
+    // never counted twice in it.
+    for (auto &kv : residentUsefulBytes) {
+        kv.second->reset();
+    }
+    for (auto &set : m_cache) {
+        for (AbstractCacheEntry *entry : set) {
+            if (!entry || !entry->hasDataBlk()) {
+                continue;
+            }
+            // Busy lines' masks lag their TBE; invalid ones hold nothing.
+            AccessPermission perm = entry->m_Permission;
+            if (perm == AccessPermission_NotPresent ||
+                perm == AccessPermission_Invalid ||
+                perm == AccessPermission_Busy) {
+                continue;
+            }
+            DataBlock &blk = entry->getDataBlk();
+            if (!blk.isAlloc()) {
+                continue;
+            }
+            Addr addr = entry->m_Address;
+            WriteMask total = blk.getReadUsefulness(name(), addr);
+            total.orMask(blk.getWriteUsefulness(name(), addr));
+            std::string acc_name = blk.getAccessName(name(), addr);
+            std::string eff_acc_name = acc_name == "" ? "other" : acc_name;
+            auto it = residentUsefulBytes.find(eff_acc_name);
+            if (it == residentUsefulBytes.end()) {
+                statistics::Histogram* new_stat = new statistics::Histogram(
+                    this,
+                    csprintf("residentUsefulBytes.%s", eff_acc_name).c_str(),
+                    statistics::units::Count::get(),
+                    "Number of bytes used from cache blocks still resident "
+                    "at stats dump, belonging to this access name.");
+                new_stat->init(m_block_size + 1);
+                it = residentUsefulBytes.emplace(eff_acc_name, new_stat).first;
+            }
+            it->second->sample(total.count());
+        }
+    }
+}
+// FFUTSYM
 
 // assumption: SLICC generated files will only call this function
 // once **all** resources are granted

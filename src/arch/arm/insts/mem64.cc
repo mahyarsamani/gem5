@@ -288,6 +288,9 @@ MicroIndIdx::MicroIndIdx(const char *mnem, ExtMachInst machInst,
 {
     flags[IsLoad] = true;
     flags[IsMicroop] = true;
+    // MYSTUFF
+    flags[IsHovIndirectMem] = true;
+    // FFUTSYM
 
     setRegIdxArrays(
         reinterpret_cast<RegIdArrayPtr>(
@@ -410,6 +413,9 @@ MicroLdIndVal::MicroLdIndVal(const char *mnem, ExtMachInst machInst,
 {
     flags[IsLoad] = true;
     flags[IsMicroop] = true;
+    // MYSTUFF
+    flags[IsHovIndirectMem] = true;
+    // FFUTSYM
 
     setRegIdxArrays(
         reinterpret_cast<RegIdArrayPtr>(
@@ -536,6 +542,9 @@ MicroStIndVal::MicroStIndVal(const char *mnem, ExtMachInst machInst,
 {
     flags[IsStore] = true;
     flags[IsMicroop] = true;
+    // MYSTUFF
+    flags[IsHovIndirectMem] = true;
+    // FFUTSYM
 
     setRegIdxArrays(
         reinterpret_cast<RegIdArrayPtr>(

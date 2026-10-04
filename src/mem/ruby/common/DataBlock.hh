@@ -110,6 +110,8 @@ class DataBlock
     void copyWriteUsefulness(WriteMask write_usefulness, std::string proxy_simobject_name, Addr addr);
 
     void reduceUsefulness(const WriteMask read_usefulness, const WriteMask write_usefulness, std::string proxy_simobject_name, Addr addr);
+    // Forget all recorded usefulness (used at stats reset, e.g. the ROI).
+    void clearUsefulness();
 
     WriteMask getReadUsefulness(std::string proxy_simobject_name, Addr addr) const;
     WriteMask getWriteUsefulness(std::string proxy_simobject_name, Addr addr) const;
@@ -126,8 +128,10 @@ class DataBlock
 
     // MYSTUFF:
     bool isPrefetched;
-    WriteMask* readUsefulness;
-    WriteMask* writeUsefulness;
+    // The destructor deletes these even when !m_alloc, so they must start
+    // null.
+    WriteMask* readUsefulness = nullptr;
+    WriteMask* writeUsefulness = nullptr;
 
     std::string accessName;
     // FFUTSYM:

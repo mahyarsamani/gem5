@@ -331,6 +331,17 @@ class Sequencer : public RubyPort
 
     void handleIndExit(PacketPtr pkt);
     void handleIndArrival(PacketPtr pkt);
+
+    // LDIND end-to-end latency: uop0 (index fetch) issue -> uop1 value
+    // arrival, in cycles. Keyed by the data element's PA, since the two
+    // uops carry different aliases.
+    void hovRecordLdindIndex(SequencerRequest *srequest,
+                             const DataBlock &data);
+    void hovSampleLdindValue(SequencerRequest *srequest);
+    std::unordered_map<Addr, std::deque<Cycles>> m_hovLdindPending;
+    statistics::Histogram *hovLdindE2ELatency;
+    statistics::Scalar *hovLdindUnmatched;
+    statistics::Scalar *hovLdindStale;
     // FFUTSYM
 
     SequencerType m_sequencer_type;

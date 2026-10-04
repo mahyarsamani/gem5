@@ -834,6 +834,16 @@ class BaseCPU : public ClockedObject
         /* Number of vector instructions */
         statistics::Scalar numVecInsts;
 
+        // MYSTUFF
+        /* Committed LDIND/STIND (hov), each counted once (on its last uop) */
+        statistics::Scalar numHovLdind;
+        statistics::Scalar numHovStind;
+        /* Memory references with each two-uop LDIND/STIND counted once */
+        statistics::Formula numArchMemRefs;
+        /* Fraction of committed memory references that are LDIND/STIND */
+        statistics::Formula hovIndirectFrac;
+        // FFUTSYM
+
         /* Number of instructions committed by type (OpClass) */
         statistics::Vector committedInstType;
 

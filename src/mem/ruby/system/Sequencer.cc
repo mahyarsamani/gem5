@@ -41,6 +41,7 @@
 
 #include "mem/ruby/system/Sequencer.hh"
 
+#include <cstring>
 #include <optional>
 
 #include "arch/x86/ldstflags.hh"
@@ -113,6 +114,19 @@ Sequencer::Sequencer(const Params &p)
     m_hov_addr_iterators.reserve(m_hov_history_size);
     m_hov_access_history.reserve(m_hov_history_size);
     m_hov_inst_history.reserve(m_hov_history_size);
+
+    // MYSTUFF
+    hovLdindE2ELatency = new statistics::Histogram(this, "hovLdindE2ELatency",
+        statistics::units::Cycle::get(),
+        "LDIND latency from index-fetch issue to value arrival");
+    hovLdindE2ELatency->init(32);
+    hovLdindUnmatched = new statistics::Scalar(this, "hovLdindUnmatched",
+        statistics::units::Count::get(),
+        "LDIND value arrivals with no matching index fetch");
+    hovLdindStale = new statistics::Scalar(this, "hovLdindStale",
+        statistics::units::Count::get(),
+        "LDIND index fetches dropped without a value (e.g. squashed)");
+    // FFUTSYM
 
     m_outstandReqHist.init(10);
     m_latencyHist.init(10);
@@ -313,6 +327,11 @@ Sequencer::functionalWrite(Packet *func_pkt)
 
 void Sequencer::resetStats()
 {
+    // MYSTUFF: also reset the stats registered on this group (indRel*,
+    // hovLdind*), which were previously not reset at the ROI.
+    statistics::Group::resetStats();
+    m_hovLdindPending.clear();
+    // FFUTSYM
     m_outstandReqHist.reset();
     m_latencyHist.reset();
     m_hitLatencyHist.reset();
@@ -1099,6 +1118,19 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
     }
 
     RubySystem *rs = m_ruby_system;
+
+    // MYSTUFF: must run before pkt can be freed (delete / ruby_hit_callback)
+    handleIndArrival(pkt);
+    if (!rs->getWarmupEnabled() && !rs->getCooldownEnabled() &&
+        type == RubyRequestType_LDIND) {
+        if (pkt->req->getExtension<DependentAccessGen>()) {
+            hovRecordLdindIndex(srequest, data);    // uop0: index arrived
+        } else if (pkt->req->getExtension<IndirectAccessAlias>()) {
+            hovSampleLdindValue(srequest);          // uop1: value arrived
+        }
+    }
+    // FFUTSYM
+
     if (m_ruby_system->getWarmupEnabled()) {
         assert(pkt->req);
         delete pkt;
@@ -1110,11 +1142,58 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
         ruby_hit_callback(pkt);
         testDrainComplete();
     }
-
-    // MYSTUFF
-    handleIndArrival(pkt);
-    // FFUTSYM
 }
+
+// MYSTUFF
+void
+Sequencer::hovRecordLdindIndex(SequencerRequest *srequest,
+                               const DataBlock &data)
+{
+    PacketPtr pkt = srequest->pkt;
+    auto dag = pkt->req->getExtension<DependentAccessGen>();
+    if (dag->numDescriptors() == 0) {
+        return;
+    }
+    // This uop's own descriptor; merged descriptors are appended after it.
+    const auto &desc = dag->descriptor(0);
+    if (desc.intent != DependentAccessGen::AccessIntent::Read) {
+        return;                                     // STIND uop0
+    }
+    uint64_t index = 0;
+    unsigned size = pkt->getSize();
+    assert(size <= sizeof(index));
+    std::memcpy(&index, data.getData(getOffset(pkt->getAddr()), size), size);
+    // baseAddr is already the data array's PA (set in translateComplete).
+    Addr data_pa = desc.baseAddr + index * desc.dataSize;
+    m_hovLdindPending[data_pa].push_back(srequest->issue_time);
+}
+
+void
+Sequencer::hovSampleLdindValue(SequencerRequest *srequest)
+{
+    auto it = m_hovLdindPending.find(srequest->pkt->getAddr());
+    if (it == m_hovLdindPending.end()) {
+        (*hovLdindUnmatched)++;
+        return;
+    }
+    auto &pending = it->second;
+    // Index fetches whose value never came (squashed uop1) age out.
+    while (!pending.empty() &&
+           curCycle() - pending.front() > m_deadlock_threshold) {
+        pending.pop_front();
+        (*hovLdindStale)++;
+    }
+    if (pending.empty()) {
+        (*hovLdindUnmatched)++;
+    } else {
+        hovLdindE2ELatency->sample(curCycle() - pending.front());
+        pending.pop_front();
+    }
+    if (pending.empty()) {
+        m_hovLdindPending.erase(it);
+    }
+}
+// FFUTSYM
 
 void
 Sequencer::unaddressedCallback(Addr unaddressedReqId,
