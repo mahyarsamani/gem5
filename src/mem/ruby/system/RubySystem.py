@@ -56,6 +56,12 @@ class RubySystem(ClockedObject):
         "Use phys_mem as the functional \
         store and only use ruby for timing.",
     )
+    warmup_on_restore = Param.Bool(
+        True,
+        "Replay the checkpoint's cache trace to warm up the caches when \
+        restoring. Disable it when restoring onto KVM cores: they bypass \
+        the caches, and the warmup only supports a single event queue.",
+    )
 
     # Profiler related configuration variables
     hot_lines = Param.Bool(False, "")

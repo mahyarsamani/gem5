@@ -154,6 +154,8 @@ class RubySystem : public ClockedObject
     bool m_cooldown_enabled = false;
     memory::SimpleMemory *m_phys_mem;
     const bool m_access_backing_store;
+    // Whether to replay the checkpoint's cache trace on restore.
+    const bool m_warmup_on_restore;
 
     //std::vector<Network *> m_networks;
     std::vector<std::unique_ptr<Network>> m_networks;

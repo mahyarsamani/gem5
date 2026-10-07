@@ -61,6 +61,7 @@ class System(SimObject):
         PyBindMethod("getMemoryMode"),
         PyBindMethod("setMemoryMode"),
         PyBindMethod("setMSSFlag"),
+        PyBindMethod("getMSSFlag"),
     ]
 
     memories = VectorParam.AbstractMemory(

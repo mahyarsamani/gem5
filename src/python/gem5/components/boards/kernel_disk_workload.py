@@ -212,6 +212,14 @@ class KernelDiskWorkload:
         if bootloader is not None:
             self._bootloader.append(bootloader.get_local_path())
 
+        # Keep the paths of the resources so they can be queried later
+        # (e.g., to record what a checkpoint was taken with).
+        self._kernel_path = Path(kernel.get_local_path())
+        self._disk_image_path = Path(disk_image.get_local_path())
+        self._bootloader_path = (
+            Path(bootloader.get_local_path()) if bootloader else None
+        )
+
         # Set the readfile.
         if readfile:
             self.readfile = readfile
@@ -236,6 +244,35 @@ class KernelDiskWorkload:
                     "Checkpoints must be passed as a Path or an "
                     "CheckpointResource."
                 )
+
+    def get_kernel_path(self) -> Optional[Path]:
+        """
+        :returns: The path of the kernel set by ``set_kernel_disk_workload``,
+                  or ``None`` if it has not been called.
+        """
+        return getattr(self, "_kernel_path", None)
+
+    def get_disk_image_path(self) -> Optional[Path]:
+        """
+        :returns: The path of the disk image set by
+                  ``set_kernel_disk_workload``, or ``None`` if it has not been
+                  called.
+        """
+        return getattr(self, "_disk_image_path", None)
+
+    def get_bootloader_path(self) -> Optional[Path]:
+        """
+        :returns: The path of the bootloader set by
+                  ``set_kernel_disk_workload``, or ``None`` if none was given.
+        """
+        return getattr(self, "_bootloader_path", None)
+
+    def get_checkpoint_path(self) -> Optional[Path]:
+        """
+        :returns: The path of the checkpoint the simulation is restored from,
+                  or ``None`` if it is not restored from a checkpoint.
+        """
+        return getattr(self, "_checkpoint", None)
 
     def append_kernel_arg(self, arg: str) -> None:
         """

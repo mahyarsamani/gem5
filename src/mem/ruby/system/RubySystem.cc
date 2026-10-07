@@ -71,7 +71,7 @@ namespace ruby
 
 RubySystem::RubySystem(const Params &p)
     : ClockedObject(p), m_access_backing_store(p.access_backing_store),
-      m_cache_recorder(NULL)
+      m_warmup_on_restore(p.warmup_on_restore), m_cache_recorder(NULL)
 {
     m_randomization = p.randomization;
 
@@ -402,6 +402,12 @@ RubySystem::readCompressedTrace(std::string filename, uint8_t *&raw_data,
 void
 RubySystem::unserialize(CheckpointIn &cp)
 {
+    // Without the warmup, the caches start cold and the trace is unused.
+    if (!m_warmup_on_restore) {
+        DPRINTF(RubyCacheTrace, "Skipping ruby cache warmup\n");
+        return;
+    }
+
     uint8_t *uncompressed_trace = NULL;
 
     // This value should be set to the checkpoint-system's block-size.
