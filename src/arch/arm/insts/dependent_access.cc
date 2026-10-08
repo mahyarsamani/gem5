@@ -12,10 +12,10 @@ namespace ArmISA
 
 ARMDependentAccessGen::ARMDependentAccessGen(
     AccessIntent intent, size_t index_size,
-    Addr index_addr, Addr base_addr, size_t data_size)
+    Addr index_addr, Addr base_addr, size_t data_size, Addr alias)
     : DependentAccessGen(index_size)
 {
-    addDescriptor(intent, index_addr, base_addr, data_size);
+    addDescriptor(intent, index_addr, base_addr, data_size, alias);
 }
 
 std::unique_ptr<ExtensionBase>
@@ -28,31 +28,24 @@ RequestPtr
 ARMDependentAccessGen::genNextRequest(uint64_t index_value)
 {
     assert(!isMerged() && "genNextRequest on merged DAG — unwrap first");
-    const auto& desc = _descriptors.front();
-
-    panic_if(!desc.translateFn,
-        "ARMDependentAccessGen::genNextRequest called without a translator. "
-        "The translator should be set by MMU::translateComplete during "
-        "Phase 1 address translation.");
-
-    // Compute the virtual address of the gather target element.
-    Addr value_vaddr = desc.baseAddr + (index_value * desc.dataSize);
-
-    // Translate VA -> PA via the callback set at instruction execute time.
-    Addr value_paddr = desc.translateFn(value_vaddr);
 
     // Build a physical-address Request.
-    return std::make_shared<Request>(value_paddr, desc.dataSize, 0,
-                                    _requestorId);
+    return std::make_shared<Request>(genAddress(index_value),
+                                     _descriptors.front().dataSize, 0,
+                                     _requestorId);
 }
 
 Addr
-ARMDependentAccessGen::genAddress(uint64_t index_value) const
+ARMDependentAccessGen::dataAddr(const DepDescriptor &desc,
+                                uint64_t index_value) const
 {
-    assert(!isMerged() && "genAddress on merged DAG — unwrap first");
-    const auto& desc = _descriptors.front();
     panic_if(!desc.translateFn,
-        "ARMDependentAccessGen::genAddress called without a translator.");
+        "ARMDependentAccessGen::dataAddr called without a translator. "
+        "The translator should be set by MMU::translateComplete during "
+        "Phase 1 address translation.");
+
+    // baseAddr is the data array's VA; the translator is its only
+    // VA -> PA translation.
     Addr vaddr = desc.baseAddr + (index_value * desc.dataSize);
     return desc.translateFn(vaddr);
 }
@@ -64,7 +57,7 @@ ARMDependentAccessGen::unwrap() const
     for (const auto& desc : _descriptors) {
         auto single = std::make_unique<ARMDependentAccessGen>(
             desc.intent, _indexSize,
-            desc.indexAddr, desc.baseAddr, desc.dataSize);
+            desc.indexAddr, desc.baseAddr, desc.dataSize, desc.alias);
         if (desc.translateFn)
             single->setTranslator(desc.translateFn);
         single->setRequestorId(_requestorId);

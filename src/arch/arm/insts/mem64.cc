@@ -339,10 +339,12 @@ MicroIndIdx::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
 
     // Attach IndirectAccessAlias so CHI protocol recognizes this as indirect
     auto iaa = std::make_shared<IndirectAccessAlias>(alias_val);
-    // Attach DependentAccessGen so CHI can generate Phase 2 (ReadValue)
+    // Attach DependentAccessGen so the Gather Unit can generate the value
+    // access (ReadValue/WriteValue)
     auto intent = _isLoad ? DependentAccessGen::AccessIntent::Read
                           : DependentAccessGen::AccessIntent::Write;
-    auto dag = std::make_shared<ARMDependentAccessGen>(intent, sizeIndex, EA, base_data_val, sizeData);
+    auto dag = std::make_shared<ARMDependentAccessGen>(
+        intent, sizeIndex, EA, base_data_val, sizeData, alias_val);
     xc->setIAAExt(iaa);
     xc->setDAGExt(dag);
 
@@ -460,8 +462,8 @@ MicroLdIndVal::initiateAcc(ExecContext *xc,
             (unsigned long long)EA, sizeData,
             (unsigned long long)alias_val);
 
-    // Attach IAA extension so the Sequencer can identify this as an
-    // indirect-value access and route through m_IndirectRequestTable.
+    // Attach the alias so the Sequencer can identify this as the value
+    // access (uop1) of an ldind; it is a normal load (no DAG).
     auto iaa = std::make_shared<IndirectAccessAlias>(alias_val);
     xc->setIAAExt(iaa);
 
@@ -588,8 +590,8 @@ MicroStIndVal::initiateAcc(ExecContext *xc,
             (unsigned long long)EA, sizeData,
             (unsigned long long)alias_val);
 
-    // Attach IAA extension so the Sequencer can identify this as an
-    // indirect-value access and route through m_IndirectRequestTable.
+    // Attach the alias so the value access (uop1) of an stind can be
+    // identified; it is a normal store (no DAG).
     auto iaa = std::make_shared<IndirectAccessAlias>(alias_val);
     xc->setIAAExt(iaa);
 

@@ -1237,6 +1237,7 @@ class DependentAccessGen: public Extension<Request, DependentAccessGen>
         Addr indexAddr;
         Addr baseAddr;              // base address of data array
         size_t dataSize;            // sizeof one data element
+        Addr alias;                 // alias of the access this describes
         AddrTranslator translateFn; // VA→PA translator for this array
     };
 
@@ -1263,10 +1264,11 @@ class DependentAccessGen: public Extension<Request, DependentAccessGen>
     // --- Descriptor management ---
 
     void addDescriptor(AccessIntent intent, Addr index_addr, Addr base,
-                       size_t data_size, AddrTranslator fn = nullptr)
+                       size_t data_size, Addr alias,
+                       AddrTranslator fn = nullptr)
     {
         _descriptors.push_back(
-            {intent, index_addr, base, data_size, std::move(fn)});
+            {intent, index_addr, base, data_size, alias, std::move(fn)});
     }
 
     size_t numDescriptors() const { return _descriptors.size(); }
@@ -1280,13 +1282,14 @@ class DependentAccessGen: public Extension<Request, DependentAccessGen>
         return _descriptors.at(i);
     }
 
-    /** Update indexAddr and baseAddr to physical addresses after
-     *  translation. Asserts this is a single (non-merged) DAG. */
-    void setPhysicalAddrPair(Addr index_paddr, Addr base_paddr) {
-        assert(!isMerged() && "setPhysicalAddrPair on merged DAG — unwrap first");
-        auto& desc = _descriptors.front();
-        desc.indexAddr = index_paddr;
-        desc.baseAddr = base_paddr;
+    /** Update indexAddr to the index access's physical address after
+     *  translation. baseAddr stays the data array's virtual address;
+     *  translateFn maps it to a physical one (see dataAddr).
+     *  Asserts this is a single (non-merged) DAG. */
+    void setPhysicalIndexAddr(Addr index_paddr) {
+        assert(!isMerged() &&
+               "setPhysicalIndexAddr on merged DAG — unwrap first");
+        _descriptors.front().indexAddr = index_paddr;
     }
 
     // --- Merge & Unwrap ---
@@ -1332,10 +1335,22 @@ class DependentAccessGen: public Extension<Request, DependentAccessGen>
         _descriptors.front().translateFn = std::move(fn);
     }
 
+  protected:
+    /** The physical address of the dependent (Phase 2) access described
+     *  by `desc` for an index value. This is the only place a DAG
+     *  subclass computes that address (with or without translation);
+     *  everything else goes through genAddress. */
+    virtual Addr dataAddr(const DepDescriptor &desc,
+                          uint64_t index_value) const = 0;
+
+  public:
     /** Compute the target address for an index value without creating
-     *  a full Request. Each DAG subclass implements its own address
-     *  computation (with or without translation). */
-    virtual Addr genAddress(uint64_t index_value) const = 0;
+     *  a full Request. Asserts single descriptor. */
+    Addr genAddress(uint64_t index_value) const {
+        assert(!isMerged() &&
+               "genAddress() called on merged DAG — unwrap first");
+        return dataAddr(_descriptors.front(), index_value);
+    }
 
     /** Generate Phase 2 request. Asserts single descriptor. */
     virtual RequestPtr genNextRequest(uint64_t index_value) = 0;

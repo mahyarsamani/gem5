@@ -1217,6 +1217,50 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
 
     DPRINTF(MMU, "Translation returning delay=%d fault=%d\n", delay,
             fault != NoFault);
+
+    // If this request carries a DependentAccessGen (indirect load/store),
+    // set the data array's VA→PA translator once the index access's
+    // translation has completed. This is the single canonical location for
+    // translator setup — neither the O3 LSQ nor TimingSimpleCPU should set
+    // it. translateComplete may run several times for one request: with
+    // delay set when a timing walk starts (req has no PA yet; the walker
+    // calls translateTiming again when it completes), and around stage 2
+    // lookups. Only the first pass that completes the translation sets it.
+    // Every DependentAccessGen subclass shares one extension ID, so
+    // getExtension<ARMDependentAccessGen> would match (and static-cast) any
+    // of them; check the type instead.
+    auto arm_dag = std::dynamic_pointer_cast<ARMDependentAccessGen>(
+        req->getExtension<DependentAccessGen>());
+    if (fault == NoFault && !delay && arm_dag != nullptr
+        && !arm_dag->hasTranslator()) {
+        Addr base_vaddr = arm_dag->getBaseAddr();
+        auto tmp_req = std::make_shared<Request>(
+            base_vaddr, 8, 0, req->requestorId(),
+            0, req->contextId());
+        // Check the data array's permissions for the access the Gather Unit
+        // makes: ReadValue for ldind, WriteValue for stind.
+        bool data_write = arm_dag->descriptor(0).intent ==
+            DependentAccessGen::AccessIntent::Write;
+        Fault base_fault = translateFunctional(tmp_req, tc,
+            data_write ? BaseMMU::Write : BaseMMU::Read);
+
+        if (base_fault == NoFault) {
+            Addr base_paddr = tmp_req->getPaddr();
+            // baseAddr stays the VA; this translator is its only
+            // translation (see ARMDependentAccessGen::dataAddr).
+            arm_dag->setTranslator(
+                [base_vaddr, base_paddr](Addr req_vaddr) -> Addr {
+                return base_paddr + (req_vaddr - base_vaddr);
+            });
+
+            // The index access is now translated.
+            arm_dag->setPhysicalIndexAddr(req->getPaddr());
+        } else {
+            panic("DependentAccessGen: Base VA->PA faulted during "
+                  "translateComplete!");
+        }
+    }
+
     // If we have a translation, and we're not in the middle of doing a stage
     // 2 translation tell the translation that we've either finished or its
     // going to take a while. By not doing this when we're in the middle of a
@@ -1226,38 +1270,6 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
 
     if (translation && (call_from_s2 || !state.stage2Req || req->hasPaddr() ||
         fault != NoFault)) {
-
-        // If this request carries a DependentAccessGen (indirect load/store),
-        // set the VA→PA translator now that translation has completed.
-        // This is the single canonical location for translator setup —
-        // neither the O3 LSQ nor TimingSimpleCPU should set it.
-        auto arm_dag = req->getExtension<ARMDependentAccessGen>();
-        // Guard: translateComplete may be called multiple times for the same
-        // request during multi-stage page table walks (stage 1 completes →
-        // table walker → stage 2). Only set the translator on the first
-        // successful pass.
-        if (fault == NoFault && arm_dag != nullptr
-            && !arm_dag->hasTranslator()) {
-            Addr base_vaddr = arm_dag->getBaseAddr();
-            auto tmp_req = std::make_shared<Request>(
-                base_vaddr, 8, 0, req->requestorId(),
-                0, req->contextId());
-            Fault base_fault = translateFunctional(tmp_req, tc, BaseMMU::Read);
-
-            if (base_fault == NoFault) {
-                Addr base_paddr = tmp_req->getPaddr();
-                arm_dag->setTranslator([base_vaddr, base_paddr](Addr req_vaddr) -> Addr {
-                    return base_paddr + (req_vaddr - base_vaddr);
-                });
-
-                // Update descriptor addresses to PA now that translation
-                // is complete.
-                arm_dag->setPhysicalAddrPair(req->getPaddr(), base_paddr);
-            } else {
-                panic("DependentAccessGen: Base VA->PA faulted during translateComplete!");
-            }
-        }
-
         if (!delay)
             translation->finish(fault, req, tc, mode);
         else

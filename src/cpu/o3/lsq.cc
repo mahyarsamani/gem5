@@ -1218,9 +1218,9 @@ LSQ::SingleDataRequest::recvTimingResp(PacketPtr pkt)
     assert(_numOutstandingPackets == 1);
     flags.set(Flag::Complete);
 
-    // Two-uop model: uop0 (ReadIndReq) responses arrive through normal
-    // readCallback. uop1 (ReadReq+IAA) responses arrive through
-    // indirectReadCallback. Both use the original stored packet.
+    // Two-uop model: uop0 (ReadIndReq) and uop1 (a normal ReadReq/WriteReq
+    // that carries the alias) both complete through the Sequencer's normal
+    // callbacks, with the original stored packet.
     assert(pkt == _packets.front());
 
     _port.completeDataAccess(pkt);
@@ -1261,7 +1261,11 @@ LSQ::SingleDataRequest::buildPackets()
 {
     /* Retries do not create new packets. */
     if (_packets.size() == 0) {
-        bool is_indirect = req()->getExtension<IndirectAccessAlias>() != nullptr;
+        // Only the index uop (uop0) carries a DependentAccessGen and is an
+        // indirect access; the value uop (uop1) carries just the alias and
+        // is a normal load or store (as in TimingSimpleCPU::buildPacket).
+        bool is_indirect =
+            req()->getExtension<DependentAccessGen>() != nullptr;
         if (is_indirect) {
             _packets.push_back(new Packet(req(), isLoad() ? MemCmd::ReadIndReq : MemCmd::WriteIndReq));
         } else {
@@ -1299,7 +1303,8 @@ LSQ::SplitDataRequest::buildPackets()
     /* Extra data?? */
     Addr base_address = _addr;
 
-    assert(req()->getExtension<IndirectAccessAlias>() == nullptr && "Indirect accesses must not be split and must be cache aligned");
+    assert(req()->getExtension<DependentAccessGen>() == nullptr &&
+           "Indirect accesses must not be split and must be cache aligned");
 
     if (_packets.size() == 0) {
         /* New stuff */

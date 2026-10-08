@@ -27,10 +27,10 @@ class ARMDependentAccessGen: public DependentAccessGen
 {
   public:
     ARMDependentAccessGen(AccessIntent intent, size_t index_size,
-                          Addr index_addr, Addr base_addr, size_t data_size);
+                          Addr index_addr, Addr base_addr, size_t data_size,
+                          Addr alias);
     virtual std::unique_ptr<ExtensionBase> clone() const override;
     virtual RequestPtr genNextRequest(uint64_t index_value) override;
-    virtual Addr genAddress(uint64_t index_value) const override;
     virtual std::vector<std::unique_ptr<DependentAccessGen>>
         unwrap() const override;
 
@@ -39,10 +39,13 @@ class ARMDependentAccessGen: public DependentAccessGen
         assert(!isMerged());
         return _descriptors.front().baseAddr;
     }
+
+  protected:
+    virtual Addr dataAddr(const DepDescriptor &desc,
+                          uint64_t index_value) const override;
 };
 
 } // namespace ArmISA
 } // namespace gem5
 
 #endif // __ARCH_ARM_INSTS_DEPENDENT_ACCESS_HH__
-
