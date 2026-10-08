@@ -68,11 +68,16 @@ action(AllocateTBE_Request, desc="") {
         out_msg.event := Event:SendRetryAck;
         out_msg.retryDest := in_msg.requestor;
         out_msg.txnId := in_msg.txnId;
-        // MYSTUFF
-        out_msg.accAddr := in_msg.accAddr;
-        out_msg.secondType := in_msg.type;
+        // MYSTUFF: for an IDR, its type and txnId (its hov id) travel with
+        // RetryAck and, through the retry queue, with PCrdGrant, so the
+        // Gather Unit finds the hov TBE. secondType stays null otherwise.
+        if ((in_msg.type == CHIRequestType:ReadValue) ||
+            (in_msg.type == CHIRequestType:WriteValue)) {
+          out_msg.secondType := in_msg.type;
+        }
+        retryQueue.emplace(in_msg.addr, false, in_msg.requestor,
+                           in_msg.txnId, out_msg.secondType);
         // FFUTSYM
-        retryQueue.emplace(in_msg.addr,false,in_msg.requestor);
       }
     }
   }
@@ -88,6 +93,10 @@ action(AllocateTBE_Request_WithCredit, desc="") {
     enqueue(reqRdyOutPort, CHIRequestMsg, allocation_latency) {
       assert(in_msg.addr == address);
       out_msg := in_msg;
+      // MYSTUFF: a retried IDR must be mapped like a first attempt
+      out_msg.secondType := manipulateSecondType(in_msg);
+      out_msg.type := manipulateType(in_msg);
+      // FFUTSYM
     }
   }
   reqInPort.dequeue(clockEdge());
@@ -242,12 +251,12 @@ action(Initiate_Request, desc="") {
   bool was_retried := false;
   // MYSTUFF:
   bool reduce_usefulness := false;
+  WriteMask read_usefulness;
+  WriteMask write_usefulness;
 
   MachineID indirect_unit_id;
   MachineID gather_unit_id;
   MachineID value_unit_id;
-  WriteMask read_usefulness;
-  WriteMask write_usefulness;
   // FFUTSYM:
 
   peek(reqRdyPort, CHIRequestMsg) {
@@ -262,6 +271,7 @@ action(Initiate_Request, desc="") {
         DPRINTF(Usefulness, "Got read usefulness for name %s with count %d from message.\n", in_msg.access_name, read_usefulness.count());
         DPRINTF(Usefulness, "Got write usefulness for name %s with count %d from message.\n", in_msg.access_name, write_usefulness.count());
     }
+
     indirect_unit_id := in_msg.indirect_unit_id;
     gather_unit_id := in_msg.gather_unit_id;
     value_unit_id := in_msg.value_unit_id;
@@ -277,7 +287,7 @@ action(Initiate_Request, desc="") {
   bool alloc_entry := needCacheEntry(tbe.reqType, tbe.secondType,
                                      cache_entry, dir_entry,
                                      tbe.is_local_pf);
-  bool dealloc_entry := needDeallocCacheEntry(tbe.reqType);
+  bool dealloc_entry := needDeallocCacheEntry(tbe.reqType, tbe.secondType);
   assert((alloc_entry && dealloc_entry) == false);
 
   // MYSTUFF
@@ -315,7 +325,6 @@ action(Initiate_Request, desc="") {
     // NOTE: We are the indirect unit. Set the indirect_unit_id in
     // tbe so that we can use it when we send a message out.
     tbe.indirect_unit_id := machineID;
-    DPRINTF(IndirectAccess, "Received an indirect access to address %#lx with invalid indirect unit id. I am it. Setting it to myself.\n", address);
   }
   if (gather_unit && isInvalid(tbe.gather_unit_id)) {
     // NOTE: We are the gather unit. Set the gather_unit_id in
@@ -339,6 +348,15 @@ action(Initiate_Request, desc="") {
   // Schedule HovAck before tag read so the gather unit knows we accepted
   if (indirect_unit && isIndirectVal(tbe.reqType, tbe.secondType)) {
     tbe.actions.pushNB(Event:SendHovAck);
+  }
+
+  // An index request that reaches the Gather Unit carries its DAG in
+  // seqReq. Cache it so that PostProcess sends the IDRs once the index
+  // data is here. (Index hits above the Gather Unit deliver the DAG with
+  // SendPostNotif instead, which the Gather Unit gets as UpdateDAG.)
+  if (gather_unit && isIndirectIdx(tbe.reqType, tbe.secondType) &&
+      tbe.isSeqReqValid) {
+    tbe.actions.pushNB(Event:ExtractDAG);
   }
 
   // model the initial tag array read
@@ -2807,6 +2825,24 @@ action(Send_Retry, desc="") {
   }
 }
 
+// MYSTUFF
+action(Send_Retry_Hov, desc="Resend an IDR after RetryAck + PCrdGrant") {
+  assert(tbe.pendReqAllowRetry);
+  assert(tbe.rcvdRetryCredit);
+  assert(tbe.rcvdRetryAck);
+  enqueue(reqOutPort, CHIRequestMsg, request_latency) {
+    prepareRequestRetry(tbe, out_msg);
+    // prepareRequestRetry fills what a line request needs; the IDR also
+    // carries its hov id and alias, and no secondType (see SendIDR).
+    out_msg.txnId := tbe.txnId;
+    out_msg.alias := tbe.alias;
+    out_msg.secondType := CHIRequestType:null;
+    DPRINTF(IndirectAccess, "IDR retry: hov_id=%#x data_line=%#x type=%s\n",
+            tbe.txnId, out_msg.addr, out_msg.type);
+  }
+}
+// FFUTSYM
+
 action(Send_Retry_DVM, desc="") {
   assert(tbe.pendReqAllowRetry);
   assert(tbe.rcvdRetryCredit);
@@ -3440,12 +3476,6 @@ action(Send_RetryAck, desc="") {
   peek(retryTriggerInPort, RetryTriggerMsg) {
     enqueue(rspOutPort, CHIResponseMsg, response_latency) {
       out_msg.addr := in_msg.addr;
-      // MYSTUFF
-      if ((in_msg.secondType == CHIRequestType:ReadValue) ||
-          (in_msg.secondType == CHIRequestType:WriteValue)) {
-        out_msg.addr := in_msg.accAddr;
-      }
-      // FFUTSYM
       out_msg.usesTxnId := in_msg.usesTxnId;
       out_msg.type := CHIResponseType:RetryAck;
       out_msg.secondType := in_msg.secondType;
@@ -3462,7 +3492,10 @@ action(Send_PCrdGrant, desc="") {
       out_msg.addr := in_msg.addr;
       out_msg.usesTxnId := in_msg.usesTxnId;
       out_msg.type := CHIResponseType:PCrdGrant;
+      // MYSTUFF: an IDR's PCrdGrant is matched by its hov id at the Gather Unit
       out_msg.secondType := in_msg.secondType;
+      out_msg.txnId := in_msg.txnId;
+      // FFUTSYM
       out_msg.responder := machineID;
       out_msg.Destination.add(in_msg.retryDest);
     }
@@ -3766,17 +3799,21 @@ action(Callback_LoadHit, desc="") {
   assert(is_valid(tbe));
   assert(tbe.reqType == CHIRequestType:Load);
 
+  // MYSTUFF
+  // Two-uop model: only the index access (uop0, ReadIndirect) calls back;
+  // the CPU extracts index[i] from the line and writes it to Rd+1.
+  // Value accesses (ReadValue/WriteValue, sent by the Gather Unit) never
+  // call back: they only bring the line to the Indirect Unit, and the
+  // core's own value access (uop1) is a normal load/store.
   if (isIndirect(tbe.reqType, tbe.secondType)) {
     if (tbe.dataValid && (tbe.reqType == CHIRequestType:Load)) {
         DPRINTF(IndirectAccess, "Finished servicing a hit for a load to addr %#lx.\n", tbe.addr);
         if (tbe.secondType == CHIRequestType:ReadIndirect) {
-            // Two-uop model: Phase 1 complete. Return index data to CPU.
-            // The CPU's uop1 (ldind_idx/stind_idx) will extract index[i]
-            // from this cache line and write it to Rd+1.
-            DPRINTF(IndirectAccess, "Load to addr %#lx was to an index (Phase 1). Calling back to CPU.\n", tbe.addr);
+            DPRINTF(IndirectAccess, "Load to addr %#lx was to an index. Calling back to CPU.\n", tbe.addr);
             sequencer.readCallback(tbe.addr, tbe.accAddr, tbe.dataBlk, true);
         }
     }
+  // FFUTSYM
   } else if (tbe.is_local_pf == false) {
     assert(tbe.dataValid);
     DPRINTF(RubySlicc, "Read data %s\n", tbe.dataBlk);
@@ -3788,11 +3825,15 @@ action(Callback_StoreHit, desc="") {
   assert(is_valid(tbe));
   assert((tbe.reqType == CHIRequestType:StoreLine) ||
          (tbe.reqType == CHIRequestType:Store));
-  if (tbe.is_local_pf == false) {
+  // MYSTUFF
+  // A WriteValue (sent by the Gather Unit for stind) only obtains unique
+  // permission at the Indirect Unit: no callback and no data written. The
+  // core's own value store (uop1) is a normal store that writes the data.
+  if (isIndirectVal(tbe.reqType, tbe.secondType)) {
+    DPRINTF(IndirectAccess, "WriteValue to addr %#lx hit. No callback.\n", tbe.addr);
+  // FFUTSYM
+  } else if (tbe.is_local_pf == false) {
     assert(tbe.dataValid);
-    // Two-uop model: stind uop2 is a normal WriteReq, handled by the
-    // standard store path below. The old WriteValue callback path is removed
-    // because the cache no longer sends WriteValue on behalf of the CPU.
     DPRINTF(RubySlicc, "Write before %s\n", tbe.dataBlk);
     sequencer.writeCallback(tbe.addr, tbe.accAddr, tbe.dataBlk, false);
     DPRINTF(RubySlicc, "Write after %s\n", tbe.dataBlk);
@@ -3837,21 +3878,17 @@ action(Callback_ExpressPrefetchHit, desc="") {
 action(Callback_Miss, desc="") {
   assert(is_valid(tbe));
   // MYSTUFF
+  // Two-uop model: only the index access (uop0, ReadIndirect) calls back.
+  // Value accesses (ReadValue/WriteValue) never call back; see
+  // Callback_LoadHit.
   if (isIndirect(tbe.reqType, tbe.secondType)) {
     if (tbe.dataValid && (tbe.reqType == CHIRequestType:Load)) {
         DPRINTF(IndirectAccess, "Finished servicing a miss for a load to addr %#lx.\n", tbe.addr);
         if (tbe.secondType == CHIRequestType:ReadIndirect) {
-            // Two-uop model: Phase 1 complete. Return index data to CPU.
-            DPRINTF(IndirectAccess, "Load to addr %#lx was to an index (Phase 1). Calling back to CPU.\n", tbe.addr);
-            sequencer.readCallback(tbe.addr, tbe.accAddr, tbe.dataBlk, true);
-        } else if (tbe.secondType == CHIRequestType:ReadValue) {
-            // Two-uop model: Phase 2 complete. Notify sequencer.
-            DPRINTF(IndirectAccess, "Load to addr %#lx was to a value (Phase 2). Calling readCallback.\n", tbe.addr);
+            DPRINTF(IndirectAccess, "Load to addr %#lx was to an index. Calling back to CPU.\n", tbe.addr);
             sequencer.readCallback(tbe.addr, tbe.accAddr, tbe.dataBlk, true);
         }
     }
-    // Two-uop model: stind uop1 is a load (index fetch), not a store.
-    // stind uop2 is a normal WriteReq. No WriteValue path needed here.
   // FFUTSYM
   } else if (tbe.dataValid && tbe.is_local_pf) {
     assert(use_prefetcher);
@@ -4318,19 +4355,9 @@ action(PostProcess,
     State toBeState := makeFinalState(tbe, getCacheEntry(address), getDirEntry(address));
 
     if (gather_unit && hasDependentWork(address)) {
-        // Peek at next IDR's accAddr to check for hovTBE collision
-        Addr nextAccAddr := peekDependentAddr(address, tbe.dataBlk);
-        if (!hovTBEs.isPresent(nextAccAddr)) {
-            tbe.actions.pushNB(Event:SendIDR);
-        } else {
-            // Collision: hovTBE already exists for this accAddr.
-            // Drop the redundant DAG and apply configurable delay.
-            dropDependentReq(address);
-            tbe.delayNextAction := curTick() + cyclesToTicks(intToCycles(idr_collision_delay_cy));
-            DPRINTF(IndirectAccess,
-                "IDR collision at accAddr=%#x, dropping DAG and delaying %d cycles\n",
-                nextAccAddr, idr_collision_delay_cy);
-        }
+        // One IDR per DAG descriptor. Two IDRs to the same data line are
+        // two Loads at the Indirect Unit; the second stalls there and hits.
+        tbe.actions.pushNB(Event:SendIDR);
     } else if (needPostNotif(tbe, tbe.reqType, tbe.secondType) && cachedHere(toBeState) && (tbe.postNotifSent == false)) {
         tbe.actions.push(Event:SendPostNotif);
 
@@ -4367,10 +4394,12 @@ action(SendIDR,
         idr_dest.add(tbe.indirect_unit_id);
     }
 
-    // Allocate HOV TBE with full retry fields
-    hovTBEs.allocate(acc_addr);
-    TBE hovTbe := hovTBEs[acc_addr];
-    initializeHovTBE(hovTbe, acc_addr, storHovTBEs.addEntryToNewSlot(),
+    // Allocate the hov TBE, a transaction keyed by its hov id (see hovTBEs)
+    int hov_slot := storHovTBEs.addEntryToNewSlot();
+    Addr hov_id := makeHovId(hov_slot, blockSize);
+    hovTBEs.allocate(hov_id);
+    TBE hovTbe := hovTBEs[hov_id];
+    initializeHovTBE(hovTbe, hov_id, acc_addr, hov_slot,
                      idr_type, depReq, idr_dest, tbe);
 
     enqueue(reqOutPort, CHIRequestMsg, request_latency) {
@@ -4379,15 +4408,17 @@ action(SendIDR,
 
         out_msg.type := idr_type;
         out_msg.allowRetry := hovTbe.pendReqAllowRetry;
+        // The Indirect Unit returns this id on HovAck/RetryAck/PCrdGrant
+        out_msg.txnId := hov_id;
 
         out_msg.indirect_unit_id := tbe.indirect_unit_id;
         out_msg.value_unit_id := tbe.value_unit_id;
         out_msg.gather_unit_id := tbe.gather_unit_id;
-        out_msg.alias := tbe.alias;
+        out_msg.alias := hovTbe.alias;
 
         DPRINTF(IndirectAccess,
-            "IDR: index_line=%#x -> data_addr=%#x alias=%d isRead=%d\n",
-            address, out_msg.addr, tbe.alias, isDepReadReq(depReq)
+            "IDR: index_line=%#x -> data_addr=%#x alias=%#x isRead=%d hov_id=%#x\n",
+            address, out_msg.addr, hovTbe.alias, isDepReadReq(depReq), hov_id
         );
 
         out_msg.Destination := idr_dest;
@@ -4440,6 +4471,10 @@ action(TriggerPostEvict, desc="") {
     } else {
         DPRINTF(IndirectAccess, "TBE for %#lx says post evict but already have it.\n", address);
     }
+}
+
+action(Error_UpdateDAGNoIndexLine, desc="") {
+  error("UpdateDAG with the index line not cached at the Gather Unit");
 }
 
 action(Extract_Extensions, desc="") {
@@ -4502,23 +4537,29 @@ action(Cleanup_NotifPkt, desc="Clean up dummy_pkt via sequencer callback on Noti
     }
 }
 
-action(Receive_HovAck, desc="Deallocate HOV TBE on acceptance ack") {
+action(Receive_HovAck, desc="IDR accepted by the Indirect Unit: free the hov TBE") {
     assert(gather_unit);
     assert(tbe.expected_req_resp.hasExpected());
     if (tbe.expected_req_resp.receiveResp(CHIResponseType:HovAck) == false) {
       error("Unexpected response on HOV TBE");
     }
     assert(tbe.expected_req_resp.hasExpected() == false);
-    hovTBEs.deallocate(address);
+    // Read the slot and key before the entry goes away, then unset the TBE
+    // so the transition's setState does not touch freed memory (as the DVM
+    // Final transitions do).
     storHovTBEs.removeEntryFromSlot(tbe.storSlot);
+    hovTBEs.deallocate(tbe.txnId);
+    unset_tbe();
 }
 
 action(Send_HovAck, desc="Ack ReadValue/WriteValue acceptance to Gather Unit") {
     // Scheduled via processNextState — indirect_unit check done in Initiate_Request
     enqueue(rspOutPort, CHIResponseMsg, response_latency) {
-        out_msg.addr := tbe.accAddr;
+        out_msg.addr := tbe.addr;
         out_msg.type := CHIResponseType:HovAck;
-        out_msg.secondType := tbe.reqType;
+        // The Gather Unit matches the hov TBE by secondType and txnId
+        out_msg.secondType := tbe.secondType;
+        out_msg.txnId := tbe.txnId;
         out_msg.responder := machineID;
         out_msg.Destination.add(tbe.requestor);
     }

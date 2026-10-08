@@ -88,22 +88,21 @@ in_port(rspInPort, CHIResponseMsg, rspIn, rank=10,
         TBE tbe := getDvmTBE(in_msg.txnId);
         trigger(respToEvent(in_msg.type, tbe), in_msg.txnId,
                 nullCacheEntry(), tbe);
-      } else if (in_msg.type == CHIResponseType:HovAck) {
-        // HovAck always maps to hovTBEs (keyed by accAddr)
-        TBE tbe := hovTBEs[in_msg.addr];
-        trigger(Event:HovAck, in_msg.addr,
-                getCacheEntry(makeLineAddress(in_msg.addr)), tbe);
-      } else if ((in_msg.type == CHIResponseType:RetryAck ||
-                  in_msg.type == CHIResponseType:PCrdGrant) &&
-                 gather_unit &&
-                 (in_msg.secondType == CHIRequestType:ReadValue ||
-                  in_msg.secondType == CHIRequestType:WriteValue) &&
-                 hovTBEs.isPresent(in_msg.addr)) {
-        DPRINTF(IndirectAccess, "Received a RetryAck/PCrdGrant for a HOV request at %#lx.\n", in_msg.addr);
-        // RetryAck/PCrdGrant for a HOV request — dispatch to hovTBE
-        TBE tbe := hovTBEs[in_msg.addr];
-        trigger(respToEvent(in_msg.type, tbe), makeLineAddress(in_msg.addr),
-                getCacheEntry(makeLineAddress(in_msg.addr)), tbe);
+      } else if (gather_unit &&
+                 (in_msg.secondType != CHIRequestType:null) &&
+                 ((in_msg.type == CHIResponseType:HovAck) ||
+                  (in_msg.type == CHIResponseType:RetryAck) ||
+                  (in_msg.type == CHIResponseType:PCrdGrant))) {
+        // MYSTUFF
+        // A response to an IDR (secondType is set only for those). The hov
+        // TBE is a transaction keyed by the hov id the IDR carried as
+        // txnId, never by the data line, and it has no cache entry:
+        // setState then only touches the hov TBE.
+        TBE tbe := hovTBEs[in_msg.txnId];
+        assert(is_valid(tbe));
+        trigger(hovRespToEvent(in_msg.type), in_msg.txnId,
+                nullCacheEntry(), tbe);
+        // FFUTSYM
       } else {
         TBE tbe := getCurrentActiveTBE(in_msg.addr);
         trigger(respToEvent(in_msg.type, tbe), in_msg.addr,
@@ -228,6 +227,13 @@ in_port(retryTriggerInPort, RetryTriggerMsg, retryTriggerQueue, rank=6,
         CacheEntry entry := nullCacheEntry();
         assert(is_valid(tbe));
         trigger(ev, in_msg.addr, entry, tbe);
+      } else if ((ev == Event:DoRetry) &&
+                 (in_msg.secondType != CHIRequestType:null)) {
+        // MYSTUFF: DoRetry for an IDR; txnId is the hov id (see hovTBEs).
+        TBE tbe := hovTBEs[in_msg.txnId];
+        assert(is_valid(tbe));
+        trigger(ev, in_msg.txnId, nullCacheEntry(), tbe);
+        // FFUTSYM
       } else {
         TBE tbe := getCurrentActiveTBE(in_msg.addr);
         CacheEntry entry := getCacheEntry(in_msg.addr);

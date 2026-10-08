@@ -164,12 +164,6 @@ structure (Sequencer, external = "yes") {
   bool checkResourceAvailable(CacheResourceType, Addr);
 
   // MYSTUFF
-  // void prepareIndPacket(Addr, RequestPtr);
-  // void indirectReadCallback(Addr, DataBlock);
-  // void indirectWriteCallback(Addr, DataBlock);
-  void trackIndirectValueCached(Addr);
-  void checkIndirectValueEvicted(Addr);
-  void expectStalledIndirectRequest(Addr);
   bool canOverride(std::string name);
   Addr getNotifId(RequestPtr);
   void cleanupNotifPkt(Addr);

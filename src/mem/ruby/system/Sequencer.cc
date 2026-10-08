@@ -94,13 +94,8 @@ Sequencer::Sequencer(const Params &p)
     assert(m_deadlock_threshold > 0);
 
     m_unaddressedTransactionCnt = 0;
-    m_hov_seq_num = 0;
 
     m_runningGarnetStandalone = p.garnet_standalone;
-
-    // MYSTUFF: HOV Stats configuration
-    m_hov_measurement_enabled = p.hov_measurement_enabled;
-    m_hov_history_size = p.hov_history_size;
 
     m_num_pending_invs = 0;
     m_cache_inv_pkt = nullptr;
@@ -108,13 +103,6 @@ Sequencer::Sequencer(const Params &p)
     // These statistical variables are not for display.
     // The profiler will collate these across different
     // sequencers and display those collated statistics.
-    // MYSTUFF: HOV Stats
-    m_hov_collision_distance.init(10);
-    m_hov_inst_distance.init(10);
-    m_hov_addr_iterators.reserve(m_hov_history_size);
-    m_hov_access_history.reserve(m_hov_history_size);
-    m_hov_inst_history.reserve(m_hov_history_size);
-
     // MYSTUFF
     hovLdindE2ELatency = new statistics::Histogram(this, "hovLdindE2ELatency",
         statistics::units::Cycle::get(),
@@ -417,13 +405,9 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType primary_type,
     }
 
     Addr line_addr = makeLineAddress(pkt->getAddr());
-    // Two-uop model: indirect requests (uop1 = ldind_idx/stind_idx) now use
-    // the standard m_RequestTable keyed by the index line address. The alias
-    // still travels with the request via IndirectAccessAlias packet extension
-    // for the CHI protocol to use (tbe.alias), but the Sequencer no longer
-    // needs m_IndirectRequestTable for lookup — the callback arrives on the
-    // real index line address.
-    // Normal path — unchanged
+    // Two-uop model: the index access (uop0, LDIND/STIND, carries the DAG)
+    // and the value access (uop1, a normal LD/ST that carries the alias)
+    // both use m_RequestTable keyed by their line address.
     // Check if there is any outstanding request for the same cache line.
     auto &seq_req_list = m_RequestTable[line_addr];
 
@@ -431,14 +415,19 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType primary_type,
         // Aliased — another request is already outstanding for this line.
 
         // If the new request is indirect (has a DAG), merge its
-        // descriptors into the first indirect request's DAG for this line.
+        // descriptors into this line's DAG in m_IndirectDAGTable. The table
+        // holds its own copy, so merging never changes a request's DAG
+        // (which the CPU and the request still share).
         if (auto new_dag = pkt->req->getExtension<DependentAccessGen>()) {
             auto it = m_IndirectDAGTable.find(line_addr);
             if (it != m_IndirectDAGTable.end()) {
                 it->second->merge(*new_dag);
             } else {
-                // First indirect for this line (prior requests were normal).
-                m_IndirectDAGTable[line_addr] = new_dag;
+                // First aliased indirect for this line.
+                m_IndirectDAGTable[line_addr] =
+                    std::shared_ptr<DependentAccessGen>(
+                        static_cast<DependentAccessGen *>(
+                            new_dag->clone().release()));
             }
         }
         seq_req_list.emplace_back(pkt, primary_type,
@@ -641,6 +630,7 @@ Sequencer::writeCallback(Addr address, Addr accAddress, DataBlock& data,
 
     // free all outstanding requests corresponding to this address
     if (seq_req_list.empty()) {
+        sendMergedDAGNotif(address);
         m_RequestTable.erase(address);
         m_IndirectDAGTable.erase(address);
     }
@@ -693,8 +683,7 @@ Sequencer::readCallback(Addr address, Addr accAddress, DataBlock& data,
     // or end of the corresponding list.
     //
 
-    // Two-uop model: all requests (including indirect uop1) are in
-    // m_RequestTable. No m_IndirectRequestTable lookup needed.
+    // Two-uop model: all requests, indirect or not, are in m_RequestTable.
     assert(address == makeLineAddress(address));
 
     auto &seq_req_list = m_RequestTable[address];
@@ -734,129 +723,58 @@ Sequencer::readCallback(Addr address, Addr accAddress, DataBlock& data,
 
     // free all outstanding requests corresponding to this address
     if (seq_req_list.empty()) {
-            if (m_IndirectDAGTable.find(address) != m_IndirectDAGTable.end()) {
-                RequestPtr dummy_req = std::make_shared<Request>();
-                dummy_req->setExtension<DependentAccessGen>(m_IndirectDAGTable[address]);
-                PacketPtr dummy_pkt = new Packet(dummy_req, MemCmd::InvalidCmd);
-
-                // Assign a unique notif ID for tracking this dummy_pkt.
-                // The protocol will use this ID (via txnId) to identify
-                // the NotifAck and call cleanupNotifPkt.
-                uint64_t notifId = m_nextNotifId++;
-                m_NotifPktTable[notifId] = dummy_pkt;
-                m_NotifIdTable[dummy_req] = notifId;
-
-                auto msg = std::make_shared<RubyRequest>(
-                                            clockEdge(),
-                                            m_ruby_system->getBlockSizeBytes(),
-                                            m_ruby_system, address,
-                                            m_ruby_system->getBlockSizeBytes(),
-                                            0, RubyRequestType_NOTIFY_INDIDX,
-                                            RubyAccessMode_Supervisor,
-                                            dummy_pkt, PrefetchBit_No, 0, coreId()
-                                        );
-                Cycles latency = m_controller->mandatoryQueueLatency(RubyRequestType_NOTIFY_INDIDX);
-                DPRINTFR(ProtocolTrace, "%15s %3s %10s%20s %6s>%-6s %#x %s\n",
-                        curTick(), m_version, "Seq", "Begin", "", "",
-                        printAddress(msg->getPhysicalAddress()),
-                        RubyRequestType_to_string(RubyRequestType_NOTIFY_INDIDX));
-                m_mandatory_q_ptr->enqueue(msg, clockEdge(), latency,
-                                        m_ruby_system->getRandomization(),
-                                        m_ruby_system->getWarmupEnabled()
-                                    );
-            }
+        sendMergedDAGNotif(address);
         m_RequestTable.erase(address);
         m_IndirectDAGTable.erase(address);
     }
 }
 
 // MYSTUFF
-// void
-// Sequencer::prepareIndPacket(Addr alias, RequestPtr& final_req)
-// {
-//     // Locate the Phase 1 SequencerRequest tracked under `alias`
-//     // in the indirect request table.
-//     auto it = m_IndirectRequestTable.find(alias);
+void
+Sequencer::sendMergedDAGNotif(Addr address)
+{
+    // The DAGs of indirect requests that aliased on this line were merged
+    // into m_IndirectDAGTable instead of being issued. Deliver them to the
+    // Gather Unit with a NOTIFY_INDIDX once the line's requests drain.
+    auto it = m_IndirectDAGTable.find(address);
+    if (it == m_IndirectDAGTable.end()) {
+        return;
+    }
 
-//     panic_if(it == m_IndirectRequestTable.end() || it->second.pending.empty(),
-//         "prepareIndPacket: no SequencerRequest found for alias 0x%x",alias);
-//     SequencerRequest &sreq = it->second.pending.front();
-//     PacketPtr old_pkt = sreq.pkt;
+    RequestPtr dummy_req = std::make_shared<Request>();
+    dummy_req->setExtension<DependentAccessGen>(it->second);
+    PacketPtr dummy_pkt = new Packet(dummy_req, MemCmd::InvalidCmd);
 
-//     // Build the Phase 2 packet: correct PA, correct size (sizeData).
-//     PacketPtr new_pkt = new Packet(final_req, old_pkt->cmd);
-//     new_pkt->allocate();
+    // Assign a unique notif ID for tracking this dummy_pkt.
+    // The protocol will use this ID (via txnId) to identify
+    // the NotifAck and call cleanupNotifPkt.
+    uint64_t notifId = m_nextNotifId++;
+    m_NotifPktTable[notifId] = dummy_pkt;
+    m_NotifIdTable[dummy_req] = notifId;
 
-//     // MYSTUFF: HOV Collision Stats
-//     if (m_hov_measurement_enabled) {
-//         Addr phase2_paddr = final_req->getPaddr();
-//         uint64_t current_seq = ++m_hov_seq_num;
-//         bool has_inst_count = old_pkt->req->hasInstCount();
-//         uint64_t current_inst_count = has_inst_count ? old_pkt->req->getInstCount() : 0;
+    auto msg = std::make_shared<RubyRequest>(
+                                clockEdge(),
+                                m_ruby_system->getBlockSizeBytes(),
+                                m_ruby_system, address,
+                                m_ruby_system->getBlockSizeBytes(),
+                                0, RubyRequestType_NOTIFY_INDIDX,
+                                RubyAccessMode_Supervisor,
+                                dummy_pkt, PrefetchBit_No, 0, coreId()
+                            );
+    // Each merged descriptor carries its own alias; the notif has none.
+    msg->m_alias = 0;
+    Cycles latency = m_controller->mandatoryQueueLatency(
+        RubyRequestType_NOTIFY_INDIDX);
+    DPRINTFR(ProtocolTrace, "%15s %3s %10s%20s %6s>%-6s %#x %s\n",
+            curTick(), m_version, "Seq", "Begin", "", "",
+            printAddress(msg->getPhysicalAddress()),
+            RubyRequestType_to_string(RubyRequestType_NOTIFY_INDIDX));
+    m_mandatory_q_ptr->enqueue(msg, clockEdge(), latency,
+                            m_ruby_system->getRandomization(),
+                            m_ruby_system->getWarmupEnabled()
+                        );
+}
 
-//         auto it = m_hov_addr_iterators.find(phase2_paddr);
-//         if (it != m_hov_addr_iterators.end()) {
-//             // Address is in history! Calculate distances.
-//             uint64_t old_seq = m_hov_access_history[phase2_paddr];
-//             if (current_seq >= old_seq) {
-//                 m_hov_collision_distance.sample(current_seq - old_seq);
-//             }
-
-//             if (has_inst_count && m_hov_inst_history.find(phase2_paddr) != m_hov_inst_history.end()) {
-//                 uint64_t old_inst_count = m_hov_inst_history[phase2_paddr];
-//                 if (current_inst_count >= old_inst_count) {
-//                     m_hov_inst_distance.sample(current_inst_count - old_inst_count);
-//                 }
-//             }
-
-//             // LRU Move: move existing element to the back (youngest)
-//             m_hov_addr_history.splice(m_hov_addr_history.end(), m_hov_addr_history, it->second);
-//         } else {
-//             // New entry: push to back and record iterator
-//             m_hov_addr_history.push_back(phase2_paddr);
-//             m_hov_addr_iterators[phase2_paddr] = std::prev(m_hov_addr_history.end());
-//         }
-
-//         // Update histories with latest sequences
-//         m_hov_access_history[phase2_paddr] = current_seq;
-//         if (has_inst_count) {
-//             m_hov_inst_history[phase2_paddr] = current_inst_count;
-//         }
-
-//         // LRU Eviction: pop from front if size exceeded
-//         if (m_hov_addr_history.size() > m_hov_history_size) {
-//             Addr oldest_paddr = m_hov_addr_history.front();
-//             m_hov_addr_history.pop_front();
-//             m_hov_addr_iterators.erase(oldest_paddr);
-//             m_hov_access_history.erase(oldest_paddr);
-//             m_hov_inst_history.erase(oldest_paddr);
-//         }
-//     }
-
-//     // For stores, we must copy the payload into the new packet.
-//     // The O3 pipeline truncates the payload because writeMem() uses sizeIndex.
-//     // The full payload is preserved in the DependentAccessGen extension.
-//     // It's not actually needed to be sent to the caches.
-//     if (auto dag = final_req->getExtension<DependentAccessGen>()) {
-//         if (dag->hasData()) {
-//             assert(new_pkt->isWrite());
-//             new_pkt->setData(dag->getStoreData());
-//         }
-//     }
-
-//     DPRINTF(IndirectAccess, "%s: alias=0x%x Phase2 PA=0x%x size=%d\n",
-//             __func__, alias, final_req->getPaddr(), final_req->getSize());
-
-//     // Transfer the senderState chain so RubyPort can route the response
-//     // back to the correct CPU port, and so O3 (if used) can match the
-//     // returning packet via dynamic_cast<LSQRequest*>(pkt->senderState).
-//     new_pkt->senderState = old_pkt->senderState;
-//     old_pkt->senderState = nullptr;
-
-//     // Replace the tracked packet; the old one is no longer needed.
-//     delete old_pkt;
-//     sreq.pkt = new_pkt;
-// }
 // FFUTSYM
 
 uint64_t
@@ -940,6 +858,7 @@ Sequencer::atomicCallback(Addr address, DataBlock& data,
 
     // free all outstanding requests corresponding to this address
     if (seq_req_list.empty()) {
+        sendMergedDAGNotif(address);
         m_RequestTable.erase(address);
         m_IndirectDAGTable.erase(address);
     }
@@ -1121,11 +1040,14 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
 
     // MYSTUFF: must run before pkt can be freed (delete / ruby_hit_callback)
     handleIndArrival(pkt);
-    if (!rs->getWarmupEnabled() && !rs->getCooldownEnabled() &&
-        type == RubyRequestType_LDIND) {
-        if (pkt->req->getExtension<DependentAccessGen>()) {
+    if (!rs->getWarmupEnabled() && !rs->getCooldownEnabled()) {
+        // uop0 is an indirect read carrying the DAG; uop1 (the value) is a
+        // normal load that only carries the alias.
+        if (type == RubyRequestType_LDIND &&
+            pkt->req->getExtension<DependentAccessGen>()) {
             hovRecordLdindIndex(srequest, data);    // uop0: index arrived
-        } else if (pkt->req->getExtension<IndirectAccessAlias>()) {
+        } else if (type == RubyRequestType_LD &&
+                   pkt->req->getExtension<IndirectAccessAlias>()) {
             hovSampleLdindValue(srequest);          // uop1: value arrived
         }
     }
@@ -1151,20 +1073,16 @@ Sequencer::hovRecordLdindIndex(SequencerRequest *srequest,
 {
     PacketPtr pkt = srequest->pkt;
     auto dag = pkt->req->getExtension<DependentAccessGen>();
-    if (dag->numDescriptors() == 0) {
-        return;
-    }
-    // This uop's own descriptor; merged descriptors are appended after it.
-    const auto &desc = dag->descriptor(0);
-    if (desc.intent != DependentAccessGen::AccessIntent::Read) {
+    // A request's own DAG is never merged (merges happen in the
+    // Sequencer's copies in m_IndirectDAGTable).
+    if (dag->descriptor(0).intent != DependentAccessGen::AccessIntent::Read) {
         return;                                     // STIND uop0
     }
     uint64_t index = 0;
     unsigned size = pkt->getSize();
     assert(size <= sizeof(index));
     std::memcpy(&index, data.getData(getOffset(pkt->getAddr()), size), size);
-    // baseAddr is already the data array's PA (set in translateComplete).
-    Addr data_pa = desc.baseAddr + index * desc.dataSize;
+    Addr data_pa = dag->genAddress(index);
     m_hovLdindPending[data_pa].push_back(srequest->issue_time);
 }
 
@@ -1464,11 +1382,6 @@ Sequencer::makeRequest(PacketPtr pkt)
         // proceed until the cache line is unlocked by a Locked_RMW_Write
         return RequestStatus_Aliased;
     }
-
-    // MYSTUFF: Indirect-value access routing (uop1 for ldind/stind).
-    // uop1 has IAA extension but is NOT LDIND/STIND (those are uop0 types).
-    // MYSTUFF
-    // FFUTSYM
 
     RequestStatus status = insertRequest(pkt, primary_type, secondary_type);
 

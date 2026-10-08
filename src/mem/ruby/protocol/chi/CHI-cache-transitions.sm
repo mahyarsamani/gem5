@@ -98,6 +98,16 @@ transition({BUSY_INTR,BUSY_BLKD}, TagArrayRead) {TagArrayRead} {
   ProcessNextState_ClearPending;
 }
 
+// MYSTUFF
+// Gather Unit: cache the DAGs carried by an index request (see
+// Initiate_Request); PostProcess sends the IDRs once the data is here.
+transition({BUSY_INTR,BUSY_BLKD}, ExtractDAG) {
+  Pop_TriggerQueue;
+  Extract_Extensions;
+  ProcessNextState_ClearPending;
+}
+// FFUTSYM
+
 transition({BUSY_INTR,BUSY_BLKD}, TagArrayWrite) {TagArrayWrite} {
   Pop_TriggerQueue;
   TagArrayWrite;
@@ -1651,16 +1661,27 @@ transition({BUSY_BLKD, BUSY_INTR}, SendHovAck) {
   ProcessNextState_ClearPending;
 }
 
-// HOV ack received — deallocate HOV TBE.
-// HovAck is for the separate hovTBE pool and can arrive regardless of the
-// regular cache state for the data address. Do not change state.
-transition({null, I, SC, UC, SD, UD, UD_T,
-            RU, RSC, RSD, RUSC, RUSD,
-            SC_RSC, SD_RSC, SD_RSD, UC_RSC, UC_RU,
-            UD_RU, UD_RSD, UD_RSC,
-            BUSY_INTR, BUSY_BLKD}, HovAck) {
+// The hov TBE (an IDR sent by the Gather Unit) lives in HOV_PEND, keyed by
+// its hov id with no cache entry, so these transitions never touch a line.
+// Retries reuse the regular CHI actions; only the resend differs.
+transition(HOV_PEND, HovAck, I) {
   Receive_HovAck;
   Pop_RespInQueue;
+}
+
+transition(HOV_PEND, RetryAck) {
+  Receive_RetryAck;
+  Pop_RespInQueue;
+}
+
+transition(HOV_PEND, PCrdGrant) {
+  Receive_PCrdGrant;
+  Pop_RespInQueue;
+}
+
+transition(HOV_PEND, DoRetry) {
+  Send_Retry_Hov;
+  Pop_RetryTriggerQueue;
 }
 // FFUTSYM
 
@@ -1849,17 +1870,6 @@ transition(DvmExtOp_Finished, Final, I) {
 }
 
 // MYSTUFF
-// For the case we have accessed a cache upstream to gather unit
-// and it has the index line cached in a stable state.
-// Notice that the eviction cascades down stream until it reaches
-// the gather_unit. Now, because the eviction cascades, we will
-// never have the block in a state where the line is cached upstream.
-// Therefore, no need to account for .*_R.* states.
-// transition({BUSY_BLKD}, PostEvictIdxLine) {
-//     Evict_IdxLine;
-// }
-
-
 transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD,
             UC_RSC, UC_RU, UD_RU, UD_RSD, UD_RSC}, UpdateDAG, BUSY_BLKD) {
     Initiate_Request;
@@ -1867,6 +1877,12 @@ transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD,
     Extract_Extensions;
     Pop_ReqRdyQueue;
     ProcessNextState;
+}
+
+// A notif (post-notif or Sequencer) whose index line the Gather Unit no
+// longer holds: not handled yet.
+transition({I, RU, RSC, RSD, RUSC, RUSD}, UpdateDAG) {
+    Error_UpdateDAGNoIndexLine;
 }
 
 transition({I, SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD, UC_RSC, UC_RU, UD_RU,

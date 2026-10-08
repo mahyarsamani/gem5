@@ -104,15 +104,22 @@ State getState(TBE tbe, CacheEntry cache_entry, Addr addr) {
 }
 
 void setState(TBE tbe, CacheEntry cache_entry, Addr addr, State state) {
+  // MYSTUFF: a hov TBE (an IDR the Gather Unit sent, state HOV_PEND) is a
+  // transaction keyed by its hov id, not a line; its state never belongs
+  // to a cache or directory entry.
+  bool is_hov := is_valid(tbe) && (tbe.state == State:HOV_PEND);
+  // FFUTSYM
   if (is_valid(tbe)) {
     tbe.state := state;
   }
-  if (is_valid(cache_entry)) {
-    cache_entry.state := state;
-  }
-  DirEntry dir_entry := getDirEntry(addr);
-  if (is_valid(dir_entry)) {
-    dir_entry.state := state;
+  if (is_hov == false) {
+    if (is_valid(cache_entry)) {
+      cache_entry.state := state;
+    }
+    DirEntry dir_entry := getDirEntry(addr);
+    if (is_valid(dir_entry)) {
+      dir_entry.state := state;
+    }
   }
 }
 
@@ -210,6 +217,24 @@ bool isConsideredEvict(CHIRequestType type)
     return true;
   }
   return false;
+}
+
+// An index access (ldind/stind uop0) as seen by a cache.
+bool isIndirectIdx(CHIRequestType type, CHIRequestType second_type) {
+    return (
+        ((type == CHIRequestType:Load) || (type == CHIRequestType:ReadOnce)) &&
+        ((second_type == CHIRequestType:ReadIndirect) ||
+        (second_type == CHIRequestType:WriteIndirect))
+    );
+}
+
+// An IDR (ReadValue/WriteValue), whatever type it was mapped to locally.
+bool isIndirectVal(CHIRequestType type, CHIRequestType second_type)
+{
+    return (
+        (second_type == CHIRequestType:ReadValue) ||
+        (second_type == CHIRequestType:WriteValue)
+    );
 }
 // FFUTSYM
 
@@ -439,13 +464,20 @@ void initializeTBE(TBE tbe, Addr addr, int storSlot) {
 // Initialize a HOV TBE with all fields needed for retry tracking.
 // Unlike initializeTBE, this populates the pendReq* fields so that
 // prepareRequestRetry produces valid messages if the request is retried.
-void initializeHovTBE(TBE hovTbe, Addr acc_addr, int storSlot,
+// The table key is hov_id (tbe.txnId); tbe.addr is the data line, which is
+// what prepareRequestRetry puts on the wire. HOV_PEND is the only state a
+// hov TBE ever has, and is what identifies it as one.
+void initializeHovTBE(TBE hovTbe, Addr hov_id, Addr acc_addr, int storSlot,
                       CHIRequestType reqType, RequestPtr depReq,
                       NetDest dest, TBE parentTbe) {
   // Base initialization
-  initializeTBE(hovTbe, acc_addr, storSlot);
+  initializeTBE(hovTbe, makeLineAddress(acc_addr), storSlot);
 
-  hovTbe.state := State:BUSY_INTR;
+  hovTbe.txnId := hov_id;
+  hovTbe.state := State:HOV_PEND;
+  hovTbe.requestor := machineID;
+  // The IDR carries no secondType on the wire; its type is pendReqType.
+  hovTbe.secondType := CHIRequestType:null;
 
   // A HOV TBE only waits for the HovAck from the Indirect Unit.
   // RetryAck/PCrdGrant are tracked by rcvdRetryAck/rcvdRetryCredit,
@@ -476,7 +508,9 @@ void initializeHovTBE(TBE hovTbe, Addr acc_addr, int storSlot,
   hovTbe.indirect_unit_id := parentTbe.indirect_unit_id;
   hovTbe.value_unit_id := parentTbe.value_unit_id;
   hovTbe.gather_unit_id := parentTbe.gather_unit_id;
-  hovTbe.alias := parentTbe.alias;
+  // The alias comes from the IDR's own descriptor, not the parent TBE
+  // (a merged DAG carries several aliases).
+  hovTbe.alias := getIndirectAlias(depReq);
 }
 
 TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes" {
@@ -488,12 +522,16 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   TBE tbe := TBEs[addr];
 
   initializeTBE(tbe, addr, storTBEs.addEntryToNewSlot());
-  if (fromSequencer(in_msg.type)) {
+  // MYSTUFF: an IDR becomes a Load/Store here (manipulateType) but keeps
+  // the hov id the Gather Unit gave it as txnId; Send_HovAck returns it.
+  if (fromSequencer(in_msg.type) &&
+      (isIndirectVal(in_msg.type, in_msg.secondType) == false)) {
     assert(in_msg.txnId == max_outstanding_transactions);
     tbe.txnId := static_cast(Addr, "value", tbe.storSlot);
   } else {
     tbe.txnId := in_msg.txnId;
   }
+  // FFUTSYM
   tbe.ns := in_msg.ns;
 
   assert(tbe.is_snp_tbe == false);
@@ -851,6 +889,12 @@ void enqueueDoRetry(TBE tbe) {
       out_msg.addr := tbe.addr;
       out_msg.usesTxnId := tbe.is_dvm_tbe || tbe.is_dvm_snp_tbe;
       out_msg.event := Event:DoRetry;
+      // MYSTUFF: a hov TBE is found by its hov id, not by the data line
+      if (tbe.state == State:HOV_PEND) {
+        out_msg.txnId := tbe.txnId;
+        out_msg.secondType := tbe.pendReqType;
+      }
+      // FFUTSYM
     }
     destsWaitingRetry.removeNetDest(tbe.pendReqDest);
   }
@@ -870,6 +914,10 @@ void processRetryQueue() {
       out_msg.usesTxnId := e.usesTxnId;
       out_msg.retryDest := e.retryDest;
       out_msg.event := Event:SendPCrdGrant;
+      // MYSTUFF: so the PCrdGrant for an IDR reaches its hov TBE
+      out_msg.txnId := e.txnId;
+      out_msg.secondType := e.secondType;
+      // FFUTSYM
     }
   }
 }
@@ -898,6 +946,26 @@ void printResources() {
                 triggerQueue.getSize(curTick()));
 }
 
+// MYSTUFF
+// Whether this level is configured to cache the lines of an indirect access
+// of this second type: index lines (alloc_for_index) or data array lines
+// (alloc_for_read_value/alloc_for_write_value). Shared by needCacheEntry
+// and needDeallocCacheEntry so allocation and deallocation never disagree.
+bool indirectAllocCriterion(CHIRequestType second_type) {
+  // Gather unit: allocate for index array cache lines
+  bool gather_unit_criterion := (alloc_for_index &&
+                                  ((second_type == CHIRequestType:ReadIndirect) ||
+                                  (second_type == CHIRequestType:WriteIndirect)));
+  // Indirect unit (L1) and Value unit (shared): both allocate for data
+  // array cache lines when they see ReadValue/WriteValue. The per-level
+  // alloc_for_read_value/alloc_for_write_value booleans (set in config)
+  // control which levels actually allocate.
+  bool value_unit_criterion := ((alloc_for_read_value && second_type == CHIRequestType:ReadValue) ||
+                                  (alloc_for_write_value && second_type == CHIRequestType:WriteValue));
+  return gather_unit_criterion || value_unit_criterion;
+}
+// FFUTSYM
+
 bool needCacheEntry(CHIRequestType req_type, CHIRequestType second_type,
                     CacheEntry cache_entry, DirEntry dir_entry,
                     bool is_prefetch) {
@@ -925,17 +993,7 @@ bool needCacheEntry(CHIRequestType req_type, CHIRequestType second_type,
                             (req_type == CHIRequestType:Load) ||
                             (req_type == CHIRequestType:Store);
     if (is_data_request) {
-      // Gather unit: allocate for index array cache lines
-      bool gather_unit_criterion := (alloc_for_index &&
-                                      ((second_type == CHIRequestType:ReadIndirect) ||
-                                      (second_type == CHIRequestType:WriteIndirect)));
-      // Indirect unit (L1) and Value unit (shared): both allocate for data
-      // array cache lines when they see ReadValue/WriteValue. The per-level
-      // alloc_for_read_value/alloc_for_write_value booleans (set in config)
-      // control which levels actually allocate.
-      bool value_unit_criterion := ((alloc_for_read_value && second_type == CHIRequestType:ReadValue) ||
-                                      (alloc_for_write_value && second_type == CHIRequestType:WriteValue));
-      return gather_unit_criterion || value_unit_criterion;
+      return indirectAllocCriterion(second_type);
     }
   }
   // FFUTSYM
@@ -960,7 +1018,18 @@ bool needCacheEntry(CHIRequestType req_type, CHIRequestType second_type,
                                (req_type == CHIRequestType:AtomicNoReturn)));
 }
 
-bool needDeallocCacheEntry(CHIRequestType req_type) {
+bool needDeallocCacheEntry(CHIRequestType req_type,
+                           CHIRequestType second_type) {
+  // MYSTUFF
+  // A level that caches this kind of indirect line keeps it, even when the
+  // request takes it unique or shared (e.g. the Value Unit on a WriteValue's
+  // ReadUnique, so it keeps caching the data array at block granularity).
+  if ((second_type != CHIRequestType:null) &&
+      indirectAllocCriterion(second_type)) {
+    return false;
+  }
+  // FFUTSYM
+
   return (dealloc_on_shared && ((req_type == CHIRequestType:ReadShared) ||
                                 (req_type == CHIRequestType:ReadNotSharedDirty))) ||
          (dealloc_on_unique && ((req_type == CHIRequestType:ReadUnique) ||
@@ -1544,6 +1613,22 @@ Event respToEvent (CHIResponseType type, TBE tbe) {
   }
 }
 
+// MYSTUFF
+// Responses to an IDR, handled on the hov TBE (state HOV_PEND). No PoC or
+// hazard variants: a hov TBE is neither a home node transaction nor a line.
+Event hovRespToEvent(CHIResponseType type) {
+  if (type == CHIResponseType:HovAck) {
+    return Event:HovAck;
+  } else if (type == CHIResponseType:RetryAck) {
+    return Event:RetryAck;
+  } else if (type == CHIResponseType:PCrdGrant) {
+    return Event:PCrdGrant;
+  } else {
+    error("Invalid CHIResponseType for a hov TBE");
+  }
+}
+// FFUTSYM
+
 Event dataToEvent (CHIDataType type) {
   if (type == CHIDataType:CompData_I) {
     return Event:CompData_I;
@@ -1973,21 +2058,8 @@ bool cachedHere(State state)
 }
 
 
-bool isIndirectIdx(CHIRequestType type, CHIRequestType second_type) {
-    return (
-        ((type == CHIRequestType:Load) || (type == CHIRequestType:ReadOnce)) &&
-        ((second_type == CHIRequestType:ReadIndirect) ||
-        (second_type == CHIRequestType:WriteIndirect))
-    );
-}
-
-bool isIndirectVal(CHIRequestType type, CHIRequestType second_type)
-{
-    return (
-        (second_type == CHIRequestType:ReadValue) ||
-        (second_type == CHIRequestType:WriteValue)
-    );
-}
+// isIndirectIdx and isIndirectVal are defined near the top of this file
+// (SLICC needs a function defined before its first use).
 
 bool isIndirectNotify(CHIRequestType type, CHIRequestType second_type)
 {

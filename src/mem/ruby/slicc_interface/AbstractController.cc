@@ -596,6 +596,11 @@ AbstractController::getDependentReq(Addr line_addr, DataBlock &index_data)
     auto dat = std::make_shared<DepAccessType>(read);
     phase2->setExtension<DepAccessType>(dat);
 
+    // Each descriptor carries the alias of the index access it came from
+    // (a merged DAG mixes several); the IDR uses that alias.
+    phase2->setExtension<IndirectAccessAlias>(
+        std::make_shared<IndirectAccessAlias>(desc.alias));
+
     DPRINTFR(ProtocolTrace, "%15s %3s %10s%20s %6s>%-6s %#x %s idx_line=%#x "
              "offset=%d idx_val=%" PRIu64 "\n",
              curTick(), m_version, "GatherU", "IDR_Begin", "", "",

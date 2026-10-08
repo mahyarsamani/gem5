@@ -106,7 +106,6 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   int number_of_DVM_TBEs;
   int number_of_DVM_snoop_TBEs;
   int number_of_HOV_TBEs := 16;
-  int idr_collision_delay_cy := 1;
 
   // replacements use the same TBE slot as the request that triggered it
   // in this case the number_of_repl_TBEs parameter is ignored
@@ -312,6 +311,13 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     // are blocked
     BUSY_INTR, AccessPermission:Busy, desc="Waiting for data and/or ack";
     BUSY_BLKD, AccessPermission:Busy, desc="Waiting for data and/or ack; blocks snoops";
+
+    // MYSTUFF
+    // State of a hov TBE: an IDR (ReadValue/WriteValue) the Gather Unit sent
+    // to the Indirect Unit, keyed by its hov id rather than by a line. It
+    // waits for the HovAck, or for RetryAck + PCrdGrant and then resends.
+    HOV_PEND, AccessPermission:Invalid, desc="IDR sent; waiting for HovAck or retry";
+    // FFUTSYM
 
     // Null state for debugging
     null, AccessPermission:Invalid, desc="Null state";
@@ -599,6 +605,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     PostEvictIdxLine, desc="Evict a Line holding index elements in a cache upstream to gather unit.";
 
     UpdateDAG,        in_trans="yes", desc="";
+    ExtractDAG,       desc="Cache the DAGs of an index request at the Gather Unit";
     PostProcess,      desc="Post-processing: push IDR/notif/evict actions one at a time";
     SendIDR,          in_trans="yes", desc="Send one ReadValue/WriteValue IDR (non-blocking)";
     SendPostNotif,    desc="Send NotifyIndIdx after all IDRs";
@@ -674,6 +681,12 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     Addr addr,           desc="Line address";
     bool usesTxnId,      desc="Uses a transaction ID instead of a memory address";
     MachineID retryDest, desc="Retry destination";
+    // MYSTUFF: this entry is all that survives from RetryAck to PCrdGrant.
+    // An IDR is a line request here but a hov transaction at the Gather
+    // Unit, so the PCrdGrant must carry its hov id (txnId) and type back.
+    Addr txnId,          desc="Transaction ID of the retried request";
+    CHIRequestType secondType, desc="ReadValue/WriteValue for an IDR, null otherwise";
+    // FFUTSYM
   }
 
   // Queue for event triggers. Used to specify a list of actions that need
@@ -691,7 +704,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     void pushFrontNB(Event);
     void pop();
     // For the retry queue
-    void emplace(Addr,bool,MachineID);
+    void emplace(Addr,bool,MachineID,Addr,CHIRequestType);
     RetryQueueEntry next(); //SLICC won't allow to reuse front()
   }
 
@@ -905,9 +918,11 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   TBETable dvmSnpTBEs,      template="<Cache_TBE>", constructor="m_number_of_DVM_snoop_TBEs";
   TBEStorage storDvmSnpTBEs, constructor="this, m_number_of_DVM_snoop_TBEs";
 
-  // TBE table for outgoing HOV ReadValue/WriteValue requests (Gather Unit)
-  // Keyed by accAddr (element address) to avoid collisions with main TBEs
-  TBETable hovTBEs,      template="<Cache_TBE>", constructor="m_number_of_HOV_TBEs, 1", no_auto_block_size="true";
+  // TBE table for outgoing HOV ReadValue/WriteValue requests (Gather Unit).
+  // Keyed by the hov id (makeHovId: line aligned, above any physical
+  // address), never by a line, so a hov transition can never touch a cache
+  // or directory entry. tbe.addr holds the data line and tbe.txnId the key.
+  TBETable hovTBEs,      template="<Cache_TBE>", constructor="m_number_of_HOV_TBEs";
   TBEStorage storHovTBEs, constructor="this, m_number_of_HOV_TBEs";
 
   // Interface to prefetchers
@@ -937,7 +952,8 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     Addr txnId;
 
     // MYSTUFF
-    Addr accAddr;
+    // ReadValue/WriteValue when the message concerns an IDR, null otherwise.
+    // With DoRetry, txnId is then the hov id (see hovTBEs).
     CHIRequestType secondType, default="CHIRequestType_null";
     // FFUTSYM
 

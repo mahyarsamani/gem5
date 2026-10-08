@@ -143,24 +143,18 @@ class Sequencer : public RubyPort
                       const Cycles firstResponseTime = Cycles(0));
 
     // MYSTUFF
-    /**
-     * Replace the Phase 1 (index-fetch) packet tracked by `alias` with a
-     * new packet sized and addressed for the Phase 2 (data-fetch) response.
-     * Must be called BEFORE readCallback() so that hitCallback() sees the
-     * corrected packet (right address, right size). Data bytes are filled in
-     * by hitCallback() using the DataBlock passed to readCallback().
-     *
-     * @param alias     The alias key used in m_RequestTable for this LDIND.
-     * @param final_req The Phase 2 RequestPtr (carries PA and sizeData).
-     */
-    // void prepareIndPacket(Addr alias, RequestPtr& final_req);
-
     // Look up the notif ID for a given RequestPtr (the dummy_req).
     // Called by the protocol to set txnId on CHIRequestMsg.
     uint64_t getNotifId(const RequestPtr& req) const;
 
     // Delete the dummy_pkt tracked by notifId when NotifAck arrives.
     void cleanupNotifPkt(uint64_t notifId);
+
+    // Send the DAGs merged into m_IndirectDAGTable for `address` (if any)
+    // to the Gather Unit as a NOTIFY_INDIDX. Called whenever the line's
+    // requests drain (read, write, or atomic callback), before the table
+    // entry is erased.
+    void sendMergedDAGNotif(Addr address);
     // FFUTSYM
 
     void atomicCallback(Addr address,
@@ -371,21 +365,6 @@ class Sequencer : public RubyPort
     uint64_t m_unaddressedTransactionCnt;
 
     bool m_runningGarnetStandalone;
-
-    // MYSTUFF: HOV Stats
-    bool m_hov_measurement_enabled;
-    size_t m_hov_history_size;
-
-    uint64_t m_hov_seq_num;
-    std::unordered_map<Addr, uint64_t> m_hov_access_history;
-    std::unordered_map<Addr, uint64_t> m_hov_inst_history;
-
-    std::list<Addr> m_hov_addr_history;
-    std::unordered_map<Addr, std::list<Addr>::iterator> m_hov_addr_iterators;
-    //! Histogram for number of outstanding requests per cycle.
-    statistics::Histogram m_hov_collision_distance;
-    statistics::Histogram m_hov_inst_distance;
-    // FFUTSYM
 
     statistics::Histogram m_outstandReqHist;
 
