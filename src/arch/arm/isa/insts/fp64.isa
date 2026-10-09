@@ -110,7 +110,7 @@ let {{
     '''
     fmovCoreRegWIop = ArmInstObjParams("fmov", "FmovCoreRegW", "FpRegRegOp",
                                        { "code": fmovCoreRegWCode,
-                                         "op_class": "FloatMiscOp" }, [])
+                                         "op_class": "FloatMovFromIntOp" }, [])
     fmovCoreRegWIop.snippets["code"] += zeroSveVecRegUpperPartCode % \
         "AA64FpDest"
     header_output  += FpRegRegOpDeclare.subst(fmovCoreRegWIop);
@@ -125,7 +125,7 @@ let {{
     '''
     fmovCoreRegXIop = ArmInstObjParams("fmov", "FmovCoreRegX", "FpRegRegOp",
                                        { "code": fmovCoreRegXCode,
-                                         "op_class": "FloatMiscOp" }, [])
+                                         "op_class": "FloatMovFromIntOp" }, [])
     fmovCoreRegXIop.snippets["code"] += zeroSveVecRegUpperPartCode % \
         "AA64FpDest"
     header_output  += FpRegRegOpDeclare.subst(fmovCoreRegXIop);
@@ -140,7 +140,8 @@ let {{
         AA64FpDestP3_uw = XOp1_ud >> 32;'''
     fmovUCoreRegXIop = ArmInstObjParams("fmov", "FmovUCoreRegX", "FpRegRegOp",
                                         { "code": fmovUCoreRegXCode,
-                                          "op_class": "FloatMiscOp" }, [])
+                                          "op_class":
+                                              "FloatMovFromIntOp" }, [])
     fmovUCoreRegXIop.snippets["code"] += zeroSveVecRegUpperPartCode % \
         "AA64FpDest"
     header_output  += FpRegRegOpDeclare.subst(fmovUCoreRegXIop);
@@ -482,31 +483,31 @@ let {{
                          "fplibAbs<uint16_t>(cOp1)",
                          "fplibAbs<uint32_t>(cOp1)",
                          "fplibAbs<uint64_t>(cOp1)")
-    buildSimpleUnaryFpOp("frintn", "FRIntN", "FpRegRegOp", "FloatMiscOp",
+    buildSimpleUnaryFpOp("frintn", "FRIntN", "FpRegRegOp", "FloatCvtOp",
         "fplibRoundInt<uint16_t>(cOp1, FPRounding_TIEEVEN, false, fpscr)",
         "fplibRoundInt<uint32_t>(cOp1, FPRounding_TIEEVEN, false, fpscr)",
         "fplibRoundInt<uint64_t>(cOp1, FPRounding_TIEEVEN, false, fpscr)")
-    buildSimpleUnaryFpOp("frintp", "FRIntP", "FpRegRegOp", "FloatMiscOp",
+    buildSimpleUnaryFpOp("frintp", "FRIntP", "FpRegRegOp", "FloatCvtOp",
         "fplibRoundInt<uint16_t>(cOp1, FPRounding_POSINF, false, fpscr)",
         "fplibRoundInt<uint32_t>(cOp1, FPRounding_POSINF, false, fpscr)",
         "fplibRoundInt<uint64_t>(cOp1, FPRounding_POSINF, false, fpscr)")
-    buildSimpleUnaryFpOp("frintm", "FRIntM", "FpRegRegOp", "FloatMiscOp",
+    buildSimpleUnaryFpOp("frintm", "FRIntM", "FpRegRegOp", "FloatCvtOp",
         "fplibRoundInt<uint16_t>(cOp1, FPRounding_NEGINF, false, fpscr)",
         "fplibRoundInt<uint32_t>(cOp1, FPRounding_NEGINF, false, fpscr)",
         "fplibRoundInt<uint64_t>(cOp1, FPRounding_NEGINF, false, fpscr)")
-    buildSimpleUnaryFpOp("frintz", "FRIntZ", "FpRegRegOp", "FloatMiscOp",
+    buildSimpleUnaryFpOp("frintz", "FRIntZ", "FpRegRegOp", "FloatCvtOp",
         "fplibRoundInt<uint16_t>(cOp1, FPRounding_ZERO, false, fpscr)",
         "fplibRoundInt<uint32_t>(cOp1, FPRounding_ZERO, false, fpscr)",
         "fplibRoundInt<uint64_t>(cOp1, FPRounding_ZERO, false, fpscr)")
-    buildSimpleUnaryFpOp("frinta", "FRIntA", "FpRegRegOp", "FloatMiscOp",
+    buildSimpleUnaryFpOp("frinta", "FRIntA", "FpRegRegOp", "FloatCvtOp",
         "fplibRoundInt<uint16_t>(cOp1, FPRounding_TIEAWAY, false, fpscr)",
         "fplibRoundInt<uint32_t>(cOp1, FPRounding_TIEAWAY, false, fpscr)",
         "fplibRoundInt<uint64_t>(cOp1, FPRounding_TIEAWAY, false, fpscr)")
-    buildSimpleUnaryFpOp("frinti", "FRIntI", "FpRegRegOp", "FloatMiscOp",
+    buildSimpleUnaryFpOp("frinti", "FRIntI", "FpRegRegOp", "FloatCvtOp",
         "fplibRoundInt<uint16_t>(cOp1, FPCRRounding(fpscr), false, fpscr)",
         "fplibRoundInt<uint32_t>(cOp1, FPCRRounding(fpscr), false, fpscr)",
         "fplibRoundInt<uint64_t>(cOp1, FPCRRounding(fpscr), false, fpscr)")
-    buildSimpleUnaryFpOp("frintx", "FRIntX", "FpRegRegOp", "FloatMiscOp",
+    buildSimpleUnaryFpOp("frintx", "FRIntX", "FpRegRegOp", "FloatCvtOp",
         "fplibRoundInt<uint16_t>(cOp1, FPCRRounding(fpscr), true, fpscr)",
         "fplibRoundInt<uint32_t>(cOp1, FPCRRounding(fpscr), true, fpscr)",
         "fplibRoundInt<uint64_t>(cOp1, FPCRRounding(fpscr), true, fpscr)")

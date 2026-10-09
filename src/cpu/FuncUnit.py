@@ -116,6 +116,10 @@ class OpClass(Enum):
         "SimdExt",
         "SimdFloatExt",
         "SimdConfig",
+        # Moves from a general-purpose to a SIMD&FP register (e.g. AArch64
+        # FMOV Dd, Xn), separate from FloatMisc because they run on a
+        # different pipeline with a different latency on some cores.
+        "FloatMovFromInt",
     ]
 
 

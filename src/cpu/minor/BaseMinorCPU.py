@@ -176,6 +176,7 @@ class MinorDefaultFloatSimdFU(MinorFU):
             "FloatCmp",
             "FloatCvt",
             "FloatMisc",
+            "FloatMovFromInt",
             "FloatMult",
             "FloatMultAcc",
             "FloatDiv",
