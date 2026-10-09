@@ -1543,17 +1543,21 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
             if (from_cpu != nullptr && from_cpu->name() != label.value()) {
                 // NOTE: Warn only once due to performance reasons.
                 // It helps to know that such cases exist though.
-                access_name = from_cpu->name();
                 warn_once("%s: %s: Label mismatch between label cache (%s) and"
                      " from CPU (%s) for addr %#lx. This does not influence the"
                      " current access name. However, it does influence those "
                      "accesses that rely solely on the label cache for their names.\n",
                      name(),__func__, label.value(), from_cpu->name(), request->getPaddr());
             }
+        }
 
-            if (from_cpu == nullptr) {
-                access_name = label.value();
-            }
+        // NOTE: The label of a labelled instruction names its own access,
+        // on first touch and on every later access alike; the label cache
+        // names only the accesses whose instruction carries no label.
+        if (from_cpu != nullptr) {
+            access_name = from_cpu->name();
+        } else if (label) {
+            access_name = label.value();
         }
 
         // NOTE: Have a label but it's not cached. So we cache it.
