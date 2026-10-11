@@ -319,18 +319,9 @@ in_port(replTriggerInPort, ReplacementMsg, replTriggerQueue, rank=4) {
         }
       }
 
-      if (trigger == Event:null) {
-        DPRINTF(IndirectAccess, "Faced null trigger in repl for %#lx.\n", in_msg.addr);
-        if (hasPostEvict(in_msg.addr)) {
-            DPRINTF(IndirectAccess, "Aha! It has a postEvict already.\n");
-        } else {
-            DPRINTF(IndirectAccess, "It doesn't even have postEvict.\n");
-        }
-      }
-      if (hasPostEvict(in_msg.addr)) {
-        DPRINTF(IndirectAccess, "%#lx has post evict.\n", in_msg.addr);
-        evict(in_msg.addr);
-      }
+      // A stashed index DAG and the post-evict obligation for this line
+      // are taken by Initiate_Replacement, whichever replacement message
+      // gets there first (the delayed post-evict or an ordinary one).
       trigger(trigger, in_msg.addr, cache_entry, tbe);
     }
   }

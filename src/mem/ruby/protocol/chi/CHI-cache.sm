@@ -602,14 +602,12 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     // MYSTUFF
     Fwd_NotifyIndIdx, in_trans="yes", desc="";
-    PostEvictIdxLine, desc="Evict a Line holding index elements in a cache upstream to gather unit.";
 
     UpdateDAG,        in_trans="yes", desc="";
-    ExtractDAG,       desc="Cache the DAGs of an index request at the Gather Unit";
-    PostProcess,      desc="Post-processing: push IDR/notif/evict actions one at a time";
+    ExtractDAG,       desc="Cache the DAGs carried by a request's seqReq at the Gather Unit";
+    PostProcess,      desc="Post-processing: push one IDR, or stash the DAG and post-evict the index line";
     SendIDR,          in_trans="yes", desc="Send one ReadValue/WriteValue IDR (non-blocking)";
-    SendPostNotif,    desc="Send NotifyIndIdx after all IDRs";
-    TriggerPostEvict,    desc="Trigger propagate evict for index line";
+    StashAndPostEvict, desc="Above the Gather Unit: stash the DAG for the index line and schedule its post-evict";
 
     // HOV-specific events
     HovAck,           desc="Ack from Indirect Unit for ReadValue/WriteValue acceptance";
@@ -850,8 +848,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     std::string access_name,       desc="Name of the access from high level program.";
 
-    bool postNotifSent,            default="false", desc="PostNotif has been sent during post-processing";
-    bool postEvictSent,            default="false", desc="PostEvict has been sent during post-processing";
+    bool postEvictSent,            default="false", desc="StashAndPostEvict has run for this transaction";
     // FFUTSYM:
   }
 

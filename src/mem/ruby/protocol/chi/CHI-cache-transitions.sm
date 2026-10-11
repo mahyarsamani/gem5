@@ -990,6 +990,7 @@ transition({BUSY_BLKD,BUSY_INTR},
 // Kill the timer and try again as a snoop may be pending as well
 transition(UD_T, {Global_Eviction, Local_Eviction, LocalHN_Eviction}, UD) {
   Unset_Timeout_Cache;
+  ClearReplEnqueued;
   Pop_ReplTriggerQueue;
 }
 
@@ -1640,17 +1641,11 @@ transition({BUSY_BLKD, BUSY_INTR}, SendIDR) {
   ProcessNextState_ClearPending;
 }
 
-// SendPostNotif: fires in BUSY, sends NotifyIndIdx
-transition({BUSY_BLKD, BUSY_INTR}, SendPostNotif) {
+// StashAndPostEvict: above the Gather Unit, stash the DAG for the index
+// line and schedule the delayed post-evict whose write-back carries it.
+transition({BUSY_BLKD, BUSY_INTR}, StashAndPostEvict) {
   Pop_TriggerQueue;
-  SendPostNotif;
-  ProcessNextState_ClearPending;
-}
-
-// TriggerPostEvict: fires in BUSY, sends propagate evict
-transition({BUSY_BLKD, BUSY_INTR}, TriggerPostEvict) {
-  Pop_TriggerQueue;
-  TriggerPostEvict;
+  StashAndPostEvict;
   ProcessNextState_ClearPending;
 }
 
@@ -1870,23 +1865,39 @@ transition(DvmExtOp_Finished, Final, I) {
 }
 
 // MYSTUFF
+// Gather Unit: a notification carrying DAGs for a line it holds.
+// Initiate_Request pushes ExtractDAG; PostProcess sends the IDRs.
 transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD,
             UC_RSC, UC_RU, UD_RU, UD_RSD, UD_RSC}, UpdateDAG, BUSY_BLKD) {
     Initiate_Request;
     Send_NotifAck;
-    Extract_Extensions;
     Pop_ReqRdyQueue;
     ProcessNextState;
 }
 
-// A notif (post-notif or Sequencer) whose index line the Gather Unit no
-// longer holds: not handled yet.
+// A notification whose index line the Gather Unit no longer holds: the
+// Gather Unit fetches it in stage 2 of the consolidation; an error until
+// then.
 transition({I, RU, RSC, RSD, RUSC, RUSD}, UpdateDAG) {
     Error_UpdateDAGNoIndexLine;
 }
 
-transition({I, SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD, UC_RSC, UC_RU, UD_RU,
-        UD_RSD, UD_RSC, RU, RSC, RSD, RUSC, RUSD}, Fwd_NotifyIndIdx, BUSY_BLKD)
+// Above the Gather Unit, a notification for a line this cache holds is
+// absorbed: PostProcess stashes its DAG and post-evicts the line, so the
+// write-back carries the DAG with the current data. The Sequencer's
+// packet is freed right away (the stash keeps its own copy of the DAG).
+transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD, UC_RSC, UC_RU, UD_RU,
+        UD_RSD, UD_RSC}, Fwd_NotifyIndIdx, BUSY_BLKD)
+{
+    Initiate_Request;
+    Send_NotifAck;
+    Cleanup_NotifPkt;
+    Pop_ReqRdyQueue;
+    ProcessNextState;
+}
+
+// A notification for a line this cache does not hold is forwarded.
+transition({I, RU, RSC, RSD, RUSC, RUSD}, Fwd_NotifyIndIdx, BUSY_BLKD)
 {
     Initiate_Request;
     Send_NotifAck;

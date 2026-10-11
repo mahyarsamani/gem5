@@ -350,12 +350,11 @@ action(Initiate_Request, desc="") {
     tbe.actions.pushNB(Event:SendHovAck);
   }
 
-  // An index request that reaches the Gather Unit carries its DAG in
-  // seqReq. Cache it so that PostProcess sends the IDRs once the index
-  // data is here. (Index hits above the Gather Unit deliver the DAG with
-  // SendPostNotif instead, which the Gather Unit gets as UpdateDAG.)
-  if (gather_unit && isIndirectIdx(tbe.reqType, tbe.secondType) &&
-      tbe.isSeqReqValid) {
+  // Gather Unit: every DAG that reaches it rides seqReq, whatever the
+  // carrier (an index request, a notification, a post-evict write-back
+  // from a cache above). Cache it so that PostProcess sends the IDRs
+  // once the index data is in the TBE.
+  if (gather_unit && tbe.isSeqReqValid && hasDAG(tbe.seqReq)) {
     tbe.actions.pushNB(Event:ExtractDAG);
   }
 
@@ -501,19 +500,23 @@ action(Initiate_Replacement, desc="") {
     peek(replTriggerInPort, ReplacementMsg) {
       set_tbe(allocateReplacementTBEOnSlot(address, in_msg.slot));
       DPRINTF(RubySlicc, "Allocated replacement TBE on slot %d\n", tbe.storSlot);
-      if (in_msg.post_evict) {
-        tbe.secondType := CHIRequestType:PropagateEvict;
-      }
     }
   } else {
-    peek(replTriggerInPort, ReplacementMsg) {
-      set_tbe(allocateReplacementTBE(address));
-      DPRINTF(RubySlicc, "Allocated replacement TBE on new slot %d\n", tbe.storSlot);
-      if (in_msg.post_evict) {
-        tbe.secondType := CHIRequestType:PropagateEvict;
-      }
-    }
+    set_tbe(allocateReplacementTBE(address));
+    DPRINTF(RubySlicc, "Allocated replacement TBE on new slot %d\n", tbe.storSlot);
   }
+  // MYSTUFF
+  // A DAG stashed for this line (StashAndPostEvict) rides this write-back
+  // to the Gather Unit, whichever replacement this is: the delayed
+  // post-evict or an ordinary one that got here first (the late post-evict
+  // then finds the line in I and is dropped).
+  if (hasStash(address)) {
+    tbe.seqReq := takePostEvictDAG(address);
+    tbe.isSeqReqValid := true;
+    tbe.secondType := CHIRequestType:PropagateEvict;
+    DPRINTF(IndirectAccess, "Replacement of %#lx carries the stashed index DAG.\n", address);
+  }
+  // FFUTSYM
   // MYSTUFF
   tbe.read_usefulness := read_usefulness;
   tbe.write_usefulness := write_usefulness;
@@ -3693,7 +3696,9 @@ action(Finalize_DeallocateRequest, desc="") {
   wakeupPendingSnps(tbe);
   wakeupPendingTgrs(tbe);
 
-  // Notif and propagate evict logic moved to SendPostNotif/TriggerPostEvict actions.
+  // Index-line post-processing (IDRs at the Gather Unit, StashAndPostEvict
+  // above it) has run by now: processNextState pushes PostProcess until
+  // needsPostProcess is false, and only then Final.
 
   if (tbe.is_req_tbe) {
     deallocateReqTBE(tbe);
@@ -4350,19 +4355,17 @@ action(Profile_OutgoingEnd_DVM, desc="") {
 // MYSTUFF
 
 action(PostProcess,
-       desc="Push one post-processing action (hierarchical: IDR > notif > evict)")
+       desc="Push one post-processing action: an IDR at the Gather Unit, or StashAndPostEvict above it")
 {
-    State toBeState := makeFinalState(tbe, getCacheEntry(address), getDirEntry(address));
-
     if (gather_unit && hasDependentWork(address)) {
         // One IDR per DAG descriptor. Two IDRs to the same data line are
         // two Loads at the Indirect Unit; the second stalls there and hits.
         tbe.actions.pushNB(Event:SendIDR);
-    } else if (needPostNotif(tbe, tbe.reqType, tbe.secondType) && cachedHere(toBeState) && (tbe.postNotifSent == false)) {
-        tbe.actions.push(Event:SendPostNotif);
-
-    } else if (needPostEvictIdxLine(tbe, tbe.reqType, tbe.secondType) && cachedHere(toBeState) && (tbe.postEvictSent == false)) {
-        tbe.actions.push(Event:TriggerPostEvict);
+    } else {
+        State toBeState := makeFinalState(tbe, getCacheEntry(address), getDirEntry(address));
+        if (idxLineAboveGU(tbe, toBeState) && (tbe.postEvictSent == false)) {
+            tbe.actions.push(Event:StashAndPostEvict);
+        }
     }
 }
 
@@ -4371,106 +4374,117 @@ action(SendIDR,
 {
     assert(gather_unit);
     assert(hasDependentWork(address));
+    // Never build an IDR from index data that is not in the TBE
+    // (copyCacheAndDir leaves it out in UC_RU/UD_RU).
+    assert(tbe.dataValid);
 
-    // Resource stall if HOV TBE pool is full
-    check_allocate(storHovTBEs);
-
-    RequestPtr depReq := getDependentReq(address, tbe.dataBlk);
-    Addr acc_addr := getAddr(depReq);
-
-    // Determine request type
-    CHIRequestType idr_type;
-    if (isDepReadReq(depReq)) {
-        idr_type := CHIRequestType:ReadValue;
-    } else {
-        idr_type := CHIRequestType:WriteValue;
-    }
-
-    // Compute destination before enqueue so we can reuse it for hovTbe
-    NetDest idr_dest;
-    if (isInvalid(tbe.indirect_unit_id)) {
-        idr_dest.add(mapAddressToDownstreamMachine(makeLineAddress(acc_addr)));
-    } else {
-        idr_dest.add(tbe.indirect_unit_id);
-    }
-
-    // Allocate the hov TBE, a transaction keyed by its hov id (see hovTBEs)
-    int hov_slot := storHovTBEs.addEntryToNewSlot();
-    Addr hov_id := makeHovId(hov_slot, blockSize);
-    hovTBEs.allocate(hov_id);
-    TBE hovTbe := hovTBEs[hov_id];
-    initializeHovTBE(hovTbe, hov_id, acc_addr, hov_slot,
-                     idr_type, depReq, idr_dest, tbe);
-
-    enqueue(reqOutPort, CHIRequestMsg, request_latency) {
-        indirectDependentBoilerPlate(out_msg);
-        fillInMsgFromReq(out_msg, depReq);
-
-        out_msg.type := idr_type;
-        out_msg.allowRetry := hovTbe.pendReqAllowRetry;
-        // The Indirect Unit returns this id on HovAck/RetryAck/PCrdGrant
-        out_msg.txnId := hov_id;
-
-        out_msg.indirect_unit_id := tbe.indirect_unit_id;
-        out_msg.value_unit_id := tbe.value_unit_id;
-        out_msg.gather_unit_id := tbe.gather_unit_id;
-        out_msg.alias := hovTbe.alias;
-
+    // A wrong-path uop0 past the end of its pair reads a garbage index
+    // whose data address can lie outside memory. Drop such an IDR, as
+    // hardware drops a speculative access to an unmapped address.
+    Addr next_addr := peekDependentAddr(address, tbe.dataBlk);
+    if (isMappedDownstream(makeLineAddress(next_addr)) == false) {
         DPRINTF(IndirectAccess,
-            "IDR: index_line=%#x -> data_addr=%#x alias=%#x isRead=%d hov_id=%#x\n",
-            address, out_msg.addr, hovTbe.alias, isDepReadReq(depReq), hov_id
-        );
+            "IDR from index line %#x to unmapped address %#x dropped.\n",
+            address, next_addr);
+        dropDependentReq(address);
+        countIdrDroppedUnmapped();
+    } else {
+        // Resource stall if HOV TBE pool is full
+        check_allocate(storHovTBEs);
 
-        out_msg.Destination := idr_dest;
-        if (isInvalid(tbe.indirect_unit_id)) {
-            DPRINTF(IndirectAccess, "Indirect unit id not set yet. Sending downstream.\n");
+        RequestPtr depReq := getDependentReq(address, tbe.dataBlk);
+        Addr acc_addr := getAddr(depReq);
+
+        // Determine request type
+        CHIRequestType idr_type;
+        if (isDepReadReq(depReq)) {
+            idr_type := CHIRequestType:ReadValue;
         } else {
-            DPRINTF(IndirectAccess, "Indirect unit id set. Sending upstream.\n");
+            idr_type := CHIRequestType:WriteValue;
+        }
+
+        // Compute destination before enqueue so we can reuse it for hovTbe
+        NetDest idr_dest;
+        if (isInvalid(tbe.indirect_unit_id)) {
+            idr_dest.add(mapAddressToDownstreamMachine(makeLineAddress(acc_addr)));
+        } else {
+            idr_dest.add(tbe.indirect_unit_id);
+        }
+
+        // Allocate the hov TBE, a transaction keyed by its hov id (see hovTBEs)
+        int hov_slot := storHovTBEs.addEntryToNewSlot();
+        Addr hov_id := makeHovId(hov_slot, blockSize);
+        hovTBEs.allocate(hov_id);
+        TBE hovTbe := hovTBEs[hov_id];
+        initializeHovTBE(hovTbe, hov_id, acc_addr, hov_slot,
+                         idr_type, depReq, idr_dest, tbe);
+
+        enqueue(reqOutPort, CHIRequestMsg, request_latency) {
+            indirectDependentBoilerPlate(out_msg);
+            fillInMsgFromReq(out_msg, depReq);
+
+            out_msg.type := idr_type;
+            out_msg.allowRetry := hovTbe.pendReqAllowRetry;
+            // The Indirect Unit returns this id on HovAck/RetryAck/PCrdGrant
+            out_msg.txnId := hov_id;
+
+            out_msg.indirect_unit_id := tbe.indirect_unit_id;
+            out_msg.value_unit_id := tbe.value_unit_id;
+            out_msg.gather_unit_id := tbe.gather_unit_id;
+            out_msg.alias := hovTbe.alias;
+
+            DPRINTF(IndirectAccess,
+                "IDR: index_line=%#x -> data_addr=%#x alias=%#x isRead=%d hov_id=%#x\n",
+                address, out_msg.addr, hovTbe.alias, isDepReadReq(depReq), hov_id
+            );
+
+            out_msg.Destination := idr_dest;
+            if (isInvalid(tbe.indirect_unit_id)) {
+                DPRINTF(IndirectAccess, "Indirect unit id not set yet. Sending downstream.\n");
+            } else {
+                DPRINTF(IndirectAccess, "Indirect unit id set. Sending upstream.\n");
+            }
         }
     }
-    // No self-chain — PostProcess will be called again by processNextState
+    // No self-chain: PostProcess is pushed again by processNextState
 }
 
-action(SendPostNotif,
-       desc="Send NotifyIndIdx during post-processing")
+// A cache above the Gather Unit that holds an index line never forwards a
+// DAG for it: the DAG is stashed per line (merged with any DAG already
+// there) and the delayed post-evict replacement writes the line back with
+// the stash in its seqReq (Initiate_Replacement), so the Gather Unit gets
+// the DAG and the current index data in one transaction.
+action(StashAndPostEvict,
+       desc="Stash the DAG for the index line and schedule its post-evict once")
 {
-    tbe.postNotifSent := true;
-    enqueue(reqOutPort, CHIRequestMsg, request_latency) {
-        out_msg.addr := tbe.addr;
-        out_msg.accAddr := tbe.accAddr;
-
-        indirectNotifBoilerPlate(out_msg);
-
-        out_msg.type := CHIRequestType:NotifyIndIdx;
-        out_msg.secondType := CHIRequestType:NotifyIndIdx;
-        out_msg.seqReq := tbe.seqReq;
-
-        out_msg.indirect_unit_id := tbe.indirect_unit_id;
-        out_msg.value_unit_id := tbe.value_unit_id;
-        out_msg.gather_unit_id := tbe.gather_unit_id;
-        out_msg.alias := tbe.alias;
-        out_msg.txnId := tbe.txnId;
-
-        out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
-        DPRINTF(IndirectAccess, "Sending a notif for %#lx.\n", out_msg.accAddr);
-    }
-    // Wait for NotifAck before proceeding
-    tbe.expected_req_resp.addExpectedRespType(CHIResponseType:NotifAck);
-    tbe.expected_req_resp.addExpectedCount(1);
-}
-
-action(TriggerPostEvict, desc="") {
+    assert(isInvalid(tbe.gather_unit_id));
     tbe.postEvictSent := true;
-    if (!hasPostEvict(address)) {
-        postEvict(address);
-        enqueue(replTriggerOutPort, ReplacementMsg, post_evict_delay) {
+    if (tbe.isSeqReqValid && hasDAG(tbe.seqReq)) {
+        stashPostEvictDAG(address, tbe.seqReq);
+    }
+    if (isReplEnqueued(address) == false) {
+        markReplEnqueued(address);
+        // replTriggerQueue is strict FIFO and ordinary replacements enqueue
+        // with no delay, so a replacement enqueued within post_evict_delay
+        // after this message would arrive before it and violate the order.
+        // This delayed message bypasses the strict-FIFO check: if an
+        // ordinary replacement evicts the same line first, it takes the
+        // stash and the post-evict finds the line in I and is dropped
+        // (transition I, Local_Eviction).
+        enqueue(replTriggerOutPort, ReplacementMsg, post_evict_delay, true) {
             out_msg.addr := address;
             out_msg.from_addr := address;
             out_msg.post_evict := true;
         }
     } else {
-        DPRINTF(IndirectAccess, "TBE for %#lx says post evict but already have it.\n", address);
+        DPRINTF(IndirectAccess, "Post-evict of %#lx already scheduled; DAG merged into the stash.\n", address);
     }
+}
+
+action(ClearReplEnqueued,
+       desc="A replacement popped without acting (UD_T): keep the stash, let the next DAG re-schedule the post-evict")
+{
+    clearReplEnqueued(address);
 }
 
 action(Error_UpdateDAGNoIndexLine, desc="") {
@@ -4480,25 +4494,19 @@ action(Error_UpdateDAGNoIndexLine, desc="") {
 action(Extract_Extensions, desc="") {
     // NOTE: We may want to remove this assertion and put the
     // entire functionality inside an if statement.
-    assert(isIndirectIdx(tbe.reqType, tbe.secondType) || isProcessNotify(tbe.reqType, tbe.secondType));
+    assert(gather_unit);
+    assert(tbe.isSeqReqValid && hasDAG(tbe.seqReq));
     extractExtensions(tbe.addr, tbe.seqReq);
 }
 
+// Forward a notification downstream (this cache does not hold the line).
 action(Send_NotifyIndIdx) {
     enqueue(reqOutPort, CHIRequestMsg, request_latency) {
         prepareRequest(tbe, CHIRequestType:NotifyIndIdx, out_msg);
-        out_msg.allowRetry := true;
         out_msg.Destination.clear();
         out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
-
-        // Manipulate type so downstream caches don't trigger duplicate post-evicts
-        // but ONLY if this cache is actually going to trigger the post-evict!
-        if (needPostEvictIdxLine(tbe, tbe.reqType, tbe.secondType)) {
-            State toBeState := makeFinalState(tbe, getCacheEntry(address), getDirEntry(address));
-            if (cachedHere(toBeState)) {
-                out_msg.secondType := CHIRequestType:NotifyIndIdx;
-            }
-        }
+        // Arm the TBE as well as the message, so a RetryAck can be served.
+        allowRequestRetry(tbe, out_msg);
     }
     // Wait for NotifAck from downstream before finalizing
     tbe.expected_req_resp.addExpectedRespType(CHIResponseType:NotifAck);
@@ -4518,21 +4526,14 @@ action(Send_NotifAck, desc="Send NotifAck back to requestor for NotifyIndIdx") {
     }
 }
 
-// NOTE: This guard relies on isIndirectNotifyFromCPU which checks
-// secondType == null. This works when the indirect unit and gather unit
-// are at different cache levels. However, if the gather unit is ALSO
-// at the L1 (same controller as the indirect unit), manipulateSecondType
-// will set secondType = NotifyIndIdx (matching the gather_unit case),
-// causing isIndirectNotifyFromCPU to return false and SKIPPING cleanup.
-// This will result in a dummy_pkt memory leak in that configuration.
-// TODO: Fix this for configurations where gather_unit == indirect_unit.
-//       Additionally, SendPostNotif should check if gather_unit_id is
-//       already known (isValid(tbe.gather_unit_id)), which can only
-//       happen when the same cache has both the indirect_unit and
-//       gather_unit designations. In that case, the notif can be
-//       processed locally instead of being forwarded downstream.
-action(Cleanup_NotifPkt, desc="Clean up dummy_pkt via sequencer callback on NotifAck") {
-    if (indirect_unit && isIndirectNotifyFromCPU(tbe.reqType, tbe.secondType)) {
+// The Sequencer's dummy packet behind a merged notification is freed once
+// this cache is done with it: on the NotifAck when the notification was
+// forwarded, or right away when it was absorbed (the stash keeps its own
+// copy of the DAG, and tbe.seqReq keeps the Request alive). Only the
+// originating cache, whose requestor is itself, has a packet to free.
+action(Cleanup_NotifPkt, desc="Free the Sequencer's dummy packet of a merged notification") {
+    if (indirect_unit && (tbe.reqType == CHIRequestType:NotifyIndIdx) &&
+        (tbe.requestor == machineID)) {
         sequencer.cleanupNotifPkt(tbe.txnId);
     }
 }

@@ -88,7 +88,6 @@ class AbstractController : public ClockedObject, public Consumer
 {
   // MYSTUFF
   private:
-    std::set<Addr> postEvicts;
     std::unordered_map<Addr, Addr> addrToAliasMap;
     std::unordered_map<Addr, Addr> aliasToAddrMap;
 
@@ -98,6 +97,20 @@ class AbstractController : public ClockedObject, public Consumer
     // read and offset are derived from the DAG descriptor when needed.
     std::unordered_map<Addr,
         std::vector<std::shared_ptr<DependentAccessGen>>> m_cachedEntries;
+
+    // Per-line post-evict obligation of a cache above the Gather Unit that
+    // holds an index line: the DAGs that reached it while it held the line
+    // (an index hit, an absorbed notification, a propagated write-back),
+    // merged into one, and whether the delayed post-evict replacement is
+    // already enqueued. Whichever replacement writes the line back next
+    // takes the DAG (Initiate_Replacement) and carries it to the Gather
+    // Unit with the current data.
+    struct PostEvictEntry
+    {
+        std::shared_ptr<DependentAccessGen> dag;
+        bool replEnqueued = false;
+    };
+    std::unordered_map<Addr, PostEvictEntry> m_postEvicts;
 
   protected:
     // NOTE: Pointer to all sequencers that are upstream to this controller.
@@ -129,9 +142,19 @@ class AbstractController : public ClockedObject, public Consumer
     // Clear all entries for lineAddr.
     void clearExtensions(Addr line_addr);
 
-    bool hasPostEvict(Addr addr) { return postEvicts.find(addr) != postEvicts.end(); }
-    void postEvict(Addr addr) { postEvicts.insert(addr); }
-    void evict(Addr addr) { postEvicts.erase(addr); }
+    // Whether a line address maps to some downstream machine (an IDR to an
+    // unmapped address is dropped instead of becoming a fatal mapping).
+    bool isMappedDownstream(Addr addr) const;
+    void countIdrDroppedUnmapped() { stats.idrDroppedUnmapped++; }
+
+    // The post-evict stash (see m_postEvicts).
+    bool hasDAG(RequestPtr req);
+    void stashPostEvictDAG(Addr line_addr, RequestPtr req);
+    bool hasStash(Addr line_addr);
+    RequestPtr takePostEvictDAG(Addr line_addr);
+    bool isReplEnqueued(Addr line_addr);
+    void markReplEnqueued(Addr line_addr);
+    void clearReplEnqueued(Addr line_addr);
 
   public:
     bool disambiguated(Addr alias) { return aliasToAddrMap.find(alias) != aliasToAddrMap.end(); }
@@ -576,6 +599,10 @@ class AbstractController : public ClockedObject, public Consumer
         //! cares for
         statistics::Histogram delayHistogram;
         std::vector<statistics::Histogram *> delayVCHistogram;
+
+        //! IDRs dropped at the Gather Unit because their data address had
+        //! no downstream mapping (a wrong-path index past its pair)
+        statistics::Scalar idrDroppedUnmapped;
     } stats;
 
 };

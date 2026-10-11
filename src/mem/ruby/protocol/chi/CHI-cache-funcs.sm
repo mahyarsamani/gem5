@@ -1999,36 +1999,6 @@ void indirectDependentBoilerPlate(CHIRequestMsg &out_msg)
     out_msg.secondType := CHIRequestType:null;
 }
 
-// figureOutNotifType removed — NotifyReadIndIdx/NotifyWriteIndIdx merged
-// into NotifyIndIdx. Read/write intent is in the DAG descriptor.
-
-void indirectNotifBoilerPlate(CHIRequestMsg &out_msg)
-{
-    out_msg.requestor := machineID;
-
-    out_msg.dataToFwdRequestor := false;
-    // NOTE: I don't know what to set for this right now. Might be able to set
-    // this to true later if we have compaction. I am starting to believe that
-    // I really need a HOVHelper SimObject at this point.
-    // out_msg.fwdRequestor :=
-
-    out_msg.allowRetry := true;
-    out_msg.isSeqReqValid := false;
-    // NOTE: Defaults to nullptr.
-    // out_msg.seqReq := null;
-    out_msg.is_local_pf := false;
-    out_msg.is_remote_pf := false;
-
-    // NOTE: Maybe able to use this for access id;
-    // NOTE: Defaults to false;
-    // out_msg.usesTxnId := false;
-    // NOTE: Defaults to 0;
-    out_msg.txnId := max_outstanding_transactions;
-
-
-    out_msg.secondType := CHIRequestType:null;
-}
-
 void fillInMsgFromReq(CHIRequestMsg &out_msg, RequestPtr req)
 {
     out_msg.seqReq := req;
@@ -2064,16 +2034,6 @@ bool cachedHere(State state)
 bool isIndirectNotify(CHIRequestType type, CHIRequestType second_type)
 {
     return type == CHIRequestType:NotifyIndIdx;
-}
-
-bool isIndirectNotifyFromCPU(CHIRequestType type, CHIRequestType second_type)
-{
-    return isIndirectNotify(type, second_type) && (second_type == CHIRequestType:null);
-}
-
-bool isIndirectNotifyNotFromCPU(CHIRequestType type, CHIRequestType second_type)
-{
-    return isIndirectNotify(type, second_type) && (second_type == CHIRequestType:NotifyIndIdx);
 }
 
 bool isIndirect(CHIRequestType type, CHIRequestType second_type)
@@ -2135,18 +2095,23 @@ bool shouldNotifyPrefetcher(CHIRequestType type, CHIRequestType second_type) {
     return true;
 }
 
-bool needPostEvictIdxLine(TBE tbe, CHIRequestType type, CHIRequestType second_type)
+// The transaction carries a DAG for an index line: an index access
+// (uop0), a notification, or a post-evict write-back propagated from a
+// cache above.
+bool carriesIndexDAG(TBE tbe)
 {
-    return isInvalid(tbe.gather_unit_id) && (
-                                            isIndirectIdx(type, second_type) ||
-                                            isIndirectNotifyFromCPU(type, second_type) ||
-                                            isPropagateEvict(type, second_type)
-    );
+    return isIndirectIdx(tbe.reqType, tbe.secondType) ||
+           (tbe.reqType == CHIRequestType:NotifyIndIdx) ||
+           isPropagateEvict(tbe.reqType, tbe.secondType);
 }
 
-bool needPostNotif(TBE tbe, CHIRequestType type, CHIRequestType second_type)
+// This cache is above the Gather Unit and still holds the index line
+// when the transaction ends: it must stash the DAG and post-evict the
+// line, so that the write-back carries the DAG to the Gather Unit.
+bool idxLineAboveGU(TBE tbe, State toBeState)
 {
-    return isInvalid(tbe.gather_unit_id) && isIndirectIdx(type, second_type);
+    return (gather_unit == false) && isInvalid(tbe.gather_unit_id) &&
+           cachedHere(toBeState) && carriesIndexDAG(tbe);
 }
 
 // Returns true if post-processing work remains before Final can fire.
@@ -2155,13 +2120,7 @@ bool needsPostProcess(Addr address, TBE tbe) {
     return true;
   }
   State toBeState := makeFinalState(tbe, getCacheEntry(address), getDirEntry(address));
-  if (needPostNotif(tbe, tbe.reqType, tbe.secondType) && cachedHere(toBeState) && (tbe.postNotifSent == false)) {
-    return true;
-  }
-  if (needPostEvictIdxLine(tbe, tbe.reqType, tbe.secondType) && cachedHere(toBeState) && (tbe.postEvictSent == false)) {
-    return true;
-  }
-  return false;
+  return idxLineAboveGU(tbe, toBeState) && (tbe.postEvictSent == false);
 }
 
 void dummy() {

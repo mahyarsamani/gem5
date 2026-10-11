@@ -50,8 +50,18 @@ void extractExtensions(Addr, RequestPtr);
 bool hasDependentWork(Addr);
 void clearExtensions(Addr);
 
-bool hasPostEvict(Addr);
-void postEvict(Addr);
-void evict(Addr);
+Addr peekDependentAddr(Addr, DataBlock);
+void dropDependentReq(Addr);
+bool isMappedDownstream(Addr);
+void countIdrDroppedUnmapped();
+
+// Index DAGs stashed above the Gather Unit until the line's write-back
+bool hasDAG(RequestPtr);
+void stashPostEvictDAG(Addr, RequestPtr);
+bool hasStash(Addr);
+RequestPtr takePostEvictDAG(Addr);
+bool isReplEnqueued(Addr);
+void markReplEnqueued(Addr);
+void clearReplEnqueued(Addr);
 // FFUTSYM
 void dequeueMemRespQueue();

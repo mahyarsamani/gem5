@@ -697,6 +697,87 @@ AbstractController::clearExtensions(Addr line_addr)
     DPRINTF(MSDebug, "%s: Clearing cached entries for line_addr %#x\n", __func__, line_addr);
     m_cachedEntries.erase(line_addr);
 }
+
+bool
+AbstractController::isMappedDownstream(Addr addr) const
+{
+    for (const auto &i : downstreamAddrMap) {
+        if (i.second.contains(addr) != i.second.end())
+            return true;
+    }
+    return false;
+}
+
+bool
+AbstractController::hasDAG(RequestPtr req)
+{
+    return req && req->getExtension<DependentAccessGen>() != nullptr;
+}
+
+void
+AbstractController::stashPostEvictDAG(Addr line_addr, RequestPtr req)
+{
+    auto dag = req->getExtension<DependentAccessGen>();
+    assert(dag && "stashPostEvictDAG called without a DependentAccessGen");
+    auto &entry = m_postEvicts[line_addr];
+    if (entry.dag) {
+        // The stash holds its own copy, so merging never changes the
+        // request's DAG, which the CPU may still share.
+        entry.dag->merge(*dag);
+    } else {
+        entry.dag = std::shared_ptr<DependentAccessGen>(
+            static_cast<DependentAccessGen *>(dag->clone().release()));
+    }
+    DPRINTF(MSDebug, "%s: stashed %u descriptor(s) for line %#x (%u total)\n",
+            __func__, dag->numDescriptors(), line_addr,
+            entry.dag->numDescriptors());
+}
+
+bool
+AbstractController::hasStash(Addr line_addr)
+{
+    auto it = m_postEvicts.find(line_addr);
+    return it != m_postEvicts.end() && it->second.dag != nullptr;
+}
+
+RequestPtr
+AbstractController::takePostEvictDAG(Addr line_addr)
+{
+    auto it = m_postEvicts.find(line_addr);
+    panic_if(it == m_postEvicts.end() || !it->second.dag,
+             "takePostEvictDAG: no stashed DAG for line %#x", line_addr);
+    // A fresh request carries the merged DAG on the write-back, as the
+    // Sequencer's merged notification does.
+    RequestPtr req = std::make_shared<Request>();
+    req->setPaddr(line_addr);
+    req->setExtension<DependentAccessGen>(it->second.dag);
+    m_postEvicts.erase(it);
+    return req;
+}
+
+bool
+AbstractController::isReplEnqueued(Addr line_addr)
+{
+    auto it = m_postEvicts.find(line_addr);
+    return it != m_postEvicts.end() && it->second.replEnqueued;
+}
+
+void
+AbstractController::markReplEnqueued(Addr line_addr)
+{
+    m_postEvicts[line_addr].replEnqueued = true;
+}
+
+void
+AbstractController::clearReplEnqueued(Addr line_addr)
+{
+    auto it = m_postEvicts.find(line_addr);
+    if (it == m_postEvicts.end())
+        return;
+    it->second.replEnqueued = false;
+    if (!it->second.dag)
+        m_postEvicts.erase(it);
+}
 // FFUTSYM
 
 bool
@@ -724,11 +805,16 @@ ControllerStats::ControllerStats(statistics::Group *parent)
     : statistics::Group(parent),
       ADD_STAT(fullyBusyCycles,
                "cycles for which number of transistions == max transitions"),
-      ADD_STAT(delayHistogram, "delay_histogram")
+      ADD_STAT(delayHistogram, "delay_histogram"),
+      ADD_STAT(idrDroppedUnmapped,
+               "IDRs dropped because the data address has no downstream "
+               "mapping")
 {
     fullyBusyCycles
         .flags(statistics::nozero);
     delayHistogram
+        .flags(statistics::nozero);
+    idrDroppedUnmapped
         .flags(statistics::nozero);
 }
 
