@@ -251,6 +251,13 @@ MemoryInd64::MemoryInd64(const char *mnem, ExtMachInst _machInst,
       memAccessFlags(ArmISA::MMU::AllowUnaligned)
 {}
 
+/** Name of the FP scalar register an FP ldind/stind uses: S or D. */
+static void
+printIndFpReg(std::ostream &os, RegIndex reg, unsigned size_data)
+{
+    ccprintf(os, "%c%d", size_data == 8 ? 'd' : 's', reg);
+}
+
 std::string
 MemoryInd64::generateDisassembly(
         Addr pc, const loader::SymbolTable *symtab) const
@@ -260,7 +267,10 @@ MemoryInd64::generateDisassembly(
     // 'base' here is base_index; base_data is tracked in the subclass.
     std::stringstream ss;
     printMnemonic(ss, "", false);
-    printIntReg(ss, dest);
+    if (isFp)
+        printIndFpReg(ss, dest, sizeData);
+    else
+        printIntReg(ss, dest);
     ccprintf(ss, ", [");
     printIntReg(ss, base);
     ccprintf(ss, "]");
@@ -273,16 +283,17 @@ MemoryInd64::generateDisassembly(
 
 MicroIndIdx::MicroIndIdx(const char *mnem, ExtMachInst machInst,
                          RegIndex _destIdx, RegIndex _baseIndex,
-                         RegIndex _indexReg, RegIndex _aliasReg,
+                         RegIndex _indexReg, RegIndex _baseAliasReg,
                          RegIndex _baseData,
                          unsigned _sizeIndex, unsigned _sizeData,
                          bool isLoad)
     : MightBeMicro64(mnem, machInst, MemReadOp),
       destIdx(_destIdx), baseIndex(_baseIndex),
-      indexReg(_indexReg), aliasReg(_aliasReg),
+      indexReg(_indexReg), baseAliasReg(_baseAliasReg),
       baseData(_baseData),
       sizeIndex(_sizeIndex), sizeData(_sizeData),
       shiftAmtIndex(ceilLog2(_sizeIndex)),
+      shiftAmtData(ceilLog2(_sizeData)),
       memAccessFlags(MMU::AllowUnaligned),
       _isLoad(isLoad)
 {
@@ -301,15 +312,25 @@ MicroIndIdx::MicroIndIdx(const char *mnem, ExtMachInst machInst,
     _numSrcRegs = 0;
     _numDestRegs = 0;
 
-    // Sources: base_index, index_reg, alias_reg (for IAA value), base_data (for DAG)
+    // Sources: base_index, index_reg, base_alias (Rd+1), base_data (for DAG)
     setSrcRegIdx(_numSrcRegs++, intRegClass[_baseIndex]);
     setSrcRegIdx(_numSrcRegs++, intRegClass[_indexReg]);
-    setSrcRegIdx(_numSrcRegs++, intRegClass[_aliasReg]);
+    setSrcRegIdx(_numSrcRegs++, intRegClass[_baseAliasReg]);
     setSrcRegIdx(_numSrcRegs++, intRegClass[_baseData]);
 
-    // Dest: destIdx (Rd+1) — receives index[i]
+    // Dests: destIdx (Rd+1) receives index[i]; Ureg0 receives the alias
     setDestRegIdx(_numDestRegs++, intRegClass[_destIdx]);
     _numTypedDestRegs[IntRegClass]++;
+    setDestRegIdx(_numDestRegs++, int_reg::Ureg0);
+    _numTypedDestRegs[IntRegClass]++;
+}
+
+Addr
+MicroIndIdx::computeAlias(ExecContext *xc) const
+{
+    uint64_t index_val      = xc->getRegOperand(this, 1); // indexReg
+    uint64_t base_alias_val = xc->getRegOperand(this, 2); // baseAliasReg
+    return base_alias_val + (index_val << shiftAmtData);
 }
 
 Fault
@@ -324,8 +345,8 @@ MicroIndIdx::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
 {
     uint64_t base_index_val = xc->getRegOperand(this, 0); // baseIndex
     uint64_t index_val      = xc->getRegOperand(this, 1); // indexReg
-    uint64_t alias_val      = xc->getRegOperand(this, 2); // aliasReg
     uint64_t base_data_val  = xc->getRegOperand(this, 3); // baseData
+    uint64_t alias_val      = computeAlias(xc);
 
     Addr EA = base_index_val + (index_val << shiftAmtIndex);
 
@@ -374,11 +395,15 @@ MicroIndIdx::completeAcc(PacketPtr pkt, ExecContext *xc,
             panic("MicroIndIdx: unsupported sizeIndex=%u", sizeIndex);
     }
 
-    DPRINTF(IndirectAccess, "[%s completeAcc] index[i]=%llu\n",
-            mnemonic, (unsigned long long)index_value);
+    Addr alias_val = computeAlias(xc);
 
-    // Write index[i] to Rd+1
+    DPRINTF(IndirectAccess, "[%s completeAcc] index[i]=%llu alias=0x%llx\n",
+            mnemonic, (unsigned long long)index_value,
+            (unsigned long long)alias_val);
+
+    // Write index[i] to Rd+1 and the alias to Ureg0 (for uop1)
     xc->setRegOperand(this, 0, index_value);
+    xc->setRegOperand(this, 1, alias_val);
     return NoFault;
 }
 
@@ -405,13 +430,14 @@ MicroIndIdx::generateDisassembly(
 MicroLdIndVal::MicroLdIndVal(const char *mnem, ExtMachInst machInst,
                              RegIndex _destData, RegIndex _srcIdx,
                              RegIndex _baseData, RegIndex _aliasReg,
-                             unsigned _sizeData)
+                             unsigned _sizeData, bool _isFp)
     : MightBeMicro64(mnem, machInst, MemReadOp),
       destData(_destData), srcIdx(_srcIdx),
       baseData(_baseData), aliasReg(_aliasReg),
       sizeData(_sizeData),
       shiftAmtData(ceilLog2(_sizeData)),
-      memAccessFlags(MMU::AllowUnaligned)
+      memAccessFlags(MMU::AllowUnaligned),
+      isFp(_isFp)
 {
     flags[IsLoad] = true;
     flags[IsMicroop] = true;
@@ -433,9 +459,14 @@ MicroLdIndVal::MicroLdIndVal(const char *mnem, ExtMachInst machInst,
     setSrcRegIdx(_numSrcRegs++, intRegClass[_baseData]);
     setSrcRegIdx(_numSrcRegs++, intRegClass[_aliasReg]);
 
-    // Dest: destData (Rd)
-    setDestRegIdx(_numDestRegs++, intRegClass[_destData]);
-    _numTypedDestRegs[IntRegClass]++;
+    // Dest: destData (Rd), an X register or the FP/SIMD register
+    if (isFp) {
+        setDestRegIdx(_numDestRegs++, vecRegClass[_destData]);
+        _numTypedDestRegs[VecRegClass]++;
+    } else {
+        setDestRegIdx(_numDestRegs++, intRegClass[_destData]);
+        _numTypedDestRegs[IntRegClass]++;
+    }
 }
 
 Fault
@@ -506,8 +537,16 @@ MicroLdIndVal::completeAcc(PacketPtr pkt, ExecContext *xc,
     DPRINTF(IndirectAccess, "[%s completeAcc] data=0x%llx\n",
             mnemonic, (unsigned long long)data);
 
-    // Write data element to Rd
-    xc->setRegOperand(this, 0, data);
+    // Write data element to Rd. An FP destination (S or D) is the low
+    // element of the vector register, the rest zeroed, as LDR (SIMD&FP).
+    if (isFp) {
+        VecRegContainer vc;
+        vc.zero();
+        vc.as<uint64_t>()[0] = data;
+        xc->setRegOperand(this, 0, &vc);
+    } else {
+        xc->setRegOperand(this, 0, data);
+    }
     return NoFault;
 }
 
@@ -518,7 +557,10 @@ MicroLdIndVal::generateDisassembly(
     std::stringstream ss;
     printMnemonic(ss, "", false);
     ss << " ";
-    printIntReg(ss, destData);
+    if (isFp)
+        printIndFpReg(ss, destData, sizeData);
+    else
+        printIntReg(ss, destData);
     ss << ", [";
     printIntReg(ss, baseData);
     ss << ", ";
@@ -534,13 +576,14 @@ MicroLdIndVal::generateDisassembly(
 MicroStIndVal::MicroStIndVal(const char *mnem, ExtMachInst machInst,
                              RegIndex _srcData, RegIndex _srcIdx,
                              RegIndex _baseData, RegIndex _aliasReg,
-                             unsigned _sizeData)
+                             unsigned _sizeData, bool _isFp)
     : MightBeMicro64(mnem, machInst, MemWriteOp),
       srcData(_srcData), srcIdx(_srcIdx),
       baseData(_baseData), aliasReg(_aliasReg),
       sizeData(_sizeData),
       shiftAmtData(ceilLog2(_sizeData)),
-      memAccessFlags(MMU::AllowUnaligned)
+      memAccessFlags(MMU::AllowUnaligned),
+      isFp(_isFp)
 {
     flags[IsStore] = true;
     flags[IsMicroop] = true;
@@ -556,10 +599,14 @@ MicroStIndVal::MicroStIndVal(const char *mnem, ExtMachInst machInst,
     _numSrcRegs = 0;
     _numDestRegs = 0;
 
-    // Sources: srcIdx (Rd+1, index value), baseData, srcData (Rd), aliasReg
+    // Sources: srcIdx (Rd+1, index value), baseData, srcData (Rd: an X
+    // register or the FP/SIMD register), aliasReg
     setSrcRegIdx(_numSrcRegs++, intRegClass[_srcIdx]);
     setSrcRegIdx(_numSrcRegs++, intRegClass[_baseData]);
-    setSrcRegIdx(_numSrcRegs++, intRegClass[_srcData]);
+    if (isFp)
+        setSrcRegIdx(_numSrcRegs++, vecRegClass[_srcData]);
+    else
+        setSrcRegIdx(_numSrcRegs++, intRegClass[_srcData]);
     setSrcRegIdx(_numSrcRegs++, intRegClass[_aliasReg]);
 }
 
@@ -575,8 +622,17 @@ MicroStIndVal::initiateAcc(ExecContext *xc,
 {
     uint64_t index_value   = xc->getRegOperand(this, 0); // srcIdx (Rd+1)
     uint64_t base_data_val = xc->getRegOperand(this, 1); // baseData
-    uint64_t data_val      = xc->getRegOperand(this, 2); // srcData (Rd)
     uint64_t alias_val     = xc->getRegOperand(this, 3); // aliasReg
+    // srcData (Rd): an FP source (S or D) is the vector register's low
+    // element; writeMem stores its low sizeData bytes.
+    uint64_t data_val;
+    if (isFp) {
+        VecRegContainer vc;
+        xc->getRegOperand(this, 2, &vc);
+        data_val = vc.as<uint64_t>()[0];
+    } else {
+        data_val = xc->getRegOperand(this, 2);
+    }
 
     Addr EA = base_data_val + (index_value << shiftAmtData);
 
@@ -616,7 +672,10 @@ MicroStIndVal::generateDisassembly(
     std::stringstream ss;
     printMnemonic(ss, "", false);
     ss << " ";
-    printIntReg(ss, srcData);
+    if (isFp)
+        printIndFpReg(ss, srcData, sizeData);
+    else
+        printIntReg(ss, srcData);
     ss << ", [";
     printIntReg(ss, baseData);
     ss << ", ";
