@@ -2087,6 +2087,12 @@ bool shouldNotifyPrefetcher(CHIRequestType type, CHIRequestType second_type) {
     if (isIndirectIdx(type, second_type)) {
         return gather_unit;
     }
+    // A notification or a post-evict write-back carries a DAG-only
+    // seqReq (no packet behind it): nothing for the prefetcher to learn.
+    if ((type == CHIRequestType:NotifyIndIdx) ||
+        isPropagateEvict(type, second_type)) {
+        return false;
+    }
     return true;
 }
 

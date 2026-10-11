@@ -746,10 +746,10 @@ AbstractController::takePostEvictDAG(Addr line_addr)
     auto it = m_postEvicts.find(line_addr);
     panic_if(it == m_postEvicts.end() || !it->second.dag,
              "takePostEvictDAG: no stashed DAG for line %#x", line_addr);
-    // A fresh request carries the merged DAG on the write-back, as the
-    // Sequencer's merged notification does.
-    RequestPtr req = std::make_shared<Request>();
-    req->setPaddr(line_addr);
+    // A fresh line-sized request carries the merged DAG on the
+    // write-back, as the Sequencer's merged notification does.
+    RequestPtr req = std::make_shared<Request>(
+        line_addr, m_ruby_system->getBlockSizeBytes(), 0, m_id);
     req->setExtension<DependentAccessGen>(it->second.dag);
     m_postEvicts.erase(it);
     return req;
