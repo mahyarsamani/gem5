@@ -4358,8 +4358,17 @@ action(PostProcess,
        desc="Push one post-processing action: an IDR at the Gather Unit, or StashAndPostEvict above it")
 {
     if (gather_unit && hasDependentWork(address)) {
-        // One IDR per DAG descriptor. Two IDRs to the same data line are
-        // two Loads at the Indirect Unit; the second stalls there and hits.
+        if (isConsideredEvict(tbe.reqType) && (tbe.dataValid == false)) {
+            // A dataless Evict carried the DAG and this Gather Unit holds
+            // no copy: a non-inclusive Gather Unit, not supported yet.
+            error("Gather Unit: a dataless Evict carried an index DAG but the line is not here");
+        }
+        // The transaction's initiator fetched the line when this Gather
+        // Unit had no current copy (Initiate_FetchIndexLine_*), so the
+        // data is here by now. One IDR per DAG descriptor. Two IDRs to the
+        // same data line are two Loads at the Indirect Unit; the second
+        // stalls there and hits.
+        assert(tbe.dataValid);
         tbe.actions.pushNB(Event:SendIDR);
     } else {
         State toBeState := makeFinalState(tbe, getCacheEntry(address), getDirEntry(address));
@@ -4487,8 +4496,43 @@ action(ClearReplEnqueued,
     clearReplEnqueued(address);
 }
 
-action(Error_UpdateDAGNoIndexLine, desc="") {
-  error("UpdateDAG with the index line not cached at the Gather Unit");
+// Gather Unit: a notification (UpdateDAG) brought DAGs for a line whose
+// current data is not here. The state says where it is: an upstream cache
+// holds a copy (UC_RU, UD_RU, RU, RSC, RSD, RUSC, RUSD), which is snooped
+// as Initiate_ReadOnce_HitUpstream does, or nobody above does (I), and the
+// line is read from downstream as Initiate_LoadMiss does. PostProcess
+// sends the IDRs once the data has arrived.
+action(Initiate_FetchIndexLine_Upstream,
+       desc="Gather Unit: snoop the upstream copy of the index line before the IDRs")
+{
+    assert(gather_unit);
+    assert(tbe.dataValid == false);
+    assert(tbe.dir_sharers.count() > 0);
+    tbe.actions.push(Event:ReadMissPipe);
+    tbe.actions.push(Event:SendSnpOnce);
+    if (is_invalid(cache_entry)) {
+        // no entry here: the snooped data is dropped at the end
+        tbe.dataToBeInvalid := true;
+    }
+    DPRINTF(IndirectAccess, "Gather Unit fetches index line %#x from upstream.\n", address);
+}
+
+action(Initiate_FetchIndexLine_Downstream,
+       desc="Gather Unit: read the absent index line from downstream before the IDRs")
+{
+    assert(gather_unit);
+    assert(tbe.dataValid == false);
+    assert(is_invalid(cache_entry));
+    tbe.actions.push(Event:ReadMissPipe);
+    if (tbe.doCacheFill) {
+        tbe.actions.push(Event:SendReadShared);
+        tbe.actions.push(Event:CheckCacheFill);
+        tbe.actions.push(Event:TagArrayWrite);
+    } else {
+        tbe.actions.push(Event:SendReadOnce);
+        tbe.dataToBeInvalid := true;
+    }
+    DPRINTF(IndirectAccess, "Gather Unit fetches index line %#x from downstream (fill=%d).\n", address, tbe.doCacheFill);
 }
 
 action(Extract_Extensions, desc="") {

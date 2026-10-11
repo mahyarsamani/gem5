@@ -78,9 +78,6 @@ in_port(rspInPort, CHIResponseMsg, rspIn, rank=10,
   if (rspInPort.isReady(clockEdge())) {
     printResources();
     peek(rspInPort, CHIResponseMsg) {
-      // MYSTUFF
-      dummy();
-      // FFUTSYM
       if (in_msg.usesTxnId) {
         // A ResponseMsg that uses transaction ID
         // is separate from the memory system,

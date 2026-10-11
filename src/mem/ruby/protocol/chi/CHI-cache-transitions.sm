@@ -1865,21 +1865,32 @@ transition(DvmExtOp_Finished, Final, I) {
 }
 
 // MYSTUFF
-// Gather Unit: a notification carrying DAGs for a line it holds.
-// Initiate_Request pushes ExtractDAG; PostProcess sends the IDRs.
-transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD,
-            UC_RSC, UC_RU, UD_RU, UD_RSD, UD_RSC}, UpdateDAG, BUSY_BLKD) {
+// Gather Unit: a notification carrying DAGs for a line. Initiate_Request
+// pushes ExtractDAG; PostProcess sends the IDRs. The state says whether the
+// line's current data is here, upstream (stale here, or absent with an
+// upstream copy), or absent altogether; the last two fetch it first.
+transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD, UC_RSC, UD_RSD,
+            UD_RSC}, UpdateDAG, BUSY_BLKD) {
     Initiate_Request;
     Send_NotifAck;
     Pop_ReqRdyQueue;
     ProcessNextState;
 }
 
-// A notification whose index line the Gather Unit no longer holds: the
-// Gather Unit fetches it in stage 2 of the consolidation; an error until
-// then.
-transition({I, RU, RSC, RSD, RUSC, RUSD}, UpdateDAG) {
-    Error_UpdateDAGNoIndexLine;
+transition({UC_RU, UD_RU, RU, RSC, RSD, RUSC, RUSD}, UpdateDAG, BUSY_BLKD) {
+    Initiate_Request;
+    Initiate_FetchIndexLine_Upstream;
+    Send_NotifAck;
+    Pop_ReqRdyQueue;
+    ProcessNextState;
+}
+
+transition(I, UpdateDAG, BUSY_BLKD) {
+    Initiate_Request;
+    Initiate_FetchIndexLine_Downstream;
+    Send_NotifAck;
+    Pop_ReqRdyQueue;
+    ProcessNextState;
 }
 
 // Above the Gather Unit, a notification for a line this cache holds is

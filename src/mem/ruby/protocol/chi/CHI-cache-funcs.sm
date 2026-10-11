@@ -982,6 +982,11 @@ bool needCacheEntry(CHIRequestType req_type, CHIRequestType second_type,
   }
 
   // MYSTUFF
+  // A notification carries DAGs for an index line the Gather Unit may have
+  // to fetch (FetchIndexLine); alloc_for_index decides whether it fills.
+  if (req_type == CHIRequestType:NotifyIndIdx) {
+    return gather_unit && alloc_for_index;
+  }
   // Apply HOV specific cache allocation criteria
   if (second_type != CHIRequestType:null) {
     // Positive whitelist: Only allow requests that actively fetch or write data
@@ -1530,9 +1535,13 @@ Event reqToEvent(CHIRequestType type, bool is_prefetch) {
       return Event:AtomicNoReturn;
     }
   } else if (type == CHIRequestType:NotifyIndIdx) {
-    return Event:Fwd_NotifyIndIdx;
-  } else if (type == CHIRequestType:ProcessNotif) {
-    return Event:UpdateDAG;
+    // The Gather Unit consumes a notification; a cache above it absorbs
+    // or forwards it.
+    if (gather_unit) {
+      return Event:UpdateDAG;
+    } else {
+      return Event:Fwd_NotifyIndIdx;
+    }
   } else {
     error("Invalid CHIRequestType");
   }
@@ -2031,19 +2040,9 @@ bool cachedHere(State state)
 // isIndirectIdx and isIndirectVal are defined near the top of this file
 // (SLICC needs a function defined before its first use).
 
-bool isIndirectNotify(CHIRequestType type, CHIRequestType second_type)
-{
-    return type == CHIRequestType:NotifyIndIdx;
-}
-
 bool isIndirect(CHIRequestType type, CHIRequestType second_type)
 {
     return isIndirectIdx(type, second_type) || isIndirectVal(type, second_type);
-}
-
-bool isProcessNotify(CHIRequestType type, CHIRequestType second_type)
-{
-    return (type == CHIRequestType:ProcessNotif) && (second_type == CHIRequestType:NotifyIndIdx);
 }
 
 bool isPropagateEvict(CHIRequestType type, CHIRequestType second_type)
@@ -2061,8 +2060,6 @@ CHIRequestType manipulateType(CHIRequestMsg msg)
         return CHIRequestType:Load;
     } else if (indirect_unit && msg.type == CHIRequestType:WriteValue) {
         return CHIRequestType:Store;
-    } else if (gather_unit && isIndirectNotify(msg.type, msg.secondType)) {
-        return CHIRequestType:ProcessNotif;
     } else {
         return msg.type;
     }
@@ -2078,8 +2075,6 @@ CHIRequestType manipulateSecondType(CHIRequestMsg msg)
         return CHIRequestType:ReadValue;
     } else if (indirect_unit && msg.type == CHIRequestType:WriteValue) {
         return CHIRequestType:WriteValue;
-    } else if (gather_unit && msg.type == CHIRequestType:NotifyIndIdx) {
-        return CHIRequestType:NotifyIndIdx;
     } else {
         return msg.secondType;
     }
@@ -2121,9 +2116,5 @@ bool needsPostProcess(Addr address, TBE tbe) {
   }
   State toBeState := makeFinalState(tbe, getCacheEntry(address), getDirEntry(address));
   return idxLineAboveGU(tbe, toBeState) && (tbe.postEvictSent == false);
-}
-
-void dummy() {
-    DPRINTF(IndirectAccess, "Dummy function to place a breakpoint on for debugging.\n");
 }
 // FFUTSYM

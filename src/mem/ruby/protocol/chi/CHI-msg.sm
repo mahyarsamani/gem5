@@ -106,8 +106,6 @@ enumeration(CHIRequestType, desc="") {
 
   NotifyIndIdx;
 
-  ProcessNotif;
-
   PropagateEvict;
   // FFUTSYM
 
