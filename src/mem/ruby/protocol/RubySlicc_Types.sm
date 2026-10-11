@@ -165,8 +165,6 @@ structure (Sequencer, external = "yes") {
 
   // MYSTUFF
   bool canOverride(std::string name);
-  Addr getNotifId(RequestPtr);
-  void cleanupNotifPkt(Addr);
   // FFUTSYM
 }
 

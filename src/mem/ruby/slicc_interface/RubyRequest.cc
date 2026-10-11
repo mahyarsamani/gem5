@@ -93,7 +93,8 @@ RubyRequest::functionalWrite(Packet *pkt)
     // has to overwrite the data for the timing request, even if the
     // timing request has still not been ordered globally.
 
-    if (!pkt->hasData() || !m_pkt->hasData())
+    // A NOTIFY_INDIDX has no packet behind it (m_req only carries a DAG).
+    if (!m_pkt || !pkt->hasData() || !m_pkt->hasData())
         return false;
 
     uint8_t *data =  m_pkt->getPtr<uint8_t>();

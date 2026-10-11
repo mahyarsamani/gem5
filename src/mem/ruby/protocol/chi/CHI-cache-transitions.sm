@@ -1895,14 +1895,12 @@ transition(I, UpdateDAG, BUSY_BLKD) {
 
 // Above the Gather Unit, a notification for a line this cache holds is
 // absorbed: PostProcess stashes its DAG and post-evicts the line, so the
-// write-back carries the DAG with the current data. The Sequencer's
-// packet is freed right away (the stash keeps its own copy of the DAG).
+// write-back carries the DAG with the current data.
 transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD, UC_RSC, UC_RU, UD_RU,
         UD_RSD, UD_RSC}, Fwd_NotifyIndIdx, BUSY_BLKD)
 {
     Initiate_Request;
     Send_NotifAck;
-    Cleanup_NotifPkt;
     Pop_ReqRdyQueue;
     ProcessNextState;
 }
@@ -1917,10 +1915,9 @@ transition({I, RU, RSC, RSD, RUSC, RUSD}, Fwd_NotifyIndIdx, BUSY_BLKD)
     ProcessNextState;
 }
 
-// NotifAck received — ack from downstream for our NotifyIndIdx
+// NotifAck received: the downstream cache accepted our NotifyIndIdx
 transition({BUSY_BLKD, BUSY_INTR}, NotifAck) {
     Receive_ReqResp;
-    Cleanup_NotifPkt;
     Pop_RespInQueue;
     ProcessNextState;
 }

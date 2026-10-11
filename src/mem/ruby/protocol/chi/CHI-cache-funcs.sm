@@ -1909,11 +1909,6 @@ void populateFromSeqReqMsg(CHIRequestMsg &out_msg, RubyRequest in_msg) {
     out_msg.is_local_pf := false;
     out_msg.is_remote_pf := false;
     out_msg.txnId := max_outstanding_transactions;
-    // For NOTIFY_INDIDX, use the sequencer's notif ID for tracking
-    // the dummy_pkt lifecycle. The sequencer maps RequestPtr -> notifId.
-    if (in_msg.Type == RubyRequestType:NOTIFY_INDIDX) {
-        out_msg.txnId := sequencer.getNotifId(out_msg.seqReq);
-    }
     out_msg.ns := !in_msg.isSecure;
     out_msg.atomic_op.clear();
     out_msg.atomic_op.orMask(in_msg.writeMask);

@@ -4570,18 +4570,6 @@ action(Send_NotifAck, desc="Send NotifAck back to requestor for NotifyIndIdx") {
     }
 }
 
-// The Sequencer's dummy packet behind a merged notification is freed once
-// this cache is done with it: on the NotifAck when the notification was
-// forwarded, or right away when it was absorbed (the stash keeps its own
-// copy of the DAG, and tbe.seqReq keeps the Request alive). Only the
-// originating cache, whose requestor is itself, has a packet to free.
-action(Cleanup_NotifPkt, desc="Free the Sequencer's dummy packet of a merged notification") {
-    if (indirect_unit && (tbe.reqType == CHIRequestType:NotifyIndIdx) &&
-        (tbe.requestor == machineID)) {
-        sequencer.cleanupNotifPkt(tbe.txnId);
-    }
-}
-
 action(Receive_HovAck, desc="IDR accepted by the Indirect Unit: free the hov TBE") {
     assert(gather_unit);
     assert(tbe.expected_req_resp.hasExpected());

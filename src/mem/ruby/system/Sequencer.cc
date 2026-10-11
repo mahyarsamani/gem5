@@ -741,16 +741,13 @@ Sequencer::sendMergedDAGNotif(Addr address)
         return;
     }
 
-    RequestPtr dummy_req = std::make_shared<Request>();
-    dummy_req->setExtension<DependentAccessGen>(it->second);
-    PacketPtr dummy_pkt = new Packet(dummy_req, MemCmd::InvalidCmd);
-
-    // Assign a unique notif ID for tracking this dummy_pkt.
-    // The protocol will use this ID (via txnId) to identify
-    // the NotifAck and call cleanupNotifPkt.
-    uint64_t notifId = m_nextNotifId++;
-    m_NotifPktTable[notifId] = dummy_pkt;
-    m_NotifIdTable[dummy_req] = notifId;
+    // A line-sized request carries the merged DAG. No packet is behind
+    // it: the RubyRequest holds the RequestPtr itself, and the protocol
+    // only ever reads that and the message's own fields.
+    RequestPtr dag_req = std::make_shared<Request>(
+        address, m_ruby_system->getBlockSizeBytes(), 0,
+        m_controller->getRequestorId());
+    dag_req->setExtension<DependentAccessGen>(it->second);
 
     auto msg = std::make_shared<RubyRequest>(
                                 clockEdge(),
@@ -759,8 +756,9 @@ Sequencer::sendMergedDAGNotif(Addr address)
                                 m_ruby_system->getBlockSizeBytes(),
                                 0, RubyRequestType_NOTIFY_INDIDX,
                                 RubyAccessMode_Supervisor,
-                                dummy_pkt, PrefetchBit_No, 0, coreId()
+                                nullptr, PrefetchBit_No, 0, coreId()
                             );
+    msg->m_req = dag_req;
     // Each merged descriptor carries its own alias; the notif has none.
     msg->m_alias = 0;
     Cycles latency = m_controller->mandatoryQueueLatency(
@@ -775,35 +773,6 @@ Sequencer::sendMergedDAGNotif(Addr address)
                         );
 }
 
-// FFUTSYM
-
-uint64_t
-Sequencer::getNotifId(const RequestPtr& req) const
-{
-    auto it = m_NotifIdTable.find(req);
-    panic_if(it == m_NotifIdTable.end(),
-             "getNotifId: no notif ID found for request %p", req.get());
-    return it->second;
-}
-
-void
-Sequencer::cleanupNotifPkt(uint64_t notifId)
-{
-    auto pkt_it = m_NotifPktTable.find(notifId);
-    panic_if(pkt_it == m_NotifPktTable.end(),
-             "cleanupNotifPkt: no dummy_pkt for notifId %llu", notifId);
-
-    // Remove the RequestPtr → notifId mapping
-    RequestPtr req = pkt_it->second->req;
-    m_NotifIdTable.erase(req);
-
-    // Delete the leaked dummy_pkt and remove from table
-    delete pkt_it->second;
-    m_NotifPktTable.erase(pkt_it);
-
-    DPRINTF(IndirectAccess, "cleanupNotifPkt: cleaned up notifId %llu\n",
-            notifId);
-}
 // FFUTSYM
 
 void

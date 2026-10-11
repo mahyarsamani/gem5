@@ -74,6 +74,12 @@ class RubyRequest : public Message
     int m_Size;
     PrefetchBit m_Prefetch;
     PacketPtr m_pkt;
+    // MYSTUFF
+    // The request behind this message: the packet's, or, for a
+    // NOTIFY_INDIDX built by the Sequencer, a line-sized request that
+    // only carries the merged DAG (m_pkt is null then).
+    RequestPtr m_req;
+    // FFUTSYM
     ContextID m_contextId;
     WriteMask m_writeMask;
     DataBlock m_WTData;
@@ -104,6 +110,7 @@ class RubyRequest : public Message
           m_Size(_len),
           m_Prefetch(_pb),
           m_pkt(_pkt),
+          m_req(_pkt ? _pkt->req : nullptr),
           m_contextId(_core_id),
           m_writeMask(block_size),
           m_WTData(block_size),
@@ -136,6 +143,7 @@ class RubyRequest : public Message
           m_Size(0),
           m_Prefetch(PrefetchBit_No),
           m_pkt(_pkt),
+          m_req(_pkt ? _pkt->req : nullptr),
           m_contextId(_core_id),
           m_writeMask(block_size),
           m_WTData(block_size),
@@ -170,6 +178,7 @@ class RubyRequest : public Message
           m_Size(_len),
           m_Prefetch(_pb),
           m_pkt(_pkt),
+          m_req(_pkt ? _pkt->req : nullptr),
           m_contextId(_core_id),
           m_writeMask(_wm_size,_wm_mask),
           m_WTData(_Data),
@@ -208,6 +217,7 @@ class RubyRequest : public Message
           m_Size(_len),
           m_Prefetch(_pb),
           m_pkt(_pkt),
+          m_req(_pkt ? _pkt->req : nullptr),
           m_contextId(_core_id),
           m_writeMask(_wm_size,_wm_mask,_atomicOps),
           m_WTData(_Data),
@@ -247,7 +257,7 @@ class RubyRequest : public Message
     const RubyAccessMode& getAccessMode() const { return m_AccessMode; }
     const int& getSize() const { return m_Size; }
     const PrefetchBit& getPrefetch() const { return m_Prefetch; }
-    RequestPtr getRequestPtr() const { return m_pkt->req; }
+    RequestPtr getRequestPtr() const { return m_req; }
 
     void setWriteMask(uint32_t offset, uint32_t len,
         std::vector< std::pair<int,AtomicOpFunctor*>> atomicOps);

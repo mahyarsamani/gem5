@@ -143,13 +143,6 @@ class Sequencer : public RubyPort
                       const Cycles firstResponseTime = Cycles(0));
 
     // MYSTUFF
-    // Look up the notif ID for a given RequestPtr (the dummy_req).
-    // Called by the protocol to set txnId on CHIRequestMsg.
-    uint64_t getNotifId(const RequestPtr& req) const;
-
-    // Delete the dummy_pkt tracked by notifId when NotifAck arrives.
-    void cleanupNotifPkt(uint64_t notifId);
-
     // Send the DAGs merged into m_IndirectDAGTable for `address` (if any)
     // to the Gather Unit as a NOTIFY_INDIDX. Called whenever the line's
     // requests drain (read, write, or atomic callback), before the table
@@ -280,13 +273,6 @@ class Sequencer : public RubyPort
     // their descriptors are merged into this DAG.
     std::unordered_map<Addr,
         std::shared_ptr<DependentAccessGen>> m_IndirectDAGTable;
-
-    // Notif ID generator and tracking for dummy_pkt cleanup.
-    // When NOTIFY_INDIDX is sent, we assign a unique ID and track the
-    // dummy_pkt so it can be deleted when the NotifAck comes back.
-    uint64_t m_nextNotifId = 0;
-    std::unordered_map<uint64_t, PacketPtr> m_NotifPktTable;
-    std::unordered_map<RequestPtr, uint64_t> m_NotifIdTable;
     // FFUTSYM
     // UnadressedRequestTable contains "unaddressed" requests,
     // guaranteed not to alias each other
