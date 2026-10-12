@@ -4077,11 +4077,20 @@ action(Profile_Eviction, desc="") {
     scLockIncLatency();
   }
   if (send_evictions) {
-    DPRINTF(RubySlicc, "Sending invalidation for %#x to the sequencer\n", address);
-    sequencer.evictionCallback(address);
+    // MYSTUFF
+    // A post-evict (the index line leaves because its DAG rides the
+    // write-back; the Gather Unit keeps the line and no writer intervened)
+    // is a policy eviction, not an invalidation: the values the core's
+    // loads read stay current, so the LSQ gets no InvalidateReq and
+    // replays no load for it. Snoops and back-invalidates still send it.
+    if (is_valid(tbe) && (tbe.secondType == CHIRequestType:PropagateEvict)) {
+      DPRINTF(RubySlicc, "Post-evict of %#x: no invalidation to the sequencer\n", address);
+    } else {
+      DPRINTF(RubySlicc, "Sending invalidation for %#x to the sequencer\n", address);
+      sequencer.evictionCallback(address);
+    }
+    // FFUTSYM
   }
-  // MYSTUFF
-  // FFUTSYM
   if (use_prefetcher && is_valid(cache_entry)) {
     pfProxy.notifyPfEvict(address, cache_entry.HWPrefetched, cache_entry.requestor);
   }
