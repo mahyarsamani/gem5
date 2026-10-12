@@ -38,6 +38,7 @@
 #include "arch/arm/insts/mem64.hh"
 
 #include "arch/arm/insts/dependent_access.hh"
+#include "arch/arm/regs/misc.hh"
 #include "arch/arm/tlb.hh"
 #include "arch/generic/memhelpers.hh"
 #include "base/loader/symtab.hh"
@@ -262,18 +263,14 @@ std::string
 MemoryInd64::generateDisassembly(
         Addr pc, const loader::SymbolTable *symtab) const
 {
-    // ldindx_w x4, x0, x1, x2
-    //           ^dest ^base_data ^base_index ^i
-    // 'base' here is base_index; base_data is tracked in the subclass.
+    // ldindx_w d1, #0: value register and side-car pair id ('base').
     std::stringstream ss;
     printMnemonic(ss, "", false);
     if (isFp)
         printIndFpReg(ss, dest, sizeData);
     else
         printIntReg(ss, dest);
-    ccprintf(ss, ", [");
-    printIntReg(ss, base);
-    ccprintf(ss, "]");
+    ccprintf(ss, ", #%d", base);
     return ss.str();
 }
 
@@ -282,15 +279,12 @@ MemoryInd64::generateDisassembly(
 // =========================================================================
 
 MicroIndIdx::MicroIndIdx(const char *mnem, ExtMachInst machInst,
-                         RegIndex _destIdx, RegIndex _baseIndex,
-                         RegIndex _indexReg, RegIndex _baseAliasReg,
-                         RegIndex _baseData,
+                         RegIndex _destIdx, RegIndex _indexReg,
+                         unsigned _pair,
                          unsigned _sizeIndex, unsigned _sizeData,
                          bool isLoad)
     : MightBeMicro64(mnem, machInst, MemReadOp),
-      destIdx(_destIdx), baseIndex(_baseIndex),
-      indexReg(_indexReg), baseAliasReg(_baseAliasReg),
-      baseData(_baseData),
+      destIdx(_destIdx), indexReg(_indexReg), pair(_pair),
       sizeIndex(_sizeIndex), sizeData(_sizeData),
       shiftAmtIndex(ceilLog2(_sizeIndex)),
       shiftAmtData(ceilLog2(_sizeData)),
@@ -312,24 +306,26 @@ MicroIndIdx::MicroIndIdx(const char *mnem, ExtMachInst machInst,
     _numSrcRegs = 0;
     _numDestRegs = 0;
 
-    // Sources: base_index, index_reg, base_alias (Rd+1), base_data (for DAG)
-    setSrcRegIdx(_numSrcRegs++, intRegClass[_baseIndex]);
+    // Source: i. The pair's bases come from the side-car entry (misc
+    // registers, read at execute; a bind's msr serialises before us).
     setSrcRegIdx(_numSrcRegs++, intRegClass[_indexReg]);
-    setSrcRegIdx(_numSrcRegs++, intRegClass[_baseAliasReg]);
-    setSrcRegIdx(_numSrcRegs++, intRegClass[_baseData]);
 
-    // Dests: destIdx (Rd+1) receives index[i]; Ureg0 receives the alias
-    setDestRegIdx(_numDestRegs++, intRegClass[_destIdx]);
+    // Dests: Ureg1 receives index[i] and Ureg0 the alias, for uop1;
+    // Rt2 receives index[i] too (Zero when the instruction discards it).
+    setDestRegIdx(_numDestRegs++, int_reg::Ureg1);
     _numTypedDestRegs[IntRegClass]++;
     setDestRegIdx(_numDestRegs++, int_reg::Ureg0);
+    _numTypedDestRegs[IntRegClass]++;
+    setDestRegIdx(_numDestRegs++, intRegClass[_destIdx]);
     _numTypedDestRegs[IntRegClass]++;
 }
 
 Addr
 MicroIndIdx::computeAlias(ExecContext *xc) const
 {
-    uint64_t index_val      = xc->getRegOperand(this, 1); // indexReg
-    uint64_t base_alias_val = xc->getRegOperand(this, 2); // baseAliasReg
+    uint64_t index_val      = xc->getRegOperand(this, 0); // indexReg
+    uint64_t base_alias_val =
+        xc->readMiscReg(hovPairReg(pair, HOV_PAIR_ALIAS));
     return base_alias_val + (index_val << shiftAmtData);
 }
 
@@ -343,19 +339,23 @@ MicroIndIdx::execute(ExecContext *xc, trace::InstRecord *traceData) const
 Fault
 MicroIndIdx::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
 {
-    uint64_t base_index_val = xc->getRegOperand(this, 0); // baseIndex
-    uint64_t index_val      = xc->getRegOperand(this, 1); // indexReg
-    uint64_t base_data_val  = xc->getRegOperand(this, 3); // baseData
+    uint64_t index_val      = xc->getRegOperand(this, 0); // indexReg
+    uint64_t base_index_val =
+        xc->readMiscReg(hovPairReg(pair, HOV_PAIR_INDEX));
+    uint64_t base_data_val =
+        xc->readMiscReg(hovPairReg(pair, HOV_PAIR_DATA));
+    uint64_t count = xc->readMiscReg(hovPairReg(pair, HOV_PAIR_COUNT));
     uint64_t alias_val      = computeAlias(xc);
 
     Addr EA = base_index_val + (index_val << shiftAmtIndex);
 
-    DPRINTF(IndirectAccess, "[%s initiateAcc] alias=0x%llx "
-            "base_data=0x%llx base_index=0x%llx index=%llu EA=0x%llx "
-            "sizeIndex=%u sizeData=%u\n",
-            mnemonic,
+    DPRINTF(IndirectAccess, "[%s initiateAcc] pair=%u alias=0x%llx "
+            "base_data=0x%llx base_index=0x%llx index=%llu count=%llu "
+            "EA=0x%llx sizeIndex=%u sizeData=%u\n",
+            mnemonic, pair,
             (unsigned long long)alias_val, (unsigned long long)base_data_val,
             (unsigned long long)base_index_val, (unsigned long long)index_val,
+            (unsigned long long)count,
             (unsigned long long)EA, sizeIndex, sizeData);
 
     // Attach IndirectAccessAlias so CHI protocol recognizes this as indirect
@@ -401,9 +401,11 @@ MicroIndIdx::completeAcc(PacketPtr pkt, ExecContext *xc,
             mnemonic, (unsigned long long)index_value,
             (unsigned long long)alias_val);
 
-    // Write index[i] to Rd+1 and the alias to Ureg0 (for uop1)
+    // Write index[i] to Ureg1 and the alias to Ureg0 (for uop1), and
+    // index[i] to Rt2 (a write to Zero is dropped).
     xc->setRegOperand(this, 0, index_value);
     xc->setRegOperand(this, 1, alias_val);
+    xc->setRegOperand(this, 2, index_value);
     return NoFault;
 }
 
@@ -415,11 +417,8 @@ MicroIndIdx::generateDisassembly(
     printMnemonic(ss, "", false);
     ss << " ";
     printIntReg(ss, destIdx);
-    ss << ", [";
-    printIntReg(ss, baseIndex);
-    ss << ", ";
+    ccprintf(ss, ", #%u, ", pair);
     printIntReg(ss, indexReg);
-    ss << "]";
     return ss.str();
 }
 
@@ -428,12 +427,10 @@ MicroIndIdx::generateDisassembly(
 // =========================================================================
 
 MicroLdIndVal::MicroLdIndVal(const char *mnem, ExtMachInst machInst,
-                             RegIndex _destData, RegIndex _srcIdx,
-                             RegIndex _baseData, RegIndex _aliasReg,
+                             RegIndex _destData, unsigned _pair,
                              unsigned _sizeData, bool _isFp)
     : MightBeMicro64(mnem, machInst, MemReadOp),
-      destData(_destData), srcIdx(_srcIdx),
-      baseData(_baseData), aliasReg(_aliasReg),
+      destData(_destData), pair(_pair),
       sizeData(_sizeData),
       shiftAmtData(ceilLog2(_sizeData)),
       memAccessFlags(MMU::AllowUnaligned),
@@ -454,12 +451,12 @@ MicroLdIndVal::MicroLdIndVal(const char *mnem, ExtMachInst machInst,
     _numSrcRegs = 0;
     _numDestRegs = 0;
 
-    // Sources: srcIdx (Rd+1, index value from uop0), baseData, aliasReg
-    setSrcRegIdx(_numSrcRegs++, intRegClass[_srcIdx]);
-    setSrcRegIdx(_numSrcRegs++, intRegClass[_baseData]);
-    setSrcRegIdx(_numSrcRegs++, intRegClass[_aliasReg]);
+    // Sources: Ureg1 (index[i]) and Ureg0 (alias), both written by uop0;
+    // base_data comes from the side-car entry.
+    setSrcRegIdx(_numSrcRegs++, int_reg::Ureg1);
+    setSrcRegIdx(_numSrcRegs++, int_reg::Ureg0);
 
-    // Dest: destData (Rd), an X register or the FP/SIMD register
+    // Dest: destData (Rt), an X register or the FP/SIMD register
     if (isFp) {
         setDestRegIdx(_numDestRegs++, vecRegClass[_destData]);
         _numTypedDestRegs[VecRegClass]++;
@@ -479,9 +476,9 @@ Fault
 MicroLdIndVal::initiateAcc(ExecContext *xc,
                            trace::InstRecord *traceData) const
 {
-    uint64_t index_value   = xc->getRegOperand(this, 0); // srcIdx (Rd+1)
-    uint64_t base_data_val = xc->getRegOperand(this, 1); // baseData
-    uint64_t alias_val     = xc->getRegOperand(this, 2); // aliasReg
+    uint64_t index_value   = xc->getRegOperand(this, 0); // Ureg1
+    uint64_t alias_val     = xc->getRegOperand(this, 1); // Ureg0
+    uint64_t base_data_val = xc->readMiscReg(hovPairReg(pair, HOV_PAIR_DATA));
 
     Addr EA = base_data_val + (index_value << shiftAmtData);
 
@@ -561,11 +558,7 @@ MicroLdIndVal::generateDisassembly(
         printIndFpReg(ss, destData, sizeData);
     else
         printIntReg(ss, destData);
-    ss << ", [";
-    printIntReg(ss, baseData);
-    ss << ", ";
-    printIntReg(ss, srcIdx);
-    ss << "]";
+    ccprintf(ss, ", #%u", pair);
     return ss.str();
 }
 
@@ -574,12 +567,10 @@ MicroLdIndVal::generateDisassembly(
 // =========================================================================
 
 MicroStIndVal::MicroStIndVal(const char *mnem, ExtMachInst machInst,
-                             RegIndex _srcData, RegIndex _srcIdx,
-                             RegIndex _baseData, RegIndex _aliasReg,
+                             RegIndex _srcData, unsigned _pair,
                              unsigned _sizeData, bool _isFp)
     : MightBeMicro64(mnem, machInst, MemWriteOp),
-      srcData(_srcData), srcIdx(_srcIdx),
-      baseData(_baseData), aliasReg(_aliasReg),
+      srcData(_srcData), pair(_pair),
       sizeData(_sizeData),
       shiftAmtData(ceilLog2(_sizeData)),
       memAccessFlags(MMU::AllowUnaligned),
@@ -599,15 +590,15 @@ MicroStIndVal::MicroStIndVal(const char *mnem, ExtMachInst machInst,
     _numSrcRegs = 0;
     _numDestRegs = 0;
 
-    // Sources: srcIdx (Rd+1, index value), baseData, srcData (Rd: an X
-    // register or the FP/SIMD register), aliasReg
-    setSrcRegIdx(_numSrcRegs++, intRegClass[_srcIdx]);
-    setSrcRegIdx(_numSrcRegs++, intRegClass[_baseData]);
+    // Sources: Ureg1 (index[i]) and Ureg0 (alias) from uop0, then srcData
+    // (Rt: an X register or the FP/SIMD register); base_data comes from
+    // the side-car entry.
+    setSrcRegIdx(_numSrcRegs++, int_reg::Ureg1);
+    setSrcRegIdx(_numSrcRegs++, int_reg::Ureg0);
     if (isFp)
         setSrcRegIdx(_numSrcRegs++, vecRegClass[_srcData]);
     else
         setSrcRegIdx(_numSrcRegs++, intRegClass[_srcData]);
-    setSrcRegIdx(_numSrcRegs++, intRegClass[_aliasReg]);
 }
 
 Fault
@@ -620,10 +611,10 @@ Fault
 MicroStIndVal::initiateAcc(ExecContext *xc,
                            trace::InstRecord *traceData) const
 {
-    uint64_t index_value   = xc->getRegOperand(this, 0); // srcIdx (Rd+1)
-    uint64_t base_data_val = xc->getRegOperand(this, 1); // baseData
-    uint64_t alias_val     = xc->getRegOperand(this, 3); // aliasReg
-    // srcData (Rd): an FP source (S or D) is the vector register's low
+    uint64_t index_value   = xc->getRegOperand(this, 0); // Ureg1
+    uint64_t alias_val     = xc->getRegOperand(this, 1); // Ureg0
+    uint64_t base_data_val = xc->readMiscReg(hovPairReg(pair, HOV_PAIR_DATA));
+    // srcData (Rt): an FP source (S or D) is the vector register's low
     // element; writeMem stores its low sizeData bytes.
     uint64_t data_val;
     if (isFp) {
@@ -676,11 +667,7 @@ MicroStIndVal::generateDisassembly(
         printIndFpReg(ss, srcData, sizeData);
     else
         printIntReg(ss, srcData);
-    ss << ", [";
-    printIntReg(ss, baseData);
-    ss << ", ";
-    printIntReg(ss, srcIdx);
-    ss << "]";
+    ccprintf(ss, ", #%u", pair);
     return ss.str();
 }
 

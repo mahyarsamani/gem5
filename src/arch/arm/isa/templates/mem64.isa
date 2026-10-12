@@ -948,9 +948,8 @@ def template LoadIndirectDeclare {{
     {
       public:
         %(class_name)s(ExtMachInst machInst,
-                       uint32_t _dest, uint32_t _src_alias,
-                       uint32_t _base_data, uint32_t _base_index,
-                       uint32_t _index_reg, bool _is_fp);
+                       uint32_t _dest, uint32_t _dest_idx,
+                       uint32_t _pair, uint32_t _index_reg, bool _is_fp);
 
         Fault execute(ExecContext *, trace::InstRecord *) const override;
         Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;
@@ -971,39 +970,34 @@ def template LoadIndirectDeclare {{
 
 def template LoadIndirectConstructor {{
     %(class_name)s::%(class_name)s(ExtMachInst machInst,
-            uint32_t _dest, uint32_t _src_alias,
-            uint32_t _base_data, uint32_t _base_index,
-            uint32_t _index_reg, bool _is_fp) :
+            uint32_t _dest, uint32_t _dest_idx,
+            uint32_t _pair, uint32_t _index_reg, bool _is_fp) :
          ArmISA::MemoryInd64("%(mnemonic)s", machInst, %(op_class)s,
-                 (RegIndex)_dest, (RegIndex)_base_index,
+                 (RegIndex)_dest, (RegIndex)_pair,
                  %(size_index)d, %(size_data)d)
     {
         flags[IsMacroop] = true;
         isFp = _is_fp;
 
-        // uop0: fetch index[i] from index array
-        // Sources: base_index, index_reg, Rd+1 (base_alias), base_data
-        // Dests: Rd+1 receives index[i]; Ureg0 receives the alias
-        // (base_alias + i * size_data) for uop1.
+        // uop0: fetch index[i] from the index array of side-car entry
+        // _pair. Source: index_reg (i). Dests: Ureg1 receives index[i]
+        // and Ureg0 the alias (base_alias + i * size_data) for uop1;
+        // Rt2 receives index[i] (Zero discards it).
         microOps[0] = new ArmISA::MicroIndIdx(
             "ldind_%(idx_suffix)sidx", machInst,
-            (RegIndex)_src_alias,   // destIdx = Rd+1
-            (RegIndex)_base_index,  // baseIndex
+            (RegIndex)_dest_idx,    // destIdx = Rt2
             (RegIndex)_index_reg,   // indexReg
-            (RegIndex)_src_alias,   // baseAliasReg = Rd+1 (before uop0)
-            (RegIndex)_base_data,   // baseData (for DAG extension)
+            _pair,
             %(size_index)d, %(size_data)d,
             true /* isLoad */);
 
-        // uop1: load data[index[i]] from data array
-        // Sources: Rd+1 (index value from uop0), base_data, Ureg0 (alias)
-        // Dest: Rd (an X register, or S/D with _is_fp)
+        // uop1: load data[index[i]] from the entry's data array
+        // Sources: Ureg1 (index value), Ureg0 (alias), both from uop0
+        // Dest: Rt (an X register, or S/D with _is_fp)
         microOps[1] = new ArmISA::MicroLdIndVal(
             "ldind_%(data_suffix)sval", machInst,
-            (RegIndex)_dest,        // destData = Rd
-            (RegIndex)_src_alias,   // srcIdx = Rd+1 (output of uop0)
-            (RegIndex)_base_data,   // baseData
-            int_reg::Ureg0,         // aliasReg (output of uop0)
+            (RegIndex)_dest,        // destData = Rt
+            _pair,
             %(size_data)d, _is_fp);
 
         microOps[0]->setFirstMicroop();
@@ -1051,9 +1045,8 @@ def template StoreIndirectDeclare {{
     {
       public:
         %(class_name)s(ExtMachInst machInst,
-                       uint32_t _dest, uint32_t _src_alias,
-                       uint32_t _base_data, uint32_t _base_index,
-                       uint32_t _index_reg, bool _is_fp);
+                       uint32_t _dest, uint32_t _dest_idx,
+                       uint32_t _pair, uint32_t _index_reg, bool _is_fp);
 
         Fault execute(ExecContext *, trace::InstRecord *) const override;
         Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;
@@ -1074,36 +1067,31 @@ def template StoreIndirectDeclare {{
 
 def template StoreIndirectConstructor {{
     %(class_name)s::%(class_name)s(ExtMachInst machInst,
-            uint32_t _dest, uint32_t _src_alias,
-            uint32_t _base_data, uint32_t _base_index,
-            uint32_t _index_reg, bool _is_fp) :
+            uint32_t _dest, uint32_t _dest_idx,
+            uint32_t _pair, uint32_t _index_reg, bool _is_fp) :
          ArmISA::MemoryInd64("%(mnemonic)s", machInst, %(op_class)s,
-                 (RegIndex)_dest, (RegIndex)_base_index,
+                 (RegIndex)_dest, (RegIndex)_pair,
                  %(size_index)d, %(size_data)d)
     {
         flags[IsMacroop] = true;
         isFp = _is_fp;
 
-        // uop0: fetch index[i] from index array (same as ldind uop0)
+        // uop0: fetch index[i] from the index array (same as ldind uop0)
         microOps[0] = new ArmISA::MicroIndIdx(
             "stind_%(idx_suffix)sidx", machInst,
-            (RegIndex)_src_alias,   // destIdx = Rd+1
-            (RegIndex)_base_index,  // baseIndex
+            (RegIndex)_dest_idx,    // destIdx = Rt2
             (RegIndex)_index_reg,   // indexReg
-            (RegIndex)_src_alias,   // baseAliasReg = Rd+1 (before uop0)
-            (RegIndex)_base_data,   // baseData (for DAG extension)
+            _pair,
             %(size_index)d, %(size_data)d,
             false /* isLoad */);
 
-        // uop1: store data[index[i]] to data array
-        // Sources: Rd+1 (index value from uop0), base_data, Rd (data to
-        // store: an X register, or S/D with _is_fp), Ureg0 (alias)
+        // uop1: store data[index[i]] to the entry's data array
+        // Sources: Ureg1 (index value), Ureg0 (alias) from uop0, Rt (data
+        // to store: an X register, or S/D with _is_fp)
         microOps[1] = new ArmISA::MicroStIndVal(
             "stind_%(data_suffix)sval", machInst,
-            (RegIndex)_dest,        // srcData = Rd (data to store)
-            (RegIndex)_src_alias,   // srcIdx = Rd+1 (output of uop0)
-            (RegIndex)_base_data,   // baseData
-            int_reg::Ureg0,         // aliasReg (output of uop0)
+            (RegIndex)_dest,        // srcData = Rt (data to store)
+            _pair,
             %(size_data)d, _is_fp);
 
         microOps[0]->setFirstMicroop();

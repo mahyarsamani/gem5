@@ -319,7 +319,7 @@ class MemoryInd64 : public MightBeMicro64
 {
   protected:
     RegIndex dest;           ///< Architectural destination (x4 in ldindx_w)
-    RegIndex base;           ///< base_index register (kept for disassembly)
+    RegIndex base;           ///< side-car pair id (kept for disassembly)
     unsigned sizeIndex;      ///< Bytes per index element, e.g. 4 for _w
     unsigned sizeData;       ///< Bytes per data element,  e.g. 8 for ldindX_*
     uint64_t shiftAmtIndex;  ///< log2(sizeIndex)
@@ -339,22 +339,22 @@ class MemoryInd64 : public MightBeMicro64
 /**
  * Micro-op 0 for ldind/stind: fetch index[i] from the index array.
  *
- * Issues a ReadIndReq with IndirectAccessAlias and DependentAccessGen
- * extensions. The CHI protocol treats this as a Phase 1 index fetch.
- * The alias is base_alias (Rd+1 before this uop) + i * sizeData.
- * On completion, writes index[i] to Rd+1 and the alias to Ureg0, where
- * uop1 reads it.
+ * The pair's base_index, base_alias, base_data and count come from the
+ * side-car entry the instruction names (regs/misc.hh, hovPairReg); i is
+ * the only register source. Issues a ReadIndReq with IndirectAccessAlias
+ * and DependentAccessGen extensions. The CHI protocol treats this as a
+ * Phase 1 index fetch. The alias is base_alias + i * sizeData.
+ * On completion, writes index[i] to Ureg1 and the alias to Ureg0, where
+ * uop1 reads them, and index[i] to Rt2 (XZR discards it).
  *
  * Used by both ldind (uop0) and stind (uop0) — both fetch the index.
  */
 class MicroIndIdx : public MightBeMicro64
 {
   protected:
-    RegIndex destIdx;       ///< Rd+1 — receives index[i]
-    RegIndex baseIndex;     ///< base_index register
+    RegIndex destIdx;       ///< Rt2 — receives index[i] (may be Zero)
     RegIndex indexReg;      ///< i (iteration variable)
-    RegIndex baseAliasReg;  ///< Rd+1 — base_alias (read before destIdx)
-    RegIndex baseData;      ///< base_data register (for DAG extension)
+    unsigned pair;          ///< side-car entry
     unsigned sizeIndex;     ///< bytes per index element
     unsigned sizeData;      ///< bytes per data element (for DAG)
     uint64_t shiftAmtIndex; ///< log2(sizeIndex)
@@ -363,17 +363,15 @@ class MicroIndIdx : public MightBeMicro64
     bool _isLoad;           ///< true = gather (ldind), false = scatter (stind)
 
     // Custom register index arrays
-    RegId _srcRegIdxArr[4];
-    RegId _destRegIdxArr[2];
+    RegId _srcRegIdxArr[1];
+    RegId _destRegIdxArr[3];
 
-    /** base_alias + i * sizeData, from this uop's source operands. */
+    /** base_alias + i * sizeData, from the side-car entry and i. */
     Addr computeAlias(ExecContext *xc) const;
 
   public:
     MicroIndIdx(const char *mnem, ExtMachInst machInst,
-                RegIndex _destIdx, RegIndex _baseIndex,
-                RegIndex _indexReg, RegIndex _baseAliasReg,
-                RegIndex _baseData,
+                RegIndex _destIdx, RegIndex _indexReg, unsigned _pair,
                 unsigned _sizeIndex, unsigned _sizeData,
                 bool isLoad);
 
@@ -396,22 +394,19 @@ class MicroIndIdx : public MightBeMicro64
 class MicroLdIndVal : public MightBeMicro64
 {
   protected:
-    RegIndex destData;      ///< Rd — receives data element
-    RegIndex srcIdx;        ///< Rd+1 — holds index[i] from uop0
-    RegIndex baseData;      ///< base_data register
-    RegIndex aliasReg;      ///< Ureg0 — the alias computed by uop0
+    RegIndex destData;      ///< Rt — receives data element
+    unsigned pair;          ///< side-car entry (base_data)
     unsigned sizeData;      ///< bytes per data element
     uint64_t shiftAmtData;  ///< log2(sizeData)
     unsigned memAccessFlags;
-    bool isFp;              ///< Rd is an FP register (S or D)
+    bool isFp;              ///< Rt is an FP register (S or D)
 
-    RegId _srcRegIdxArr[3];
+    RegId _srcRegIdxArr[2]; ///< Ureg1 (index[i]), Ureg0 (alias) from uop0
     RegId _destRegIdxArr[1];
 
   public:
     MicroLdIndVal(const char *mnem, ExtMachInst machInst,
-                  RegIndex _destData, RegIndex _srcIdx,
-                  RegIndex _baseData, RegIndex _aliasReg,
+                  RegIndex _destData, unsigned _pair,
                   unsigned _sizeData, bool _isFp);
 
     Fault execute(ExecContext *, trace::InstRecord *) const override;
@@ -433,21 +428,18 @@ class MicroLdIndVal : public MightBeMicro64
 class MicroStIndVal : public MightBeMicro64
 {
   protected:
-    RegIndex srcData;       ///< Rd — data to store
-    RegIndex srcIdx;        ///< Rd+1 — holds index[i] from uop0
-    RegIndex baseData;      ///< base_data register
-    RegIndex aliasReg;      ///< Ureg0 — the alias computed by uop0
+    RegIndex srcData;       ///< Rt — data to store
+    unsigned pair;          ///< side-car entry (base_data)
     unsigned sizeData;      ///< bytes per data element
     uint64_t shiftAmtData;  ///< log2(sizeData)
     unsigned memAccessFlags;
-    bool isFp;              ///< Rd is an FP register (S or D)
+    bool isFp;              ///< Rt is an FP register (S or D)
 
-    RegId _srcRegIdxArr[4];
+    RegId _srcRegIdxArr[3]; ///< Ureg1 (index[i]), Ureg0 (alias), Rt
 
   public:
     MicroStIndVal(const char *mnem, ExtMachInst machInst,
-                  RegIndex _srcData, RegIndex _srcIdx,
-                  RegIndex _baseData, RegIndex _aliasReg,
+                  RegIndex _srcData, unsigned _pair,
                   unsigned _sizeData, bool _isFp);
 
     Fault execute(ExecContext *, trace::InstRecord *) const override;
