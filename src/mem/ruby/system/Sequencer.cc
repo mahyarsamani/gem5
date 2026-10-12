@@ -740,14 +740,49 @@ Sequencer::sendMergedDAGNotif(Addr address)
     if (it == m_IndirectDAGTable.end()) {
         return;
     }
+    sendDAGNotif(address, it->second);
+}
 
-    // A line-sized request carries the merged DAG. No packet is behind
-    // it: the RubyRequest holds the RequestPtr itself, and the protocol
-    // only ever reads that and the message's own fields.
+namespace
+{
+
+std::shared_ptr<DependentAccessGen>
+cloneDAG(const DependentAccessGen &dag)
+{
+    return std::shared_ptr<DependentAccessGen>(
+        static_cast<DependentAccessGen *>(dag.clone().release()));
+}
+
+} // anonymous namespace
+
+void
+Sequencer::deliverDAG(Addr line_addr, const DependentAccessGen &dag)
+{
+    if (m_RequestTable.count(line_addr)) {
+        // A request for the line is outstanding: the DAG joins the
+        // merged notification that the line's drain sends.
+        auto it = m_IndirectDAGTable.find(line_addr);
+        if (it != m_IndirectDAGTable.end()) {
+            it->second->merge(dag);
+        } else {
+            m_IndirectDAGTable[line_addr] = cloneDAG(dag);
+        }
+        return;
+    }
+    sendDAGNotif(line_addr, cloneDAG(dag));
+}
+
+void
+Sequencer::sendDAGNotif(Addr address,
+                        std::shared_ptr<DependentAccessGen> dag)
+{
+    // A line-sized request carries the DAG. No packet is behind it: the
+    // RubyRequest holds the RequestPtr itself, and the protocol only
+    // ever reads that and the message's own fields.
     RequestPtr dag_req = std::make_shared<Request>(
         address, m_ruby_system->getBlockSizeBytes(), 0,
         m_controller->getRequestorId());
-    dag_req->setExtension<DependentAccessGen>(it->second);
+    dag_req->setExtension<DependentAccessGen>(dag);
 
     auto msg = std::make_shared<RubyRequest>(
                                 clockEdge(),
@@ -1230,6 +1265,19 @@ Sequencer::makeRequest(PacketPtr pkt)
         !pkt->req->isHTMAbort()) {
         return RequestStatus_BufferFull;
     }
+
+    // MYSTUFF
+    // A uop0 whose index value the LSQ forwarded from an older uop0 only
+    // delivers its DAG: no request-table entry, no data back. The port
+    // turns the packet into its response right away.
+    if (pkt->cmd == MemCmd::NotifyIndIdxReq) {
+        auto dag = pkt->req->getExtension<DependentAccessGen>();
+        assert(dag);
+        deliverDAG(makeLineAddress(pkt->getAddr()), *dag);
+        ruby_hit_callback(pkt);
+        return RequestStatus_Issued;
+    }
+    // FFUTSYM
 
     RubyRequestType primary_type = RubyRequestType_NULL;
     RubyRequestType secondary_type = RubyRequestType_NULL;

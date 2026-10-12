@@ -153,6 +153,10 @@ class MemCmd
         ReadIndResp,
         WriteIndReq,
         WriteIndResp,
+        // A uop0 whose index value was forwarded in the LSQ: delivers its
+        // DAG to the Gather Unit, no data comes back.
+        NotifyIndIdxReq,
+        NotifyIndIdxResp,
         ReadIndCompReq,
         ReadIndCompResp,
         WriteIndCompReq,

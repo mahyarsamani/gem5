@@ -1267,7 +1267,12 @@ LSQ::SingleDataRequest::buildPackets()
         bool is_indirect =
             req()->getExtension<DependentAccessGen>() != nullptr;
         if (is_indirect) {
-            _packets.push_back(new Packet(req(), isLoad() ? MemCmd::ReadIndReq : MemCmd::WriteIndReq));
+            // A uop0 whose index value was forwarded in the LQ only
+            // delivers its DAG (the data is already in memData).
+            MemCmd cmd = isIdxForwarded() ? MemCmd::NotifyIndIdxReq
+                       : isLoad() ? MemCmd::ReadIndReq
+                       : MemCmd::WriteIndReq;
+            _packets.push_back(new Packet(req(), cmd));
         } else {
             _packets.push_back(
                     isLoad()

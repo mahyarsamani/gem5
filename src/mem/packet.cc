@@ -241,10 +241,17 @@ MemCmd::commandInfo[] =
     { {IsRead, IsIndirect, IsResponse, HasData}, InvalidCmd, "ReadIndResp"},
     { {IsWrite, IsIndirect, IsRequest, NeedsResponse, HasData}, WriteIndResp, "WriteIndReq"},
     { {IsWrite, IsIndirect, IsResponse}, InvalidCmd, "WriteIndResp"},
-    { {IsRead, IsIndirect, IsCompact, IsRequest, NeedsResponse}, ReadIndCompResp, "ReadIndCompReq"},
-    { {IsRead, IsIndirect, IsCompact, IsResponse, HasData}, InvalidCmd, "ReadIndCompResp"},
-    { {IsWrite, IsIndirect, IsCompact, IsRequest, NeedsResponse, HasData}, WriteIndCompResp, "WriteIndCompReq"},
-    { {IsWrite, IsIndirect, IsCompact, IsResponse}, InvalidCmd, "WriteIndCompResp"}
+    { {IsIndirect, IsRequest, NeedsResponse}, NotifyIndIdxResp,
+      "NotifyIndIdxReq"},
+    { {IsIndirect, IsResponse}, InvalidCmd, "NotifyIndIdxResp"},
+    { {IsRead, IsIndirect, IsCompact, IsRequest, NeedsResponse},
+      ReadIndCompResp, "ReadIndCompReq"},
+    { {IsRead, IsIndirect, IsCompact, IsResponse, HasData}, InvalidCmd,
+      "ReadIndCompResp"},
+    { {IsWrite, IsIndirect, IsCompact, IsRequest, NeedsResponse, HasData},
+      WriteIndCompResp, "WriteIndCompReq"},
+    { {IsWrite, IsIndirect, IsCompact, IsResponse}, InvalidCmd,
+      "WriteIndCompResp"}
 };
 
 AddrRange

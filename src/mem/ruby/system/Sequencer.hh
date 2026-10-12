@@ -143,6 +143,15 @@ class Sequencer : public RubyPort
                       const Cycles firstResponseTime = Cycles(0));
 
     // MYSTUFF
+    // Deliver a DAG for an index line without a request of its own: a uop0
+    // whose index value the LSQ forwarded, or a cache's orphaned stash.
+    // With a request outstanding for the line it joins the merged
+    // notification sent at the drain; otherwise a NOTIFY_INDIDX goes now.
+    void deliverDAG(Addr line_addr, const DependentAccessGen &dag);
+
+    // Enqueue a NOTIFY_INDIDX carrying `dag` for the line.
+    void sendDAGNotif(Addr address, std::shared_ptr<DependentAccessGen> dag);
+
     // Send the DAGs merged into m_IndirectDAGTable for `address` (if any)
     // to the Gather Unit as a NOTIFY_INDIDX. Called whenever the line's
     // requests drain (read, write, or atomic callback), before the table

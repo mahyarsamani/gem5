@@ -220,7 +220,10 @@ class LSQ
             WritebackScheduled  = 0x00001000,
             WritebackDone       = 0x00002000,
             /** True if this is an atomic request */
-            IsAtomic            = 0x00004000
+            IsAtomic            = 0x00004000,
+            /** A uop0 whose index value an older uop0 in the LQ supplied;
+              * its packet is a NotifyIndIdxReq (DAG only, no data back) */
+            IdxForwarded        = 0x00008000
         };
         FlagsType flags;
 
@@ -455,6 +458,9 @@ class LSQ
         {
             return flags.isSet(Flag::Complete);
         }
+
+        void markIdxForwarded() { flags.set(Flag::IdxForwarded); }
+        bool isIdxForwarded() { return flags.isSet(Flag::IdxForwarded); }
 
         bool
         isInTranslation()
