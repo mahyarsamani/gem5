@@ -146,6 +146,7 @@ class AbstractController : public ClockedObject, public Consumer
     // unmapped address is dropped instead of becoming a fatal mapping).
     bool isMappedDownstream(Addr addr) const;
     void countIdrDroppedUnmapped() { stats.idrDroppedUnmapped++; }
+    void countStashOrphaned() { stats.hovStashOrphaned++; }
 
     // The post-evict stash (see m_postEvicts).
     bool hasDAG(RequestPtr req);
@@ -603,6 +604,10 @@ class AbstractController : public ClockedObject, public Consumer
         //! IDRs dropped at the Gather Unit because their data address had
         //! no downstream mapping (a wrong-path index past its pair)
         statistics::Scalar idrDroppedUnmapped;
+
+        //! Post-evict stashes whose line left without a replacement (an
+        //! invalidating snoop or a back-invalidate) and became notifications
+        statistics::Scalar hovStashOrphaned;
     } stats;
 
 };

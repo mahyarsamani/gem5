@@ -3574,6 +3574,20 @@ action(Finalize_UpdateCacheFromTBE, desc="") {
       cache.deallocate(address);
       unset_cache_entry();
     }
+    // MYSTUFF
+    // The line leaves without a replacement (an invalidating snoop, or the
+    // Gather Unit's back-invalidate, on its own or as a hazard during a
+    // request) while a DAG is stashed for it: the stash becomes a
+    // notification through the Sequencer. A replacement took the stash in
+    // Initiate_Replacement, so it never gets here.
+    if (hasStash(address)) {
+      assert(tbe.is_repl_tbe == false);
+      assert(indirect_unit);
+      DPRINTF(IndirectAccess, "Stash for %#lx orphaned by a snoop: notifying.\n", address);
+      sequencer.deliverDAGReq(address, takePostEvictDAG(address));
+      countStashOrphaned();
+    }
+    // FFUTSYM
   }
 }
 

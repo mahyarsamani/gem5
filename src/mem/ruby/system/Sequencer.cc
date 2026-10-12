@@ -773,6 +773,14 @@ Sequencer::deliverDAG(Addr line_addr, const DependentAccessGen &dag)
 }
 
 void
+Sequencer::deliverDAGReq(Addr line_addr, RequestPtr req)
+{
+    auto dag = req->getExtension<DependentAccessGen>();
+    assert(dag);
+    deliverDAG(line_addr, *dag);
+}
+
+void
 Sequencer::sendDAGNotif(Addr address,
                         std::shared_ptr<DependentAccessGen> dag)
 {

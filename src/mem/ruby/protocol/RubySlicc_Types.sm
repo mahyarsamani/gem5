@@ -165,6 +165,8 @@ structure (Sequencer, external = "yes") {
 
   // MYSTUFF
   bool canOverride(std::string name);
+  // A DAG without a request of its own (an orphaned post-evict stash)
+  void deliverDAGReq(Addr, RequestPtr);
   // FFUTSYM
 }
 

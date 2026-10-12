@@ -808,13 +808,18 @@ ControllerStats::ControllerStats(statistics::Group *parent)
       ADD_STAT(delayHistogram, "delay_histogram"),
       ADD_STAT(idrDroppedUnmapped,
                "IDRs dropped because the data address has no downstream "
-               "mapping")
+               "mapping"),
+      ADD_STAT(hovStashOrphaned,
+               "post-evict stashes turned into notifications because the "
+               "line left without a replacement")
 {
     fullyBusyCycles
         .flags(statistics::nozero);
     delayHistogram
         .flags(statistics::nozero);
     idrDroppedUnmapped
+        .flags(statistics::nozero);
+    hovStashOrphaned
         .flags(statistics::nozero);
 }
 

@@ -148,6 +148,8 @@ class Sequencer : public RubyPort
     // With a request outstanding for the line it joins the merged
     // notification sent at the drain; otherwise a NOTIFY_INDIDX goes now.
     void deliverDAG(Addr line_addr, const DependentAccessGen &dag);
+    // The same for a request that carries the DAG (called from SLICC).
+    void deliverDAGReq(Addr line_addr, RequestPtr req);
 
     // Enqueue a NOTIFY_INDIDX carrying `dag` for the line.
     void sendDAGNotif(Addr address, std::shared_ptr<DependentAccessGen> dag);

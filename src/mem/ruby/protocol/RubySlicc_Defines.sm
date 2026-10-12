@@ -54,6 +54,7 @@ Addr peekDependentAddr(Addr, DataBlock);
 void dropDependentReq(Addr);
 bool isMappedDownstream(Addr);
 void countIdrDroppedUnmapped();
+void countStashOrphaned();
 
 // Index DAGs stashed above the Gather Unit until the line's write-back
 bool hasDAG(RequestPtr);
