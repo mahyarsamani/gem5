@@ -1933,6 +1933,8 @@ void populateFromSeqReqMsg(CHIRequestMsg &out_msg, RubyRequest in_msg) {
     } else if (in_msg.Type == RubyRequestType:ATOMIC_NO_RETURN) {
       out_msg.type := CHIRequestType:AtomicStore;
     } else {
+      DPRINTF(RubySlicc, "Unhandled RubyRequestType %s for %#x\n",
+              in_msg.Type, in_msg.LineAddress);
       error("Invalid RubyRequestType");
     }
 
