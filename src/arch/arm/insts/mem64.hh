@@ -350,16 +350,19 @@ class MemoryInd64 : public MightBeMicro64
  */
 struct IndCarriers
 {
-    RegId index;        ///< written by uop0, read by uop1
+    RegId index;        ///< written by uop0, read by uop1 (the register
+                        ///< form: Rt2, read by both)
     bool aliasInUreg0;  ///< uop0 writes the alias to Ureg0
+    bool indexInReg;    ///< the register form: index[i] comes in Rt2
     RegIndex rt2;       ///< Rt2 as decoded (int_reg::_ZeroIdx for XZR)
     RegIndex ra;        ///< i
 
-    IndCarriers(RegIndex _rt2, RegIndex _ra)
-        : index(_rt2 == int_reg::_ZeroIdx ? int_reg::Ureg1
-                                          : intRegClass[_rt2]),
-          aliasInUreg0(_rt2 != int_reg::_ZeroIdx && _rt2 == _ra),
-          rt2(_rt2), ra(_ra)
+    IndCarriers(RegIndex _rt2, RegIndex _ra, bool _index_in_reg = false)
+        : index(_rt2 == int_reg::_ZeroIdx && !_index_in_reg
+                    ? int_reg::Ureg1 : intRegClass[_rt2]),
+          aliasInUreg0(!_index_in_reg && _rt2 != int_reg::_ZeroIdx &&
+                       _rt2 == _ra),
+          indexInReg(_index_in_reg), rt2(_rt2), ra(_ra)
     {}
 
     /** uop1's second source: Ureg0 (the alias) or Ra (i). */
@@ -396,19 +399,24 @@ class MicroIndIdx : public MightBeMicro64
     bool _isLoad;           ///< true = gather (ldind), false = scatter (stind)
     IndCarriers carriers;
 
-    // Custom register index arrays: the index carrier, then Ureg0 when
-    // carriers.aliasInUreg0
-    RegId _srcRegIdxArr[1];
+    // Custom register index arrays: sources i, and Rt2 in the register
+    // form; dests the index carrier, then Ureg0 when carriers.aliasInUreg0
+    // (none in the register form)
+    RegId _srcRegIdxArr[2];
     RegId _destRegIdxArr[2];
 
     /** base_alias + i * sizeData, from the side-car entry and i. */
     Addr computeAlias(ExecContext *xc) const;
 
   public:
+    /** index_in_reg: the register form (bit 23 clear): index[i] is read
+     *  from Rt2 instead of memory, and the uop only delivers its
+     *  descriptor (the LSQ sends a NotifyIndIdxReq, as for a forwarded
+     *  uop0; no data comes back). */
     MicroIndIdx(const char *mnem, ExtMachInst machInst,
                 RegIndex _destIdx, RegIndex _indexReg, unsigned _pair,
                 unsigned _sizeIndex, unsigned _sizeData,
-                bool isLoad);
+                bool isLoad, bool index_in_reg = false);
 
     Fault execute(ExecContext *, trace::InstRecord *) const override;
     Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;
@@ -445,7 +453,8 @@ class MicroLdIndVal : public MightBeMicro64
     MicroLdIndVal(const char *mnem, ExtMachInst machInst,
                   RegIndex _destData, unsigned _pair,
                   unsigned _sizeData, bool _isFp,
-                  RegIndex _destIdx, RegIndex _indexReg);
+                  RegIndex _destIdx, RegIndex _indexReg,
+                  bool index_in_reg = false);
 
     Fault execute(ExecContext *, trace::InstRecord *) const override;
     Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;
@@ -481,7 +490,8 @@ class MicroStIndVal : public MightBeMicro64
     MicroStIndVal(const char *mnem, ExtMachInst machInst,
                   RegIndex _srcData, unsigned _pair,
                   unsigned _sizeData, bool _isFp,
-                  RegIndex _destIdx, RegIndex _indexReg);
+                  RegIndex _destIdx, RegIndex _indexReg,
+                  bool index_in_reg = false);
 
     Fault execute(ExecContext *, trace::InstRecord *) const override;
     Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;

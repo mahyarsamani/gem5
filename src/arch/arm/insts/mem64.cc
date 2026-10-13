@@ -283,7 +283,7 @@ MicroIndIdx::MicroIndIdx(const char *mnem, ExtMachInst machInst,
                          RegIndex _destIdx, RegIndex _indexReg,
                          unsigned _pair,
                          unsigned _sizeIndex, unsigned _sizeData,
-                         bool isLoad)
+                         bool isLoad, bool index_in_reg)
     : MightBeMicro64(mnem, machInst, MemReadOp),
       destIdx(_destIdx), indexReg(_indexReg), pair(_pair),
       sizeIndex(_sizeIndex), sizeData(_sizeData),
@@ -291,7 +291,7 @@ MicroIndIdx::MicroIndIdx(const char *mnem, ExtMachInst machInst,
       shiftAmtData(ceilLog2(_sizeData)),
       memAccessFlags(MMU::AllowUnaligned),
       _isLoad(isLoad),
-      carriers(_destIdx, _indexReg)
+      carriers(_destIdx, _indexReg, index_in_reg)
 {
     flags[IsLoad] = true;
     flags[IsMicroop] = true;
@@ -311,6 +311,13 @@ MicroIndIdx::MicroIndIdx(const char *mnem, ExtMachInst machInst,
     // Source: i. The pair's bases come from the side-car entry (misc
     // registers, read at execute; a bind's msr serialises before us).
     setSrcRegIdx(_numSrcRegs++, intRegClass[_indexReg]);
+
+    if (carriers.indexInReg) {
+        // The register form reads index[i] from Rt2 and writes nothing:
+        // uop1 reads Rt2 and Ra itself.
+        setSrcRegIdx(_numSrcRegs++, carriers.index);
+        return;
+    }
 
     // Dests: index[i]'s one carrier (Rt2, or Ureg1 when Rt2 is XZR), and
     // the alias in Ureg0 only when this uop overwrites Ra (IndCarriers).
@@ -372,6 +379,15 @@ MicroIndIdx::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
     auto dag = std::make_shared<ARMDependentAccessGen>(
         intent, sizeIndex, EA, base_data_val, sizeData, alias_val, pair,
         xc->hovAccessName(pair, false));
+    if (carriers.indexInReg) {
+        // The register form: index[i] is in Rt2 (zero-extended by the
+        // program; masked to the index size here). The DAG carries it,
+        // and the LSQ sends the descriptor without reading index[i].
+        uint64_t known = xc->getRegOperand(this, 1);
+        if (sizeIndex < 8)
+            known &= (1ULL << (8 * sizeIndex)) - 1;
+        dag->setIndexValue(known);
+    }
     xc->setIAAExt(iaa);
     xc->setDAGExt(dag);
     xc->setAccessName(xc->hovAccessName(pair, true));
@@ -408,8 +424,11 @@ MicroIndIdx::completeAcc(PacketPtr pkt, ExecContext *xc,
             mnemonic, (unsigned long long)index_value,
             (unsigned long long)alias_val);
 
-    // Write index[i] to its carrier, and the alias to Ureg0 when uop1
-    // cannot form it from Ra.
+    // The register form writes nothing (the packet carried the value
+    // the program supplied). Otherwise write index[i] to its carrier, and
+    // the alias to Ureg0 when uop1 cannot form it from Ra.
+    if (carriers.indexInReg)
+        return NoFault;
     xc->setRegOperand(this, 0, index_value);
     if (carriers.aliasInUreg0)
         xc->setRegOperand(this, 1, alias_val);
@@ -426,6 +445,8 @@ MicroIndIdx::generateDisassembly(
     printIntReg(ss, destIdx);
     ccprintf(ss, ", #%u, ", pair);
     printIntReg(ss, indexReg);
+    if (carriers.indexInReg)
+        ss << " (index in reg)";
     return ss.str();
 }
 
@@ -452,14 +473,15 @@ uop1Alias(ExecContext *xc, const StaticInst *si, const IndCarriers &c,
 MicroLdIndVal::MicroLdIndVal(const char *mnem, ExtMachInst machInst,
                              RegIndex _destData, unsigned _pair,
                              unsigned _sizeData, bool _isFp,
-                             RegIndex _destIdx, RegIndex _indexReg)
+                             RegIndex _destIdx, RegIndex _indexReg,
+                             bool index_in_reg)
     : MightBeMicro64(mnem, machInst, MemReadOp),
       destData(_destData), pair(_pair),
       sizeData(_sizeData),
       shiftAmtData(ceilLog2(_sizeData)),
       memAccessFlags(MMU::AllowUnaligned),
       isFp(_isFp),
-      carriers(_destIdx, _indexReg)
+      carriers(_destIdx, _indexReg, index_in_reg)
 {
     flags[IsLoad] = true;
     flags[IsMicroop] = true;
@@ -597,14 +619,15 @@ MicroLdIndVal::generateDisassembly(
 MicroStIndVal::MicroStIndVal(const char *mnem, ExtMachInst machInst,
                              RegIndex _srcData, unsigned _pair,
                              unsigned _sizeData, bool _isFp,
-                             RegIndex _destIdx, RegIndex _indexReg)
+                             RegIndex _destIdx, RegIndex _indexReg,
+                             bool index_in_reg)
     : MightBeMicro64(mnem, machInst, MemWriteOp),
       srcData(_srcData), pair(_pair),
       sizeData(_sizeData),
       shiftAmtData(ceilLog2(_sizeData)),
       memAccessFlags(MMU::AllowUnaligned),
       isFp(_isFp),
-      carriers(_destIdx, _indexReg)
+      carriers(_destIdx, _indexReg, index_in_reg)
 {
     flags[IsStore] = true;
     flags[IsMicroop] = true;

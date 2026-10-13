@@ -1250,6 +1250,13 @@ class DependentAccessGen: public Extension<Request, DependentAccessGen>
     RequestorID _requestorId;
     size_t _indexSize;
     std::vector<DepDescriptor> _descriptors;
+    /** index[i], when the core already has it: the register form of
+     *  ldind/stind supplies it, and the LSQ's load-to-load forwarding
+     *  finds it in an older uop0. Such a uop0 only delivers its
+     *  descriptor (NotifyIndIdxReq); the Sequencer pairs its latency
+     *  sample from this value. */
+    bool _hasIndexValue = false;
+    uint64_t _indexValue = 0;
 
   public:
     DependentAccessGen():
@@ -1261,6 +1268,14 @@ class DependentAccessGen: public Extension<Request, DependentAccessGen>
         Extension<Request, DependentAccessGen>(),
         _requestorId(0), _indexSize(index_size)
     {}
+
+    void setIndexValue(uint64_t value)
+    {
+        _hasIndexValue = true;
+        _indexValue = value;
+    }
+    bool hasIndexValue() const { return _hasIndexValue; }
+    uint64_t indexValue() const { return _indexValue; }
 
     virtual ~DependentAccessGen() = default;
 

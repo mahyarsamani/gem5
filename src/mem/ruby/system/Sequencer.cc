@@ -1298,6 +1298,15 @@ Sequencer::makeRequest(PacketPtr pkt)
     if (pkt->cmd == MemCmd::NotifyIndIdxReq) {
         auto dag = pkt->req->getExtension<DependentAccessGen>();
         assert(dag);
+        // The core has index[i] (forwarded, or the register form): the
+        // value access that follows is paired with this issue for the
+        // end-to-end latency, as hovRecordLdindIndex does on a data
+        // return.
+        if (dag->hasIndexValue() && !dag->isMerged() &&
+            dag->hasTranslator()) {
+            m_hovLdindPending[dag->genAddress(dag->indexValue())]
+                .push_back(curCycle());
+        }
         deliverDAG(makeLineAddress(pkt->getAddr()), *dag);
         ruby_hit_callback(pkt);
         return RequestStatus_Issued;

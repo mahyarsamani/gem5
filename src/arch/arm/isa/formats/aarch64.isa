@@ -1309,9 +1309,11 @@ namespace Aarch64
         const bool is_store = bits(machInst, 22);
         const bool idx64 = bits(machInst, 21);
         const unsigned size = bits(machInst, 31, 30);
+        // Bit 23 clear: the register form, index[i] supplied in Rt2 (the
+        // uop0 reads no memory and only delivers its descriptor).
+        const bool index_in_reg = bits(machInst, 23) == 0;
 
-        if (bits(machInst, 23) == 0 || bits(machInst, 15) ||
-            (is_fp && size < 2))
+        if (bits(machInst, 15) || (is_fp && size < 2))
             return new Unknown64(machInst);
         // An FP Rt is a vector register number, never Zero.
         if (is_fp)
@@ -1321,48 +1323,64 @@ namespace Aarch64
             if (!idx64) {
                 switch (size) {
                   case 0:
-                    return new LDINDB_W(machInst, rt, rt2, pair, ra, is_fp);
+                    return new LDINDB_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                   case 1:
-                    return new LDINDH_W(machInst, rt, rt2, pair, ra, is_fp);
+                    return new LDINDH_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                   case 2:
-                    return new LDINDW_W(machInst, rt, rt2, pair, ra, is_fp);
+                    return new LDINDW_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                   case 3:
-                    return new LDINDX_W(machInst, rt, rt2, pair, ra, is_fp);
+                    return new LDINDX_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                 }
             } else {
                 switch (size) {
                   case 0:
-                    return new LDINDB_X(machInst, rt, rt2, pair, ra, is_fp);
+                    return new LDINDB_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                   case 1:
-                    return new LDINDH_X(machInst, rt, rt2, pair, ra, is_fp);
+                    return new LDINDH_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                   case 2:
-                    return new LDINDW_X(machInst, rt, rt2, pair, ra, is_fp);
+                    return new LDINDW_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                   case 3:
-                    return new LDINDX_X(machInst, rt, rt2, pair, ra, is_fp);
+                    return new LDINDX_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                 }
             }
         } else {
             if (!idx64) {
                 switch (size) {
                   case 0:
-                    return new STINDB_W(machInst, rt, rt2, pair, ra, is_fp);
+                    return new STINDB_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                   case 1:
-                    return new STINDH_W(machInst, rt, rt2, pair, ra, is_fp);
+                    return new STINDH_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                   case 2:
-                    return new STINDW_W(machInst, rt, rt2, pair, ra, is_fp);
+                    return new STINDW_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                   case 3:
-                    return new STINDX_W(machInst, rt, rt2, pair, ra, is_fp);
+                    return new STINDX_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                 }
             } else {
                 switch (size) {
                   case 0:
-                    return new STINDB_X(machInst, rt, rt2, pair, ra, is_fp);
+                    return new STINDB_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                   case 1:
-                    return new STINDH_X(machInst, rt, rt2, pair, ra, is_fp);
+                    return new STINDH_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                   case 2:
-                    return new STINDW_X(machInst, rt, rt2, pair, ra, is_fp);
+                    return new STINDW_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                   case 3:
-                    return new STINDX_X(machInst, rt, rt2, pair, ra, is_fp);
+                    return new STINDX_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
                 }
             }
         }
