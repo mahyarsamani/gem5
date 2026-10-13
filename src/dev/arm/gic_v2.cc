@@ -40,7 +40,9 @@
 
 #include "dev/arm/gic_v2.hh"
 
+#include "base/bitfield.hh"
 #include "base/compiler.hh"
+#include "base/logging.hh"
 #include "base/trace.hh"
 #include "cpu/base.hh"
 #include "debug/Checkpoint.hh"
@@ -63,6 +65,8 @@ const AddrRange GicV2::GICD_ICACTIVER (0x380, 0x400);
 const AddrRange GicV2::GICD_IPRIORITYR(0x400, 0x800);
 const AddrRange GicV2::GICD_ITARGETSR (0x800, 0xc00);
 const AddrRange GicV2::GICD_ICFGR     (0xc00, 0xd00);
+const AddrRange GicV2::GICD_CPENDSGIR (0xf10, 0xf20);
+const AddrRange GicV2::GICD_SPENDSGIR (0xf20, 0xf30);
 
 void
 GicV2Registers::copyDistRegister(GicV2Registers* from,
@@ -250,14 +254,18 @@ GicV2::readDistributor(ContextID ctx, Addr daddr, size_t resp_sz)
         uint32_t ix = (daddr - GICD_ISPENDR.start()) >> 2;
         assert(ix < 32);
         DPRINTF(GIC, "gic distributor read GICD_ISPENDR%d (%#x)\n", ix, daddr);
-        return getPendingInt(ctx, ix);
+        // Register 0 shows the PPIs pending on this CPU (cpuPpiPending);
+        // SGIs show in GICD_SPENDSGIR only, which carries their sources.
+        return getPendingInt(ctx, ix) |
+            (ix == 0 ? cpuPpiPending[ctx] << SGI_MAX : 0);
     }
 
     if (GICD_ICPENDR.contains(daddr)) {
         uint32_t ix = (daddr - GICD_ICPENDR.start()) >> 2;
         assert(ix < 32);
         DPRINTF(GIC, "gic distributor read GICD_ICPENDR%d (%#x)\n", ix, daddr);
-        return getPendingInt(ctx, ix);
+        return getPendingInt(ctx, ix) |
+            (ix == 0 ? cpuPpiPending[ctx] << SGI_MAX : 0);
     }
 
     if (GICD_ISACTIVER.contains(daddr)) {
@@ -265,7 +273,10 @@ GicV2::readDistributor(ContextID ctx, Addr daddr, size_t resp_sz)
         assert(ix < 32);
         DPRINTF(GIC, "gic distributor read GICD_ISACTIVER%d (%#x)\n",
                 ix, daddr);
-        return getActiveInt(ctx, ix);
+        // Register 0 shows the SGIs and PPIs active on this CPU, which are
+        // kept in cpuSgiActive and cpuPpiActive, never in activeInt.
+        return getActiveInt(ctx, ix) | (ix == 0 ?
+            sgiActiveBits(ctx) | cpuPpiActive[ctx] << SGI_MAX : 0);
     }
 
     if (GICD_ICACTIVER.contains(daddr)) {
@@ -273,7 +284,8 @@ GicV2::readDistributor(ContextID ctx, Addr daddr, size_t resp_sz)
         assert(ix < 32);
         DPRINTF(GIC, "gic distributor read GICD_ICACTIVER%d (%#x)\n",
                 ix, daddr);
-        return getActiveInt(ctx, ix);
+        return getActiveInt(ctx, ix) | (ix == 0 ?
+            sgiActiveBits(ctx) | cpuPpiActive[ctx] << SGI_MAX : 0);
     }
 
     if (GICD_IPRIORITYR.contains(daddr)) {
@@ -321,6 +333,22 @@ GicV2::readDistributor(ContextID ctx, Addr daddr, size_t resp_sz)
         uint32_t ix = (daddr - GICD_ICFGR.start()) >> 2;
         DPRINTF(GIC, "gic distributor read GICD_ICFGR%d (%#x)\n", ix, daddr);
         return getIntConfig(ctx, ix);
+    }
+
+    if (GICD_CPENDSGIR.contains(daddr) || GICD_SPENDSGIR.contains(daddr)) {
+        // Both ranges read the same state: byte s of the range is SGI s,
+        // bit m of it that the SGI is pending from CPU m.
+        const bool set = GICD_SPENDSGIR.contains(daddr);
+        const int sgi =
+            daddr - (set ? GICD_SPENDSGIR : GICD_CPENDSGIR).start();
+        DPRINTF(GIC, "gic distributor read GICD_%cPENDSGIR%d (%#x)\n",
+                set ? 'S' : 'C', sgi >> 2, daddr);
+        const int n = resp_sz;
+        assert(sgi + n <= SGI_MAX);
+        uint32_t sources = 0;
+        for (int i = 0; i < n; ++i)
+            sources |= sgiPendingSources(ctx, sgi + i) << (8 * i);
+        return sources;
     }
 
     switch(daddr) {
@@ -538,9 +566,15 @@ GicV2::writeDistributor(ContextID ctx, Addr daddr, uint32_t data,
         DPRINTF(GIC,
             "gic distributor write GICD_ISPENDR%d (%#x) size %#x value %#x \n",
             ix, daddr, data_sz, data);
-        auto mask = data;
-        if (ix == 0) mask &= SGI_MASK; // Don't allow SGIs to be changed
-        getPendingInt(ctx, ix) |= mask;
+        if (ix == 0) {
+            // Banked word 0 of pendingInt is never used: an SGI cannot be
+            // made pending here (it would have no source; GICD_SPENDSGIR),
+            // and a PPI is tracked in cpuPpiPending, where its device
+            // raises and clears it.
+            cpuPpiPending[ctx] |= bits(data, 31, SGI_MAX);
+        } else {
+            getPendingInt(ctx, ix) |= data;
+        }
         updateIntState(ix);
         return;
     }
@@ -550,9 +584,11 @@ GicV2::writeDistributor(ContextID ctx, Addr daddr, uint32_t data,
         DPRINTF(GIC, "gic distributor write GICD_ICPENDR%d (%#x) "
                 "size %#x value %#x \n",
                 ix, daddr, data_sz, data);
-        auto mask = data;
-        if (ix == 0) mask &= SGI_MASK; // Don't allow SGIs to be changed
-        getPendingInt(ctx, ix) &= ~mask;
+        if (ix == 0) {
+            cpuPpiPending[ctx] &= ~bits(data, 31, SGI_MAX);
+        } else {
+            getPendingInt(ctx, ix) &= ~data;
+        }
         updateIntState(ix);
         return;
     }
@@ -562,7 +598,19 @@ GicV2::writeDistributor(ContextID ctx, Addr daddr, uint32_t data,
         DPRINTF(GIC, "gic distributor write GICD_ISACTIVER%d (%#x) "
                 "size %#x value %#x \n",
                 ix, daddr, data_sz, data);
-        getActiveInt(ctx, ix) |= data;
+        if (ix == 0) {
+            // Banked word 0 of activeInt is never used: SGIs are tracked
+            // in cpuSgiActive (the source of one set here, e.g. copied
+            // from a KVM GIC, is not known: see setSgiActive) and PPIs in
+            // cpuPpiActive, where IAR and EOIR look for them.
+            for (int sgi = 0; sgi < SGI_MAX; ++sgi)
+                if (bits(data, sgi))
+                    setSgiActive(ctx, sgi);
+            cpuPpiActive[ctx] |= bits(data, 31, SGI_MAX);
+            updateRunPri();
+        } else {
+            getActiveInt(ctx, ix) |= data;
+        }
         return;
     }
 
@@ -571,7 +619,15 @@ GicV2::writeDistributor(ContextID ctx, Addr daddr, uint32_t data,
         DPRINTF(GIC, "gic distributor write GICD_ICACTIVER%d (%#x) "
                 "size %#x value %#x \n",
                 ix, daddr, data_sz, data);
-        getActiveInt(ctx, ix) &= ~data;
+        if (ix == 0) {
+            for (int sgi = 0; sgi < SGI_MAX; ++sgi)
+                if (bits(data, sgi))
+                    clearSgiActive(ctx, sgi);
+            cpuPpiActive[ctx] &= ~bits(data, 31, SGI_MAX);
+            updateRunPri();
+        } else {
+            getActiveInt(ctx, ix) &= ~data;
+        }
         return;
     }
 
@@ -644,6 +700,28 @@ GicV2::writeDistributor(ContextID ctx, Addr daddr, uint32_t data,
         return;
     }
 
+    if (GICD_CPENDSGIR.contains(daddr) || GICD_SPENDSGIR.contains(daddr)) {
+        // Byte s of the range is SGI s; bit m of it names CPU m as a
+        // source to add (SPENDSGIR) or remove (CPENDSGIR).
+        const bool set = GICD_SPENDSGIR.contains(daddr);
+        const int sgi =
+            daddr - (set ? GICD_SPENDSGIR : GICD_CPENDSGIR).start();
+        DPRINTF(GIC, "gic distributor write GICD_%cPENDSGIR%d (%#x) "
+                "size %#x value %#x\n",
+                set ? 'S' : 'C', sgi >> 2, daddr, data_sz, data);
+        const int n = data_sz;
+        assert(sgi + n <= SGI_MAX);
+        for (int i = 0; i < n; ++i) {
+            const uint8_t sources = bits(data, 8 * i + 7, 8 * i);
+            if (set)
+                setSgiPending(ctx, sgi + i, sources);
+            else
+                clearSgiPending(ctx, sgi + i, sources);
+        }
+        updateIntState(-1);
+        return;
+    }
+
     switch(daddr) {
       case GICD_CTLR:
         enabled = data;
@@ -713,15 +791,26 @@ GicV2::writeCpu(ContextID ctx, Addr daddr, uint32_t data)
                 ctx, daddr, data);
         const IAR iar = data;
         if (iar.ack_id < SGI_MAX) {
+            const int sgi = iar.ack_id;
             // Clear out the bit that corresponds to the cleared int
-            uint64_t clr_int = 1ULL << (ctx + 8 * iar.cpu_id);
-            if (!(cpuSgiActive[iar.ack_id] & clr_int) &&
-                !(cpuSgiActiveExt[ctx] & (1 << iar.ack_id)))
+            const uint64_t clr_int = 1ULL << (ctx + 8 * iar.cpu_id);
+            if (gem5ExtensionsEnabled) {
+                panic_if(!bits(cpuSgiActiveExt[ctx], sgi),
+                         "Done handling a SGI that isn't active?\n");
+                cpuSgiActiveExt[ctx] &= ~(1 << sgi);
+            } else if (cpuSgiActive[sgi] & clr_int) {
+                cpuSgiActive[sgi] &= ~clr_int;
+            } else if (cpuSgiActive[sgi] & genSwiMask(ctx)) {
+                // The source of an active SGI is not architected state:
+                // one acknowledged on a KVM GIC and finished here was
+                // copied in as active from CPU 0 (GICD_ISACTIVER0), while
+                // the IAR the guest holds names the real source. Finish
+                // the instance that is active on this CPU.
+                const uint64_t mine = cpuSgiActive[sgi] & genSwiMask(ctx);
+                cpuSgiActive[sgi] &= ~(mine & -mine);
+            } else {
                 panic("Done handling a SGI that isn't active?\n");
-            if (gem5ExtensionsEnabled)
-                cpuSgiActiveExt[ctx] &= ~(1 << iar.ack_id);
-            else
-                cpuSgiActive[iar.ack_id] &= ~clr_int;
+            }
         } else if (iar.ack_id < (SGI_MAX + PPI_MAX) ) {
             uint32_t int_num = 1 << (iar.ack_id - SGI_MAX);
             if (!(cpuPpiActive[ctx] & int_num))
@@ -841,6 +930,76 @@ GicV2::genSwiMask(int cpu)
 {
     panic_if(cpu > sys->threads.size(), "Invalid CPU ID.");
     return 0x0101010101010101ULL << cpu;
+}
+
+uint8_t
+GicV2::sgiPendingSources(ContextID ctx, int sgi)
+{
+    if (gem5ExtensionsEnabled)
+        return bits(cpuSgiPendingExt[ctx], sgi) ? 1 : 0;
+    uint8_t sources = 0;
+    for (int src = 0; src < 8; ++src)
+        if (bits(cpuSgiPending[sgi], ctx + 8 * src))
+            sources |= 1 << src;
+    return sources;
+}
+
+void
+GicV2::setSgiPending(ContextID ctx, int sgi, uint8_t sources)
+{
+    if (!sources)
+        return;
+    if (gem5ExtensionsEnabled) {
+        cpuSgiPendingExt[ctx] |= 1 << sgi;
+        return;
+    }
+    for (int src = 0; src < 8; ++src)
+        if (bits(sources, src))
+            cpuSgiPending[sgi] |= 1ULL << (ctx + 8 * src);
+}
+
+void
+GicV2::clearSgiPending(ContextID ctx, int sgi, uint8_t sources)
+{
+    if (!sources)
+        return;
+    if (gem5ExtensionsEnabled) {
+        cpuSgiPendingExt[ctx] &= ~(1 << sgi);
+        return;
+    }
+    for (int src = 0; src < 8; ++src)
+        if (bits(sources, src))
+            cpuSgiPending[sgi] &= ~(1ULL << (ctx + 8 * src));
+}
+
+uint32_t
+GicV2::sgiActiveBits(ContextID ctx)
+{
+    if (gem5ExtensionsEnabled)
+        return cpuSgiActiveExt[ctx] & ~SGI_MASK;
+    uint32_t active = 0;
+    for (int sgi = 0; sgi < SGI_MAX; ++sgi)
+        if (cpuSgiActive[sgi] & genSwiMask(ctx))
+            active |= 1 << sgi;
+    return active;
+}
+
+void
+GicV2::setSgiActive(ContextID ctx, int sgi)
+{
+    if (gem5ExtensionsEnabled)
+        cpuSgiActiveExt[ctx] |= 1 << sgi;
+    else
+        cpuSgiActive[sgi] |= 1ULL << ctx;
+}
+
+void
+GicV2::clearSgiActive(ContextID ctx, int sgi)
+{
+    if (gem5ExtensionsEnabled)
+        cpuSgiActiveExt[ctx] &= ~(1 << sgi);
+    else
+        cpuSgiActive[sgi] &= ~genSwiMask(ctx);
 }
 
 uint8_t
@@ -1158,6 +1317,15 @@ GicV2::copyGicState(GicV2Registers* from, GicV2Registers* to)
     clearDistRange(to, clear, size);
     copyDistRange(from, to, set, size);
 
+    // Copy pending SGIs with their sources ([CS]PENDSGIRn; per-CPU banked).
+    // I[CS]PENDR0 cannot carry them: this model ignores SGI bits written
+    // there, and a KVM GIC, given no source, takes the target CPU for it.
+    set   = GICD_SPENDSGIR.start();
+    clear = GICD_CPENDSGIR.start();
+    size  = SGI_MAX;
+    clearBankedDistRange(sys, to, clear, size);
+    copyBankedDistRange(sys, from, to, set, size);
+
     // Copy active interrupts (I[CS]ACTIVERn; R0 is per-CPU banked)
     set   = GICD_ISACTIVER.start();
     clear = GICD_ICACTIVER.start();
@@ -1186,6 +1354,22 @@ GicV2::copyGicState(GicV2Registers* from, GicV2Registers* to)
     set = GICD_ICFGR.start();
     size = itLines / 4;
     copyDistRange(from, to, set, size);
+
+    if (to == static_cast<GicV2Registers*>(this)) {
+        // State copied in from a KVM GIC: say what it carried, since an
+        // SGI lost here is a lost IPI and a PPI lost is a lost timer tick.
+        int sgi_pending = 0, sgi_active = 0, ppi_pending = 0, ppi_active = 0;
+        for (int ctx = 0; ctx < sys->threads.size(); ++ctx) {
+            for (int sgi = 0; sgi < SGI_MAX; ++sgi)
+                sgi_pending += popCount(sgiPendingSources(ctx, sgi));
+            sgi_active += popCount(sgiActiveBits(ctx));
+            ppi_pending += popCount(cpuPpiPending[ctx]);
+            ppi_active += popCount(cpuPpiActive[ctx]);
+        }
+        inform("%s: carried from KVM: %d pending and %d active SGI(s), "
+               "%d pending and %d active PPI(s)\n", name(), sgi_pending,
+               sgi_active, ppi_pending, ppi_active);
+    }
 }
 
 void
@@ -1280,6 +1464,29 @@ GicV2::unserialize(CheckpointIn &cp)
             getBankedRegs(i).unserialize(cp);
         }
     }
+
+    // A checkpoint taken on KVM before SGIs and PPIs were kept out of the
+    // banked word 0 holds, in pendingInt and activeInt, what the copy from
+    // the KVM GIC wrote there (GICD_I[CS]PENDR0, GICD_I[CS]ACTIVER0): move
+    // it to where IAR, EOIR, updateIntState and the devices look for it.
+    int moved = 0;
+    for (uint32_t ctx = 0; ctx < bankedRegs.size(); ++ctx) {
+        if (!bankedRegs[ctx])
+            continue;
+        BankedRegs &regs = *bankedRegs[ctx];
+        moved += popCount(regs.pendingInt) + popCount(regs.activeInt);
+        cpuPpiPending[ctx] |= bits(regs.pendingInt, 31, SGI_MAX);
+        for (int sgi = 0; sgi < SGI_MAX; ++sgi)
+            if (bits(regs.activeInt, sgi))
+                setSgiActive(ctx, sgi);
+        cpuPpiActive[ctx] |= bits(regs.activeInt, 31, SGI_MAX);
+        regs.pendingInt = 0;
+        regs.activeInt = 0;
+    }
+    if (moved)
+        warn("%s: %d pending or active SGI/PPI bit(s) of a checkpoint "
+             "taken before 2026-10-13 moved out of the banked word 0\n",
+             name(), moved);
 }
 
 void
