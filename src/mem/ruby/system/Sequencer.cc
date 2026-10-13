@@ -112,6 +112,22 @@ Sequencer::Sequencer(const Params &p)
     hovLdindStale = new statistics::Scalar(this, "hovLdindStale",
         statistics::units::Count::get(),
         "LDIND index fetches dropped without a value (e.g. squashed)");
+    m_hovCheckPeriod = p.hov_check_period;
+    hovValueChecks = new statistics::Scalar(this, "hovValueChecks",
+        statistics::units::Count::get(),
+        "LDIND values compared with a functional read");
+    hovValueMismatches = new statistics::Scalar(this, "hovValueMismatches",
+        statistics::units::Count::get(),
+        "LDIND values that differ from a functional read");
+    hovIndexChecks = new statistics::Scalar(this, "hovIndexChecks",
+        statistics::units::Count::get(),
+        "Core-supplied index values compared with a functional read");
+    hovIndexMismatches = new statistics::Scalar(this, "hovIndexMismatches",
+        statistics::units::Count::get(),
+        "Core-supplied index values that differ from a functional read");
+    hovChecksUnchecked = new statistics::Scalar(this, "hovChecksUnchecked",
+        statistics::units::Count::get(),
+        "hov checks skipped: no complete copy for the functional read");
     // FFUTSYM
 
     m_outstandReqHist.init(10);
@@ -1085,6 +1101,7 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
         } else if (type == RubyRequestType_LD &&
                    pkt->req->getExtension<IndirectAccessAlias>()) {
             hovSampleLdindValue(srequest);          // uop1: value arrived
+            hovCheckValue(pkt, data);
         }
     }
     // FFUTSYM
@@ -1145,6 +1162,70 @@ Sequencer::hovSampleLdindValue(SequencerRequest *srequest)
     }
     if (pending.empty()) {
         m_hovLdindPending.erase(it);
+    }
+}
+
+bool
+Sequencer::hovFunctionalRead(Addr paddr, unsigned size, uint8_t *buf)
+{
+    RequestPtr req = std::make_shared<Request>(
+        paddr, size, 0, m_controller->getRequestorId());
+    Packet fpkt(req, MemCmd::ReadReq);
+    fpkt.dataStatic(buf);
+    return m_ruby_system->functionalRead(&fpkt);
+}
+
+void
+Sequencer::hovCheckValue(PacketPtr pkt, const DataBlock &data)
+{
+    if (m_hovCheckPeriod == 0 || ++m_hovValueSeen % m_hovCheckPeriod)
+        return;
+    unsigned size = pkt->getSize();
+    uint8_t expected[sizeof(uint64_t)];
+    assert(size <= sizeof(expected));
+    if (!hovFunctionalRead(pkt->getAddr(), size, expected)) {
+        (*hovChecksUnchecked)++;
+        return;
+    }
+    (*hovValueChecks)++;
+    const uint8_t *got = data.getData(getOffset(pkt->getAddr()), size);
+    if (std::memcmp(got, expected, size) != 0) {
+        (*hovValueMismatches)++;
+        uint64_t got_v = 0, expected_v = 0;
+        std::memcpy(&got_v, got, size);
+        std::memcpy(&expected_v, expected, size);
+        warn_once("%s: LDIND value mismatch at %#x: got %#x, memory "
+                  "holds %#x (hovValueMismatches counts them all).\n",
+                  name(), pkt->getAddr(), got_v, expected_v);
+        DPRINTF(IndirectAccess, "LDIND value mismatch at %#x: got %#x, "
+                "memory holds %#x\n", pkt->getAddr(), got_v, expected_v);
+    }
+}
+
+void
+Sequencer::hovCheckIndex(PacketPtr pkt, const DependentAccessGen &dag)
+{
+    if (m_hovCheckPeriod == 0 || ++m_hovIndexSeen % m_hovCheckPeriod)
+        return;
+    unsigned size = pkt->getSize();
+    uint8_t buf[sizeof(uint64_t)];
+    assert(size <= sizeof(buf));
+    if (!hovFunctionalRead(pkt->getAddr(), size, buf)) {
+        (*hovChecksUnchecked)++;
+        return;
+    }
+    (*hovIndexChecks)++;
+    uint64_t expected = 0;
+    std::memcpy(&expected, buf, size);
+    if (dag.indexValue() != expected) {
+        (*hovIndexMismatches)++;
+        warn_once("%s: index mismatch at %#x: the core supplied %#x, "
+                  "memory holds %#x (hovIndexMismatches counts them "
+                  "all).\n", name(), pkt->getAddr(), dag.indexValue(),
+                  expected);
+        DPRINTF(IndirectAccess, "Index mismatch at %#x: the core supplied "
+                "%#x, memory holds %#x\n", pkt->getAddr(), dag.indexValue(),
+                expected);
     }
 }
 // FFUTSYM
@@ -1313,6 +1394,9 @@ Sequencer::makeRequest(PacketPtr pkt)
             dag->hasTranslator()) {
             m_hovLdindPending[dag->genAddress(dag->indexValue())]
                 .push_back(curCycle());
+        }
+        if (dag->hasIndexValue()) {
+            hovCheckIndex(pkt, *dag);
         }
         deliverDAG(makeLineAddress(pkt->getAddr()), *dag);
         ruby_hit_callback(pkt);

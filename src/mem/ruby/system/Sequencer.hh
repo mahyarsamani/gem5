@@ -345,6 +345,23 @@ class Sequencer : public RubyPort
     statistics::Distribution *hovLdindE2ELatency;
     statistics::Scalar *hovLdindUnmatched;
     statistics::Scalar *hovLdindStale;
+
+    // Functional checks of hov values (hov_check_period): every Nth
+    // LDIND value and every Nth index value the core supplied is compared
+    // with a functional read of memory. A read that finds no complete
+    // copy of the bytes counts as unchecked.
+    unsigned m_hovCheckPeriod;
+    uint64_t m_hovValueSeen = 0;
+    uint64_t m_hovIndexSeen = 0;
+    // True (and `buf` filled) if a functional read found every byte.
+    bool hovFunctionalRead(Addr paddr, unsigned size, uint8_t *buf);
+    void hovCheckValue(PacketPtr pkt, const DataBlock &data);
+    void hovCheckIndex(PacketPtr pkt, const DependentAccessGen &dag);
+    statistics::Scalar *hovValueChecks;
+    statistics::Scalar *hovValueMismatches;
+    statistics::Scalar *hovIndexChecks;
+    statistics::Scalar *hovIndexMismatches;
+    statistics::Scalar *hovChecksUnchecked;
     // FFUTSYM
 
     SequencerType m_sequencer_type;

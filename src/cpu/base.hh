@@ -43,6 +43,8 @@
 #define __CPU_BASE_HH__
 
 #include <memory>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "arch/generic/interrupts.hh"
@@ -842,6 +844,16 @@ class BaseCPU : public ClockedObject
         statistics::Formula numArchMemRefs;
         /* Fraction of committed memory references that are LDIND/STIND */
         statistics::Formula hovIndirectFrac;
+        /* Committed loads and stores per access name (labelled ones only:
+         * the insights labels, hov uops' array names), created on first
+         * use: committedLoads.<name>, committedStores.<name>. The same
+         * array names in ref and hov make them a common measure of work
+         * done in a fixed time window. */
+        std::unordered_map<std::string, statistics::Scalar *>
+            committedLoads;
+        std::unordered_map<std::string, statistics::Scalar *>
+            committedStores;
+        void countNamedAccess(const std::string &name, bool is_load);
         // FFUTSYM
 
         /* Number of instructions committed by type (OpClass) */

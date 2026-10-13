@@ -120,6 +120,14 @@ class RubySequencer(RubyPort):
         "before deadlock/livelock declared",
     )
     garnet_standalone = Param.Bool(False, "")
+    # MYSTUFF
+    hov_check_period = Param.Unsigned(
+        0,
+        "Check every Nth LDIND value (uop1) and every Nth index value the "
+        "core supplied (forwarded or register-form uop0) against a "
+        "functional read of memory; 0 turns the checks off",
+    )
+    # FFUTSYM
     # id used by protocols that support multiple sequencers per controller
     # 99 is the dummy default value
     coreid = Param.Int(99, "CorePair core id")
