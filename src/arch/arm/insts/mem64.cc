@@ -289,7 +289,8 @@ MicroIndIdx::MicroIndIdx(const char *mnem, ExtMachInst machInst,
       shiftAmtIndex(ceilLog2(_sizeIndex)),
       shiftAmtData(ceilLog2(_sizeData)),
       memAccessFlags(MMU::AllowUnaligned),
-      _isLoad(isLoad)
+      _isLoad(isLoad),
+      carriers(_destIdx, _indexReg)
 {
     flags[IsLoad] = true;
     flags[IsMicroop] = true;
@@ -310,14 +311,14 @@ MicroIndIdx::MicroIndIdx(const char *mnem, ExtMachInst machInst,
     // registers, read at execute; a bind's msr serialises before us).
     setSrcRegIdx(_numSrcRegs++, intRegClass[_indexReg]);
 
-    // Dests: Ureg1 receives index[i] and Ureg0 the alias, for uop1;
-    // Rt2 receives index[i] too (Zero when the instruction discards it).
-    setDestRegIdx(_numDestRegs++, int_reg::Ureg1);
+    // Dests: index[i]'s one carrier (Rt2, or Ureg1 when Rt2 is XZR), and
+    // the alias in Ureg0 only when this uop overwrites Ra (IndCarriers).
+    setDestRegIdx(_numDestRegs++, carriers.index);
     _numTypedDestRegs[IntRegClass]++;
-    setDestRegIdx(_numDestRegs++, int_reg::Ureg0);
-    _numTypedDestRegs[IntRegClass]++;
-    setDestRegIdx(_numDestRegs++, intRegClass[_destIdx]);
-    _numTypedDestRegs[IntRegClass]++;
+    if (carriers.aliasInUreg0) {
+        setDestRegIdx(_numDestRegs++, int_reg::Ureg0);
+        _numTypedDestRegs[IntRegClass]++;
+    }
 }
 
 Addr
@@ -401,11 +402,11 @@ MicroIndIdx::completeAcc(PacketPtr pkt, ExecContext *xc,
             mnemonic, (unsigned long long)index_value,
             (unsigned long long)alias_val);
 
-    // Write index[i] to Ureg1 and the alias to Ureg0 (for uop1), and
-    // index[i] to Rt2 (a write to Zero is dropped).
+    // Write index[i] to its carrier, and the alias to Ureg0 when uop1
+    // cannot form it from Ra.
     xc->setRegOperand(this, 0, index_value);
-    xc->setRegOperand(this, 1, alias_val);
-    xc->setRegOperand(this, 2, index_value);
+    if (carriers.aliasInUreg0)
+        xc->setRegOperand(this, 1, alias_val);
     return NoFault;
 }
 
@@ -426,15 +427,33 @@ MicroIndIdx::generateDisassembly(
 // MicroLdIndVal — uop1 for ldind: load data element from the data array
 // =========================================================================
 
+/**
+ * The alias in uop1: read from Ureg0, or formed from i and the entry's
+ * base_alias exactly as uop0 forms it (both read the same Ra mapping, and
+ * a bind's msr serialises, so both read the same entry).
+ */
+static Addr
+uop1Alias(ExecContext *xc, const StaticInst *si, const IndCarriers &c,
+          unsigned pair, uint64_t shift_amt_data)
+{
+    uint64_t v = xc->getRegOperand(si, 1); // Ureg0 or Ra
+    if (c.aliasInUreg0)
+        return v;
+    return xc->readMiscReg(hovPairReg(pair, HOV_PAIR_ALIAS)) +
+           (v << shift_amt_data);
+}
+
 MicroLdIndVal::MicroLdIndVal(const char *mnem, ExtMachInst machInst,
                              RegIndex _destData, unsigned _pair,
-                             unsigned _sizeData, bool _isFp)
+                             unsigned _sizeData, bool _isFp,
+                             RegIndex _destIdx, RegIndex _indexReg)
     : MightBeMicro64(mnem, machInst, MemReadOp),
       destData(_destData), pair(_pair),
       sizeData(_sizeData),
       shiftAmtData(ceilLog2(_sizeData)),
       memAccessFlags(MMU::AllowUnaligned),
-      isFp(_isFp)
+      isFp(_isFp),
+      carriers(_destIdx, _indexReg)
 {
     flags[IsLoad] = true;
     flags[IsMicroop] = true;
@@ -451,10 +470,11 @@ MicroLdIndVal::MicroLdIndVal(const char *mnem, ExtMachInst machInst,
     _numSrcRegs = 0;
     _numDestRegs = 0;
 
-    // Sources: Ureg1 (index[i]) and Ureg0 (alias), both written by uop0;
-    // base_data comes from the side-car entry.
-    setSrcRegIdx(_numSrcRegs++, int_reg::Ureg1);
-    setSrcRegIdx(_numSrcRegs++, int_reg::Ureg0);
+    // Sources: index[i]'s carrier, written by uop0, then Ureg0 (the alias)
+    // or Ra (i, to form the alias); base_data and base_alias come from
+    // the side-car entry.
+    setSrcRegIdx(_numSrcRegs++, carriers.index);
+    setSrcRegIdx(_numSrcRegs++, carriers.aliasSource());
 
     // Dest: destData (Rt), an X register or the FP/SIMD register
     if (isFp) {
@@ -476,8 +496,9 @@ Fault
 MicroLdIndVal::initiateAcc(ExecContext *xc,
                            trace::InstRecord *traceData) const
 {
-    uint64_t index_value   = xc->getRegOperand(this, 0); // Ureg1
-    uint64_t alias_val     = xc->getRegOperand(this, 1); // Ureg0
+    uint64_t index_value   = xc->getRegOperand(this, 0); // carrier
+    uint64_t alias_val     =
+        uop1Alias(xc, this, carriers, pair, shiftAmtData);
     uint64_t base_data_val = xc->readMiscReg(hovPairReg(pair, HOV_PAIR_DATA));
 
     Addr EA = base_data_val + (index_value << shiftAmtData);
@@ -568,13 +589,15 @@ MicroLdIndVal::generateDisassembly(
 
 MicroStIndVal::MicroStIndVal(const char *mnem, ExtMachInst machInst,
                              RegIndex _srcData, unsigned _pair,
-                             unsigned _sizeData, bool _isFp)
+                             unsigned _sizeData, bool _isFp,
+                             RegIndex _destIdx, RegIndex _indexReg)
     : MightBeMicro64(mnem, machInst, MemWriteOp),
       srcData(_srcData), pair(_pair),
       sizeData(_sizeData),
       shiftAmtData(ceilLog2(_sizeData)),
       memAccessFlags(MMU::AllowUnaligned),
-      isFp(_isFp)
+      isFp(_isFp),
+      carriers(_destIdx, _indexReg)
 {
     flags[IsStore] = true;
     flags[IsMicroop] = true;
@@ -590,11 +613,11 @@ MicroStIndVal::MicroStIndVal(const char *mnem, ExtMachInst machInst,
     _numSrcRegs = 0;
     _numDestRegs = 0;
 
-    // Sources: Ureg1 (index[i]) and Ureg0 (alias) from uop0, then srcData
-    // (Rt: an X register or the FP/SIMD register); base_data comes from
-    // the side-car entry.
-    setSrcRegIdx(_numSrcRegs++, int_reg::Ureg1);
-    setSrcRegIdx(_numSrcRegs++, int_reg::Ureg0);
+    // Sources: index[i]'s carrier from uop0, Ureg0 (the alias) or Ra (i,
+    // to form the alias), then srcData (Rt: an X register or the FP/SIMD
+    // register); base_data and base_alias come from the side-car entry.
+    setSrcRegIdx(_numSrcRegs++, carriers.index);
+    setSrcRegIdx(_numSrcRegs++, carriers.aliasSource());
     if (isFp)
         setSrcRegIdx(_numSrcRegs++, vecRegClass[_srcData]);
     else
@@ -611,8 +634,9 @@ Fault
 MicroStIndVal::initiateAcc(ExecContext *xc,
                            trace::InstRecord *traceData) const
 {
-    uint64_t index_value   = xc->getRegOperand(this, 0); // Ureg1
-    uint64_t alias_val     = xc->getRegOperand(this, 1); // Ureg0
+    uint64_t index_value   = xc->getRegOperand(this, 0); // carrier
+    uint64_t alias_val     =
+        uop1Alias(xc, this, carriers, pair, shiftAmtData);
     uint64_t base_data_val = xc->readMiscReg(hovPairReg(pair, HOV_PAIR_DATA));
     // srcData (Rt): an FP source (S or D) is the vector register's low
     // element; writeMem stores its low sizeData bytes.

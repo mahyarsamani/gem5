@@ -41,6 +41,7 @@
 #include "arch/arm/insts/misc64.hh"
 #include "arch/arm/insts/static_inst.hh"
 #include "arch/arm/pcstate.hh"
+#include "arch/arm/regs/int.hh"
 #include "cpu/thread_context.hh"
 
 namespace gem5
@@ -337,6 +338,38 @@ class MemoryInd64 : public MightBeMicro64
 };
 
 /**
+ * How index[i] and the alias travel from uop0 to uop1 of an ldind/stind,
+ * so that each costs one integer physical register where possible
+ * (docs/plans/ldind-register-pressure.md in the SIFT project).
+ *
+ * - index[i] has one carrier: Rt2, or Ureg1 when Rt2 is XZR (an XZR
+ *   destination would still take a physical register in O3).
+ * - uop1 forms the alias itself from i (Ra) and the entry's base_alias,
+ *   unless uop0 overwrites Ra (Rt2 == Ra, not XZR): then uop0 also
+ *   writes the alias to Ureg0 and uop1 reads it there.
+ */
+struct IndCarriers
+{
+    RegId index;        ///< written by uop0, read by uop1
+    bool aliasInUreg0;  ///< uop0 writes the alias to Ureg0
+    RegIndex rt2;       ///< Rt2 as decoded (int_reg::_ZeroIdx for XZR)
+    RegIndex ra;        ///< i
+
+    IndCarriers(RegIndex _rt2, RegIndex _ra)
+        : index(_rt2 == int_reg::_ZeroIdx ? int_reg::Ureg1
+                                          : intRegClass[_rt2]),
+          aliasInUreg0(_rt2 != int_reg::_ZeroIdx && _rt2 == _ra),
+          rt2(_rt2), ra(_ra)
+    {}
+
+    /** uop1's second source: Ureg0 (the alias) or Ra (i). */
+    RegId aliasSource() const
+    {
+        return aliasInUreg0 ? int_reg::Ureg0 : intRegClass[ra];
+    }
+};
+
+/**
  * Micro-op 0 for ldind/stind: fetch index[i] from the index array.
  *
  * The pair's base_index, base_alias, base_data and count come from the
@@ -344,8 +377,8 @@ class MemoryInd64 : public MightBeMicro64
  * the only register source. Issues a ReadIndReq with IndirectAccessAlias
  * and DependentAccessGen extensions. The CHI protocol treats this as a
  * Phase 1 index fetch. The alias is base_alias + i * sizeData.
- * On completion, writes index[i] to Ureg1 and the alias to Ureg0, where
- * uop1 reads them, and index[i] to Rt2 (XZR discards it).
+ * On completion, writes index[i] to its one carrier (IndCarriers), and
+ * the alias to Ureg0 only when uop1 cannot form it from Ra.
  *
  * Used by both ldind (uop0) and stind (uop0) — both fetch the index.
  */
@@ -361,10 +394,12 @@ class MicroIndIdx : public MightBeMicro64
     uint64_t shiftAmtData;  ///< log2(sizeData), for the alias
     unsigned memAccessFlags;
     bool _isLoad;           ///< true = gather (ldind), false = scatter (stind)
+    IndCarriers carriers;
 
-    // Custom register index arrays
+    // Custom register index arrays: the index carrier, then Ureg0 when
+    // carriers.aliasInUreg0
     RegId _srcRegIdxArr[1];
-    RegId _destRegIdxArr[3];
+    RegId _destRegIdxArr[2];
 
     /** base_alias + i * sizeData, from the side-car entry and i. */
     Addr computeAlias(ExecContext *xc) const;
@@ -395,19 +430,22 @@ class MicroLdIndVal : public MightBeMicro64
 {
   protected:
     RegIndex destData;      ///< Rt — receives data element
-    unsigned pair;          ///< side-car entry (base_data)
+    unsigned pair;          ///< side-car entry (base_data, base_alias)
     unsigned sizeData;      ///< bytes per data element
     uint64_t shiftAmtData;  ///< log2(sizeData)
     unsigned memAccessFlags;
     bool isFp;              ///< Rt is an FP register (S or D)
+    IndCarriers carriers;
 
-    RegId _srcRegIdxArr[2]; ///< Ureg1 (index[i]), Ureg0 (alias) from uop0
+    /// The index carrier, then Ureg0 (the alias) or Ra (i)
+    RegId _srcRegIdxArr[2];
     RegId _destRegIdxArr[1];
 
   public:
     MicroLdIndVal(const char *mnem, ExtMachInst machInst,
                   RegIndex _destData, unsigned _pair,
-                  unsigned _sizeData, bool _isFp);
+                  unsigned _sizeData, bool _isFp,
+                  RegIndex _destIdx, RegIndex _indexReg);
 
     Fault execute(ExecContext *, trace::InstRecord *) const override;
     Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;
@@ -429,18 +467,21 @@ class MicroStIndVal : public MightBeMicro64
 {
   protected:
     RegIndex srcData;       ///< Rt — data to store
-    unsigned pair;          ///< side-car entry (base_data)
+    unsigned pair;          ///< side-car entry (base_data, base_alias)
     unsigned sizeData;      ///< bytes per data element
     uint64_t shiftAmtData;  ///< log2(sizeData)
     unsigned memAccessFlags;
     bool isFp;              ///< Rt is an FP register (S or D)
+    IndCarriers carriers;
 
-    RegId _srcRegIdxArr[3]; ///< Ureg1 (index[i]), Ureg0 (alias), Rt
+    /// The index carrier, Ureg0 (the alias) or Ra (i), then Rt
+    RegId _srcRegIdxArr[3];
 
   public:
     MicroStIndVal(const char *mnem, ExtMachInst machInst,
                   RegIndex _srcData, unsigned _pair,
-                  unsigned _sizeData, bool _isFp);
+                  unsigned _sizeData, bool _isFp,
+                  RegIndex _destIdx, RegIndex _indexReg);
 
     Fault execute(ExecContext *, trace::InstRecord *) const override;
     Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;

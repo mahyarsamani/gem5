@@ -980,9 +980,9 @@ def template LoadIndirectConstructor {{
         isFp = _is_fp;
 
         // uop0: fetch index[i] from the index array of side-car entry
-        // _pair. Source: index_reg (i). Dests: Ureg1 receives index[i]
-        // and Ureg0 the alias (base_alias + i * size_data) for uop1;
-        // Rt2 receives index[i] (Zero discards it).
+        // _pair. Source: index_reg (i). Dest: index[i]'s one carrier (Rt2,
+        // or Ureg1 when Rt2 is XZR), and the alias in Ureg0 only when Rt2
+        // is Ra (ArmISA::IndCarriers).
         microOps[0] = new ArmISA::MicroIndIdx(
             "ldind_%(idx_suffix)sidx", machInst,
             (RegIndex)_dest_idx,    // destIdx = Rt2
@@ -992,13 +992,16 @@ def template LoadIndirectConstructor {{
             true /* isLoad */);
 
         // uop1: load data[index[i]] from the entry's data array
-        // Sources: Ureg1 (index value), Ureg0 (alias), both from uop0
+        // Sources: the index carrier from uop0, then Ureg0 (alias) or Ra
+        // (i, from which uop1 forms the alias)
         // Dest: Rt (an X register, or S/D with _is_fp)
         microOps[1] = new ArmISA::MicroLdIndVal(
             "ldind_%(data_suffix)sval", machInst,
             (RegIndex)_dest,        // destData = Rt
             _pair,
-            %(size_data)d, _is_fp);
+            %(size_data)d, _is_fp,
+            (RegIndex)_dest_idx,    // Rt2
+            (RegIndex)_index_reg);  // Ra
 
         microOps[0]->setFirstMicroop();
         microOps[1]->setLastMicroop();
@@ -1086,13 +1089,16 @@ def template StoreIndirectConstructor {{
             false /* isLoad */);
 
         // uop1: store data[index[i]] to the entry's data array
-        // Sources: Ureg1 (index value), Ureg0 (alias) from uop0, Rt (data
-        // to store: an X register, or S/D with _is_fp)
+        // Sources: the index carrier from uop0, Ureg0 (alias) or Ra (i,
+        // from which uop1 forms the alias), Rt (data to store: an X
+        // register, or S/D with _is_fp)
         microOps[1] = new ArmISA::MicroStIndVal(
             "stind_%(data_suffix)sval", machInst,
             (RegIndex)_dest,        // srcData = Rt (data to store)
             _pair,
-            %(size_data)d, _is_fp);
+            %(size_data)d, _is_fp,
+            (RegIndex)_dest_idx,    // Rt2
+            (RegIndex)_index_reg);  // Ra
 
         microOps[0]->setFirstMicroop();
         microOps[1]->setLastMicroop();
