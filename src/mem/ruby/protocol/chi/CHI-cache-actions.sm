@@ -4008,12 +4008,18 @@ action(Profile_Miss, desc="") {
   assert(is_valid(tbe));
   bool is_demand := (tbe.is_local_pf || tbe.is_remote_pf) == false;
   bool is_remote_can_notify := tbe.is_remote_pf && upstream_prefetch_trains_prefetcher;
-  if (is_demand) {
-    cache.profileDemandMiss(tbe.access_name);
-  } else {
+  // MYSTUFF: IDRs and index accesses are counted apart from demand
+  if (is_demand == false) {
     assert(use_prefetcher || tbe.is_remote_pf);
     cache.profilePrefetchMiss(tbe.access_name);
+  } else if (isIndirectVal(tbe.reqType, tbe.secondType)) {
+    cache.profileIdrMiss(tbe.access_name);
+  } else if (isIndirectIdx(tbe.reqType, tbe.secondType)) {
+    cache.profileIndexMiss(tbe.access_name);
+  } else {
+    cache.profileDemandMiss(tbe.access_name);
   }
+  // FFUTSYM
   // notify prefetcher about this demand miss
   if (use_prefetcher && tbe.isSeqReqValid && (is_demand || is_remote_can_notify) &&
       shouldNotifyPrefetcher(tbe.reqType, tbe.secondType)) {
@@ -4037,12 +4043,18 @@ action(Profile_Hit, desc="") {
   assert(tbe.dataValid);
   bool is_demand := (tbe.is_local_pf || tbe.is_remote_pf) == false;
   bool is_remote_can_notify := tbe.is_remote_pf && upstream_prefetch_trains_prefetcher;
-  if (is_demand) {
-    cache.profileDemandHit(tbe.access_name);
-  } else {
+  // MYSTUFF: IDRs and index accesses are counted apart from demand
+  if (is_demand == false) {
     assert(use_prefetcher || tbe.is_remote_pf);
     cache.profilePrefetchHit(tbe.access_name);
+  } else if (isIndirectVal(tbe.reqType, tbe.secondType)) {
+    cache.profileIdrHit(tbe.access_name);
+  } else if (isIndirectIdx(tbe.reqType, tbe.secondType)) {
+    cache.profileIndexHit(tbe.access_name);
+  } else {
+    cache.profileDemandHit(tbe.access_name);
   }
+  // FFUTSYM
   // notify prefetcher about this demand hit
   if (use_prefetcher && tbe.isSeqReqValid && (is_demand || is_remote_can_notify) &&
       shouldNotifyPrefetcher(tbe.reqType, tbe.secondType)) {
@@ -4058,6 +4070,22 @@ action(Profile_Hit, desc="") {
     cache_entry.HWPrefetched := false;
   }
 }
+
+// MYSTUFF
+// Gather Unit: a notification's index line has its data here (hit), or
+// the line must be fetched from upstream or downstream first (miss).
+action(Profile_GatherHit, desc="") {
+  assert(is_valid(tbe));
+  assert(gather_unit);
+  cache.profileGatherHit(tbe.access_name);
+}
+
+action(Profile_GatherMiss, desc="") {
+  assert(is_valid(tbe));
+  assert(gather_unit);
+  cache.profileGatherMiss(tbe.access_name);
+}
+// FFUTSYM
 
 action(Profile_Fill, desc="") {
   assert(is_valid(tbe));

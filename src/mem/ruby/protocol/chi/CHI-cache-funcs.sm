@@ -395,11 +395,19 @@ void notifyCoalesced(Addr addr, RubyRequestType type, RequestPtr req,
                      std::string access_name) {
   DPRINTF(RubySlicc, "notifyCoalesced(addr=%#x, type=%s, was_miss=%d)\n",
                       addr, type, was_miss);
-  if (was_miss) {
+  // MYSTUFF: a coalesced index access (uop0) is counted apart from demand
+  bool is_index := (type == RubyRequestType:LDIND) ||
+                   (type == RubyRequestType:STIND);
+  if (is_index && was_miss) {
+    cache.profileIndexMiss(access_name);
+  } else if (is_index) {
+    cache.profileIndexHit(access_name);
+  } else if (was_miss) {
     cache.profileDemandMiss(access_name);
   } else {
     cache.profileDemandHit(access_name);
   }
+  // FFUTSYM
   if (use_prefetcher && notify_coalesced) {
     bool is_read := (type == RubyRequestType:LD) ||
                     (type == RubyRequestType:Load_Linked) ||

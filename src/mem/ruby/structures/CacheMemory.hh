@@ -267,6 +267,23 @@ class CacheMemory : public SimObject
         statistics::Scalar m_prefetch_misses;
         statistics::Formula m_prefetch_accesses;
 
+        // MYSTUFF
+        // hov accesses, kept apart from demand and prefetch: index
+        // accesses (uop0), IDRs, and the Gather Unit's lookups of the
+        // index line a notification names.
+        statistics::Scalar m_index_hits;
+        statistics::Scalar m_index_misses;
+        statistics::Formula m_index_accesses;
+
+        statistics::Scalar m_idr_hits;
+        statistics::Scalar m_idr_misses;
+        statistics::Formula m_idr_accesses;
+
+        statistics::Scalar m_gather_hits;
+        statistics::Scalar m_gather_misses;
+        statistics::Formula m_gather_accesses;
+        // FFUTSYM
+
         statistics::Vector m_accessModeType;
 
         statistics::Scalar uselessBlocksNotExplainedbyPrefetch;
@@ -286,7 +303,8 @@ class CacheMemory : public SimObject
         bytesTransferred;
     // Hits, misses and allocated bytes per access name ("" is other),
     // created on first use: demandHits.<name>, demandMisses.<name>,
-    // prefetchHits.<name>, prefetchMisses.<name>, bytesAllocated.<name>.
+    // prefetchHits.<name>, prefetchMisses.<name>, the same for index,
+    // idr and gather, and bytesAllocated.<name>.
     std::unordered_map<std::string,
         std::unordered_map<std::string, statistics::Scalar*>> perNameStats;
     statistics::Scalar &perNameStat(const std::string &family,
@@ -314,6 +332,15 @@ class CacheMemory : public SimObject
       void profileDemandMiss(std::string acc_name);
       void profilePrefetchHit(std::string acc_name);
       void profilePrefetchMiss(std::string acc_name);
+      // hov accesses: an index access (uop0), an IDR, and a Gather Unit
+      // lookup of a notification's index line (a miss when the line's
+      // data is upstream or absent).
+      void profileIndexHit(std::string acc_name);
+      void profileIndexMiss(std::string acc_name);
+      void profileIdrHit(std::string acc_name);
+      void profileIdrMiss(std::string acc_name);
+      void profileGatherHit(std::string acc_name);
+      void profileGatherMiss(std::string acc_name);
       // A block allocated for an access: bytesAllocated.<name> grows by
       // the block size.
       void profileAllocation(std::string acc_name);

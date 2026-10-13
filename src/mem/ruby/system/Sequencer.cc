@@ -802,6 +802,13 @@ Sequencer::sendDAGNotif(Addr address,
     msg->m_req = dag_req;
     // Each merged descriptor carries its own alias; the notif has none.
     msg->m_alias = 0;
+    // The index line's name, as the label cache knows it from the index
+    // accesses that touched it, names the Gather Unit's lookup.
+    if (m_sequencer_type == SequencerType::Data) {
+        auto label = labelCache->lookup(address);
+        if (label)
+            msg->m_accessName = label.value();
+    }
     Cycles latency = m_controller->mandatoryQueueLatency(
         RubyRequestType_NOTIFY_INDIDX);
     DPRINTFR(ProtocolTrace, "%15s %3s %10s%20s %6s>%-6s %#x %s\n",

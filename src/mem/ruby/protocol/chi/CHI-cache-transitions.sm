@@ -1868,10 +1868,12 @@ transition(DvmExtOp_Finished, Final, I) {
 // Gather Unit: a notification carrying DAGs for a line. Initiate_Request
 // pushes ExtractDAG; PostProcess sends the IDRs. The state says whether the
 // line's current data is here, upstream (stale here, or absent with an
-// upstream copy), or absent altogether; the last two fetch it first.
+// upstream copy), or absent altogether; the last two fetch it first and
+// count as gather misses.
 transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD, UC_RSC, UD_RSD,
             UD_RSC}, UpdateDAG, BUSY_BLKD) {
     Initiate_Request;
+    Profile_GatherHit;
     Send_NotifAck;
     Pop_ReqRdyQueue;
     ProcessNextState;
@@ -1880,6 +1882,7 @@ transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD, UC_RSC, UD_RSD,
 transition({UC_RU, UD_RU, RU, RSC, RSD, RUSC, RUSD}, UpdateDAG, BUSY_BLKD) {
     Initiate_Request;
     Initiate_FetchIndexLine_Upstream;
+    Profile_GatherMiss;
     Send_NotifAck;
     Pop_ReqRdyQueue;
     ProcessNextState;
@@ -1888,6 +1891,7 @@ transition({UC_RU, UD_RU, RU, RSC, RSD, RUSC, RUSD}, UpdateDAG, BUSY_BLKD) {
 transition(I, UpdateDAG, BUSY_BLKD) {
     Initiate_Request;
     Initiate_FetchIndexLine_Downstream;
+    Profile_GatherMiss;
     Send_NotifAck;
     Pop_ReqRdyQueue;
     ProcessNextState;
@@ -1896,6 +1900,9 @@ transition(I, UpdateDAG, BUSY_BLKD) {
 // Above the Gather Unit, a notification for a line this cache holds is
 // absorbed: PostProcess stashes its DAG and post-evicts the line, so the
 // write-back carries the DAG with the current data.
+// A notification above the Gather Unit is not profiled as a hit or a miss:
+// it reads no data here (the core had index[i] already, forwarded or in a
+// register); only the Gather Unit counts its lookup (Profile_Gather*).
 transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD, UC_RSC, UC_RU, UD_RU,
         UD_RSD, UD_RSC}, Fwd_NotifyIndIdx, BUSY_BLKD)
 {

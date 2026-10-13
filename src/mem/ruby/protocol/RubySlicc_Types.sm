@@ -263,6 +263,12 @@ structure (CacheMemory, external = "yes") {
   void profileDemandMiss(std::string);
   void profilePrefetchHit(std::string);
   void profilePrefetchMiss(std::string);
+  void profileIndexHit(std::string);
+  void profileIndexMiss(std::string);
+  void profileIdrHit(std::string);
+  void profileIdrMiss(std::string);
+  void profileGatherHit(std::string);
+  void profileGatherMiss(std::string);
   void profileAllocation(std::string);
   void profileTransfer(MachineID, std::string, int, std::string);
   // FFUTSYM

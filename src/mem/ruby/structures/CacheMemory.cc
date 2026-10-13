@@ -575,6 +575,22 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
       ADD_STAT(m_prefetch_misses, "Number of cache prefetch misses"),
       ADD_STAT(m_prefetch_accesses, "Number of cache prefetch accesses",
                m_prefetch_hits + m_prefetch_misses),
+      // MYSTUFF
+      ADD_STAT(m_index_hits, "Number of hov index access (uop0) hits"),
+      ADD_STAT(m_index_misses, "Number of hov index access (uop0) misses"),
+      ADD_STAT(m_index_accesses, "Number of hov index accesses (uop0)",
+               m_index_hits + m_index_misses),
+      ADD_STAT(m_idr_hits, "Number of IDR hits"),
+      ADD_STAT(m_idr_misses, "Number of IDR misses"),
+      ADD_STAT(m_idr_accesses, "Number of IDRs",
+               m_idr_hits + m_idr_misses),
+      ADD_STAT(m_gather_hits, "Number of Gather Unit index line lookups "
+                              "that found the data here"),
+      ADD_STAT(m_gather_misses, "Number of Gather Unit index line lookups "
+                                "that fetched the data"),
+      ADD_STAT(m_gather_accesses, "Number of Gather Unit index line lookups",
+               m_gather_hits + m_gather_misses),
+      // FFUTSYM
       ADD_STAT(m_accessModeType, ""),
       ADD_STAT(uselessBlocksNotExplainedbyPrefetch,
                "Number of useless blocks not explained by prefetch")
@@ -631,6 +647,18 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
 
     m_prefetch_accesses
         .flags(statistics::nozero);
+
+    // MYSTUFF
+    m_index_hits.flags(statistics::nozero);
+    m_index_misses.flags(statistics::nozero);
+    m_index_accesses.flags(statistics::nozero);
+    m_idr_hits.flags(statistics::nozero);
+    m_idr_misses.flags(statistics::nozero);
+    m_idr_accesses.flags(statistics::nozero);
+    m_gather_hits.flags(statistics::nozero);
+    m_gather_misses.flags(statistics::nozero);
+    m_gather_accesses.flags(statistics::nozero);
+    // FFUTSYM
 
     m_accessModeType
         .init(RubyRequestType_NUM)
@@ -1030,6 +1058,48 @@ CacheMemory::profilePrefetchMiss(std::string acc_name)
 {
     profilePrefetchMiss();
     perNameStat("prefetchMisses", acc_name)++;
+}
+
+void
+CacheMemory::profileIndexHit(std::string acc_name)
+{
+    cacheMemoryStats.m_index_hits++;
+    perNameStat("indexHits", acc_name)++;
+}
+
+void
+CacheMemory::profileIndexMiss(std::string acc_name)
+{
+    cacheMemoryStats.m_index_misses++;
+    perNameStat("indexMisses", acc_name)++;
+}
+
+void
+CacheMemory::profileIdrHit(std::string acc_name)
+{
+    cacheMemoryStats.m_idr_hits++;
+    perNameStat("idrHits", acc_name)++;
+}
+
+void
+CacheMemory::profileIdrMiss(std::string acc_name)
+{
+    cacheMemoryStats.m_idr_misses++;
+    perNameStat("idrMisses", acc_name)++;
+}
+
+void
+CacheMemory::profileGatherHit(std::string acc_name)
+{
+    cacheMemoryStats.m_gather_hits++;
+    perNameStat("gatherHits", acc_name)++;
+}
+
+void
+CacheMemory::profileGatherMiss(std::string acc_name)
+{
+    cacheMemoryStats.m_gather_misses++;
+    perNameStat("gatherMisses", acc_name)++;
 }
 
 void
