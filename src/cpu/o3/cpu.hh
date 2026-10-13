@@ -45,11 +45,15 @@
 
 #include <iostream>
 #include <list>
+#include <map>
 #include <queue>
 #include <set>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "arch/generic/pcstate.hh"
+#include "base/cprintf.hh"
 #include "base/statistics.hh"
 #include "cpu/o3/comm.hh"
 #include "cpu/o3/commit.hh"
@@ -119,6 +123,29 @@ class CPU : public BaseCPU
     {
         commit.setSequencer(sequencer);
     }
+
+    /** Name the arrays of side-car entry `pair` of the hov instructions
+     *  (from the checkpoint manifest's hov_entries, registered by the
+     *  processor like the insights snippet): the entry's index reads,
+     *  value accesses and the IDRs built from them carry these access
+     *  names instead of hov<pair>_index and hov<pair>_data. */
+    void addHovEntryNames(unsigned pair, std::string index_name,
+                          std::string data_name)
+    {
+        hovEntryNames[pair] = {std::move(index_name), std::move(data_name)};
+    }
+
+    /** The access name of entry `pair`'s index or data array. */
+    std::string hovEntryName(unsigned pair, bool is_index) const
+    {
+        auto it = hovEntryNames.find(pair);
+        if (it != hovEntryNames.end())
+            return is_index ? it->second.first : it->second.second;
+        return csprintf("hov%u_%s", pair, is_index ? "index" : "data");
+    }
+
+  private:
+    std::map<unsigned, std::pair<std::string, std::string>> hovEntryNames;
   // FFUTSYM
 
   public:

@@ -104,10 +104,8 @@ Sequencer::Sequencer(const Params &p)
     // The profiler will collate these across different
     // sequencers and display those collated statistics.
     // MYSTUFF
-    hovLdindE2ELatency = new statistics::Histogram(this, "hovLdindE2ELatency",
-        statistics::units::Cycle::get(),
+    hovLdindE2ELatency = latencyDistribution("hovLdindE2ELatency",
         "LDIND latency from index-fetch issue to value arrival");
-    hovLdindE2ELatency->init(32);
     hovLdindUnmatched = new statistics::Scalar(this, "hovLdindUnmatched",
         statistics::units::Count::get(),
         "LDIND value arrivals with no matching index fetch");
@@ -877,6 +875,32 @@ Sequencer::atomicCallback(Addr address, DataBlock& data,
 }
 
 // MYSTUFF
+statistics::Distribution *
+Sequencer::latencyDistribution(const std::string &name, const char *desc)
+{
+    auto *stat = new statistics::Distribution(
+        this, name.c_str(), statistics::units::Cycle::get(), desc);
+    stat->init(0, LATENCY_MAX_CYCLES, LATENCY_BUCKET_CYCLES);
+    return stat;
+}
+
+std::string
+Sequencer::accessNameOf(RequestPtr req) const
+{
+    // As issueRequest names a request (the instruction's own label first,
+    // the label cache otherwise), without caching a first touch: a
+    // coalesced request never reached issueRequest.
+    auto from_cpu = req->getExtension<MemAccessName>();
+    if (from_cpu != nullptr)
+        return from_cpu->name();
+    if (m_sequencer_type == SequencerType::Data) {
+        auto label = labelCache->lookup(req->getPaddr());
+        if (label)
+            return label.value();
+    }
+    return "";
+}
+
 void
 Sequencer::handleIndArrival(PacketPtr pkt)
 {
@@ -885,18 +909,16 @@ Sequencer::handleIndArrival(PacketPtr pkt)
         prodExitTimes.erase(pkt->req);
         for (auto [relation_name, instance_id]: relation_tags) {
             if (indRelProdAccLat.find(relation_name) == indRelProdAccLat.end()) {
-                statistics::Histogram* new_stat = new statistics::Histogram(
-                        this,
-                        csprintf("indRelProdAccLat.%s", relation_name).c_str(),
-                        statistics::units::Tick::get(),
-                        "Access latency for the producer of the indirect access.");
-                new_stat->init(64);
-                indRelProdAccLat[relation_name] = new_stat;
+                indRelProdAccLat[relation_name] = latencyDistribution(
+                        csprintf("indRelProdAccLat.%s", relation_name),
+                        "Access latency for the producer of the indirect "
+                        "access.");
             }
             DPRINTF(LatencyBreakdown, "%s: Sampling producer access latency for "
                     "relation %s with instance id %d at %d ticks.\n",
                     __func__, relation_name, instance_id, curTick() - exit_time);
-            indRelProdAccLat[relation_name]->sample(curTick() - exit_time);
+            indRelProdAccLat[relation_name]->sample(
+                ticksToCycles(curTick() - exit_time));
         }
     }
     if (consExitTimes.find(pkt->req) != consExitTimes.end()) {
@@ -905,35 +927,29 @@ Sequencer::handleIndArrival(PacketPtr pkt)
         auto [relation_name, instance_id] = relation_tags[0];
         consExitTimes.erase(pkt->req);
         if (indRelConsAccLat.find(relation_name) == indRelConsAccLat.end()) {
-            statistics::Histogram* new_stat = new statistics::Histogram(
-                    this,
-                    csprintf("indRelConsAccLat.%s", relation_name).c_str(),
-                    statistics::units::Tick::get(),
+            indRelConsAccLat[relation_name] = latencyDistribution(
+                    csprintf("indRelConsAccLat.%s", relation_name),
                     "Access latency for the consumer of the indirect access.");
-            new_stat->init(64);
-            indRelConsAccLat[relation_name] = new_stat;
         }
         DPRINTF(LatencyBreakdown, "%s: Sampling consumer access latency for "
                 "relation %s with instance id %d at %d ticks.\n",
                 __func__, relation_name, instance_id, curTick() - exit_time);
-        indRelConsAccLat[relation_name]->sample(curTick() - exit_time);
+        indRelConsAccLat[relation_name]->sample(
+            ticksToCycles(curTick() - exit_time));
         if ((indExitTimes.find(relation_name) != indExitTimes.end()) &&
             (indExitTimes[relation_name].find(instance_id) != indExitTimes[relation_name].end())) {
             Tick overall_exit_time = indExitTimes[relation_name][instance_id];
             indExitTimes[relation_name].erase(instance_id);
             if (indRelAccLat.find(relation_name) == indRelAccLat.end()) {
-                statistics::Histogram* new_stat = new statistics::Histogram(
-                        this,
-                        csprintf("indRelAccLat.%s", relation_name).c_str(),
-                        statistics::units::Tick::get(),
+                indRelAccLat[relation_name] = latencyDistribution(
+                        csprintf("indRelAccLat.%s", relation_name),
                         "Overall access latency for the indirect access.");
-                new_stat->init(64);
-                indRelAccLat[relation_name] = new_stat;
             }
             DPRINTF(LatencyBreakdown, "%s: Sampling overall access latency for "
                     "relation %s with instance id %d at %d ticks.\n",
                     __func__, relation_name, instance_id, curTick() - overall_exit_time);
-            indRelAccLat[relation_name]->sample(curTick() - overall_exit_time);
+            indRelAccLat[relation_name]->sample(
+                ticksToCycles(curTick() - overall_exit_time));
         }
     }
 }
@@ -964,7 +980,8 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
         // account for it in its hit/miss stats and/or train prefetchers
         // (this is protocol-dependent)
         m_controller->notifyCoalesced(request_address, type, pkt->req,
-                                      data, externalHit);
+                                      data, externalHit,
+                                      accessNameOf(pkt->req));
     }
 
     // Load-linked handling

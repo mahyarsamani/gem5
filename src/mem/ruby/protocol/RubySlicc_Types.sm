@@ -258,7 +258,12 @@ structure (CacheMemory, external = "yes") {
   void profileDemandMiss();
   void profilePrefetchHit();
   void profilePrefetchMiss();
-  // MYSTUFF
+  // MYSTUFF: the same, counted per access name as well
+  void profileDemandHit(std::string);
+  void profileDemandMiss(std::string);
+  void profilePrefetchHit(std::string);
+  void profilePrefetchMiss(std::string);
+  void profileAllocation(std::string);
   void profileTransfer(MachineID, std::string, int, std::string);
   // FFUTSYM
 }

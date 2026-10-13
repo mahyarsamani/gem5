@@ -391,13 +391,14 @@ bool coalesce() {
 }
 
 void notifyCoalesced(Addr addr, RubyRequestType type, RequestPtr req,
-                     DataBlock data_blk, bool was_miss) {
+                     DataBlock data_blk, bool was_miss,
+                     std::string access_name) {
   DPRINTF(RubySlicc, "notifyCoalesced(addr=%#x, type=%s, was_miss=%d)\n",
                       addr, type, was_miss);
   if (was_miss) {
-    cache.profileDemandMiss();
+    cache.profileDemandMiss(access_name);
   } else {
-    cache.profileDemandHit();
+    cache.profileDemandHit(access_name);
   }
   if (use_prefetcher && notify_coalesced) {
     bool is_read := (type == RubyRequestType:LD) ||

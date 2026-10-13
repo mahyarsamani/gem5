@@ -241,12 +241,15 @@ class AbstractController : public ClockedObject, public Consumer
     { fatal("Prefetches not implemented!");}
 
     //! Notifies controller of a request coalesced at the sequencer.
-    //! By default, it does nothing. Behavior is protocol-specific
+    //! By default, it does nothing. Behavior is protocol-specific.
+    //! access_name is the request's label ("" without one), so the
+    //! per-name hit and miss stats count coalesced requests too.
     virtual void notifyCoalesced(const Addr& addr,
                                  const RubyRequestType& type,
                                  const RequestPtr& req,
                                  const DataBlock& data_blk,
-                                 const bool& was_miss)
+                                 const bool& was_miss,
+                                 const std::string& access_name)
     { }
 
     //! Function for collating statistics from all the controllers of this

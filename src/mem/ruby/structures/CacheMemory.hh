@@ -284,6 +284,13 @@ class CacheMemory : public SimObject
         std::unordered_map<std::string,
             std::unordered_map<MachineID, statistics::Scalar*>>>
         bytesTransferred;
+    // Hits, misses and allocated bytes per access name ("" is other),
+    // created on first use: demandHits.<name>, demandMisses.<name>,
+    // prefetchHits.<name>, prefetchMisses.<name>, bytesAllocated.<name>.
+    std::unordered_map<std::string,
+        std::unordered_map<std::string, statistics::Scalar*>> perNameStats;
+    statistics::Scalar &perNameStat(const std::string &family,
+                                    const std::string &acc_name);
     // FFUTSYM
 
     public:
@@ -302,7 +309,16 @@ class CacheMemory : public SimObject
       void profilePrefetchMiss();
 
       // MYSTUFF
-      void profileTransfer(MachineID dst, std::string acc_name, int num_bytes, std::string transfer_type);
+      // The same counts, also per access name (the TBE's access_name).
+      void profileDemandHit(std::string acc_name);
+      void profileDemandMiss(std::string acc_name);
+      void profilePrefetchHit(std::string acc_name);
+      void profilePrefetchMiss(std::string acc_name);
+      // A block allocated for an access: bytesAllocated.<name> grows by
+      // the block size.
+      void profileAllocation(std::string acc_name);
+      void profileTransfer(MachineID dst, std::string acc_name,
+                           int num_bytes, std::string transfer_type);
       // FFUTSYM
 
 };

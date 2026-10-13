@@ -316,9 +316,21 @@ class Sequencer : public RubyPort
     std::unordered_map<RequestPtr, std::tuple<Tick, std::vector<std::tuple<std::string, int>>>> consExitTimes;
     std::unordered_map<std::string, std::unordered_map<int, Tick>> indExitTimes;
 
-    std::unordered_map<std::string, statistics::Histogram*> indRelProdAccLat;
-    std::unordered_map<std::string, statistics::Histogram*> indRelConsAccLat;
-    std::unordered_map<std::string, statistics::Histogram*> indRelAccLat;
+    // Latencies in cycles, in fixed buckets (LATENCY_BUCKETS of
+    // LATENCY_BUCKET_CYCLES; longer samples land in the overflow count),
+    // so a few outliers cannot widen the buckets, as gem5's Histogram
+    // would.
+    static constexpr unsigned LATENCY_MAX_CYCLES = 2048;
+    static constexpr unsigned LATENCY_BUCKET_CYCLES = 8;
+    std::unordered_map<std::string, statistics::Distribution*>
+        indRelProdAccLat;
+    std::unordered_map<std::string, statistics::Distribution*>
+        indRelConsAccLat;
+    std::unordered_map<std::string, statistics::Distribution*> indRelAccLat;
+
+    statistics::Distribution *latencyDistribution(const std::string &name,
+                                                  const char *desc);
+    std::string accessNameOf(RequestPtr req) const;
 
     void handleIndExit(PacketPtr pkt);
     void handleIndArrival(PacketPtr pkt);
@@ -330,7 +342,7 @@ class Sequencer : public RubyPort
                              const DataBlock &data);
     void hovSampleLdindValue(SequencerRequest *srequest);
     std::unordered_map<Addr, std::deque<Cycles>> m_hovLdindPending;
-    statistics::Histogram *hovLdindE2ELatency;
+    statistics::Distribution *hovLdindE2ELatency;
     statistics::Scalar *hovLdindUnmatched;
     statistics::Scalar *hovLdindStale;
     // FFUTSYM

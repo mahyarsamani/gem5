@@ -3649,6 +3649,10 @@ action(CheckCacheFill, desc="") {
     // don't have a cache block, but there is space to allocate one
     set_cache_entry(cache.allocate(address, new CacheEntry));
     // MYSTUFF:
+    // bytes brought in and kept, per access name (bytesTransferred at the
+    // sender counts pass-through responses too, e.g. index lines the
+    // Indirect Unit does not cache)
+    cache.profileAllocation(tbe.access_name);
     DPRINTF(Usefulness, "Inside CheckCacheFill. Before calling functions from DataBlock.\n");
     cache_entry.DataBlk.setAccessName("reset", true, getName(), address);
     DPRINTF(Usefulness, "Inside CheckCacheFill. After calling functions from DataBlock.\n");
@@ -4005,10 +4009,10 @@ action(Profile_Miss, desc="") {
   bool is_demand := (tbe.is_local_pf || tbe.is_remote_pf) == false;
   bool is_remote_can_notify := tbe.is_remote_pf && upstream_prefetch_trains_prefetcher;
   if (is_demand) {
-    cache.profileDemandMiss();
+    cache.profileDemandMiss(tbe.access_name);
   } else {
     assert(use_prefetcher || tbe.is_remote_pf);
-    cache.profilePrefetchMiss();
+    cache.profilePrefetchMiss(tbe.access_name);
   }
   // notify prefetcher about this demand miss
   if (use_prefetcher && tbe.isSeqReqValid && (is_demand || is_remote_can_notify) &&
@@ -4034,10 +4038,10 @@ action(Profile_Hit, desc="") {
   bool is_demand := (tbe.is_local_pf || tbe.is_remote_pf) == false;
   bool is_remote_can_notify := tbe.is_remote_pf && upstream_prefetch_trains_prefetcher;
   if (is_demand) {
-    cache.profileDemandHit();
+    cache.profileDemandHit(tbe.access_name);
   } else {
     assert(use_prefetcher || tbe.is_remote_pf);
-    cache.profilePrefetchHit();
+    cache.profilePrefetchHit(tbe.access_name);
   }
   // notify prefetcher about this demand hit
   if (use_prefetcher && tbe.isSeqReqValid && (is_demand || is_remote_can_notify) &&
@@ -4454,6 +4458,8 @@ action(SendIDR,
         enqueue(reqOutPort, CHIRequestMsg, request_latency) {
             indirectDependentBoilerPlate(out_msg);
             fillInMsgFromReq(out_msg, depReq);
+            // hov<p>_data, as uop1 names the same access
+            out_msg.access_name := getReqAccessName(depReq);
 
             out_msg.type := idr_type;
             out_msg.allowRetry := hovTbe.pendReqAllowRetry;

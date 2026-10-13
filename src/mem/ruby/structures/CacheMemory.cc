@@ -985,5 +985,59 @@ CacheMemory::profilePrefetchMiss()
     cacheMemoryStats.m_prefetch_misses++;
 }
 
+// MYSTUFF
+statistics::Scalar &
+CacheMemory::perNameStat(const std::string &family,
+                         const std::string &acc_name)
+{
+    std::string eff_acc_name = acc_name == "" ? "other" : acc_name;
+    auto &stats = perNameStats[family];
+    auto it = stats.find(eff_acc_name);
+    if (it == stats.end()) {
+        auto *stat = new statistics::Scalar(
+            this, csprintf("%s.%s", family, eff_acc_name).c_str(),
+            statistics::units::Count::get(),
+            csprintf("%s per access name", family).c_str());
+        *stat = 0;
+        it = stats.emplace(eff_acc_name, stat).first;
+    }
+    return *it->second;
+}
+
+void
+CacheMemory::profileDemandHit(std::string acc_name)
+{
+    profileDemandHit();
+    perNameStat("demandHits", acc_name)++;
+}
+
+void
+CacheMemory::profileDemandMiss(std::string acc_name)
+{
+    profileDemandMiss();
+    perNameStat("demandMisses", acc_name)++;
+}
+
+void
+CacheMemory::profilePrefetchHit(std::string acc_name)
+{
+    profilePrefetchHit();
+    perNameStat("prefetchHits", acc_name)++;
+}
+
+void
+CacheMemory::profilePrefetchMiss(std::string acc_name)
+{
+    profilePrefetchMiss();
+    perNameStat("prefetchMisses", acc_name)++;
+}
+
+void
+CacheMemory::profileAllocation(std::string acc_name)
+{
+    perNameStat("bytesAllocated", acc_name) += m_block_size;
+}
+// FFUTSYM
+
 } // namespace ruby
 } // namespace gem5

@@ -601,6 +601,13 @@ AbstractController::getDependentReq(Addr line_addr, DataBlock &index_data)
     phase2->setExtension<IndirectAccessAlias>(
         std::make_shared<IndirectAccessAlias>(desc.alias));
 
+    // The IDR is an access to the pair's data array: name it as uop1 names
+    // its own (the array's registered name, else hov<p>_data), so the
+    // caches' per-name stats add them up.
+    phase2->setExtension<MemAccessName>(std::make_shared<MemAccessName>(
+        desc.dataName.empty() ? csprintf("hov%u_data", desc.pair)
+                              : desc.dataName));
+
     DPRINTFR(ProtocolTrace, "%15s %3s %10s%20s %6s>%-6s %#x %s idx_line=%#x "
              "offset=%d idx_val=%" PRIu64 "\n",
              curTick(), m_version, "GatherU", "IDR_Begin", "", "",

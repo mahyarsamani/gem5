@@ -41,6 +41,7 @@
 #include "arch/arm/regs/misc.hh"
 #include "arch/arm/tlb.hh"
 #include "arch/generic/memhelpers.hh"
+#include "base/cprintf.hh"
 #include "base/loader/symtab.hh"
 #include "debug/IndirectAccess.hh"
 #include "mem/packet_access.hh"
@@ -365,10 +366,15 @@ MicroIndIdx::initiateAcc(ExecContext *xc, trace::InstRecord *traceData) const
     // access (ReadValue/WriteValue)
     auto intent = _isLoad ? DependentAccessGen::AccessIntent::Read
                           : DependentAccessGen::AccessIntent::Write;
+    // The access names of the entry's arrays (registered with the core,
+    // else hov<p>_index and hov<p>_data): this read's, and the data
+    // array's for the IDR the Gather Unit builds from the DAG.
     auto dag = std::make_shared<ARMDependentAccessGen>(
-        intent, sizeIndex, EA, base_data_val, sizeData, alias_val);
+        intent, sizeIndex, EA, base_data_val, sizeData, alias_val, pair,
+        xc->hovAccessName(pair, false));
     xc->setIAAExt(iaa);
     xc->setDAGExt(dag);
+    xc->setAccessName(xc->hovAccessName(pair, true));
 
     std::vector<bool> byte_enable(sizeIndex, true);
     return initiateMemRead(xc, EA, sizeIndex, memAccessFlags, byte_enable);
@@ -515,6 +521,7 @@ MicroLdIndVal::initiateAcc(ExecContext *xc,
     // access (uop1) of an ldind; it is a normal load (no DAG).
     auto iaa = std::make_shared<IndirectAccessAlias>(alias_val);
     xc->setIAAExt(iaa);
+    xc->setAccessName(xc->hovAccessName(pair, false));
 
     // Standard ReadReq — no DAG extension (ReadValue from IDR handles that)
     std::vector<bool> byte_enable(sizeData, true);
@@ -665,6 +672,7 @@ MicroStIndVal::initiateAcc(ExecContext *xc,
     // identified; it is a normal store (no DAG).
     auto iaa = std::make_shared<IndirectAccessAlias>(alias_val);
     xc->setIAAExt(iaa);
+    xc->setAccessName(xc->hovAccessName(pair, false));
 
     // Standard WriteReq — no DAG extension
     std::vector<bool> byte_enable(sizeData, true);

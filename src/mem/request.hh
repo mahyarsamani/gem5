@@ -1239,6 +1239,11 @@ class DependentAccessGen: public Extension<Request, DependentAccessGen>
         size_t dataSize;            // sizeof one data element
         Addr alias;                 // alias of the access this describes
         AddrTranslator translateFn; // VA→PA translator for this array
+        uint8_t pair;               // side-car entry
+        std::string dataName;       // access name of the data array: the
+                                    // IDR carries it, as uop1 carries its
+                                    // own (hov<pair>_data unless the core
+                                    // was told the array's name)
     };
 
   protected:
@@ -1265,10 +1270,12 @@ class DependentAccessGen: public Extension<Request, DependentAccessGen>
 
     void addDescriptor(AccessIntent intent, Addr index_addr, Addr base,
                        size_t data_size, Addr alias,
-                       AddrTranslator fn = nullptr)
+                       AddrTranslator fn = nullptr, unsigned pair = 0,
+                       std::string data_name = "")
     {
         _descriptors.push_back(
-            {intent, index_addr, base, data_size, alias, std::move(fn)});
+            {intent, index_addr, base, data_size, alias, std::move(fn),
+             static_cast<uint8_t>(pair), std::move(data_name)});
     }
 
     size_t numDescriptors() const { return _descriptors.size(); }
