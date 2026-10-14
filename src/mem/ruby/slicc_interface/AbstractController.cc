@@ -40,8 +40,12 @@
 
 #include "mem/ruby/slicc_interface/AbstractController.hh"
 
+#include <algorithm>
+#include <iterator>
+
 #include "RubySlicc_Util.hh"
 // MYSTUFF
+#include "debug/IndirectAccess.hh"
 #include "debug/MSDebug.hh"
 // FFUTSYM
 #include "debug/ProtocolTrace.hh"
@@ -54,7 +58,6 @@
 #include "mem/ruby/system/RubySystem.hh"
 #include "mem/ruby/system/Sequencer.hh"
 #include "sim/system.hh"
-#include <iterator>
 
 namespace gem5
 {
@@ -89,6 +92,7 @@ void
 AbstractController::init()
 {
     stats.delayHistogram.init(10);
+    stats.idrCoalesceGroupSize.init(8);
     uint32_t size = Network::getNumberOfVirtualNetworks();
     for (uint32_t i = 0; i < size; i++) {
         stats.delayVCHistogram.push_back(new statistics::Histogram(this));
@@ -550,44 +554,70 @@ AbstractController::canOverride(std::string label, Addr address)
     }
 }
 
+uint64_t
+AbstractController::indexValue(const DependentAccessGen &dag,
+                               DataBlock &index_data, int &offset,
+                               size_t &index_size)
+{
+    assert(!dag.isMerged());
+    offset = getOffset(dag.descriptor(0).indexAddr);
+    index_size = dag.indexSize();
+    panic_if(index_size == 0, "%s: DAG has no indexSize set.", __func__);
+
+    const uint8_t *raw = index_data.getData(offset, index_size);
+    switch (index_size) {
+        case 4: return *reinterpret_cast<const uint32_t *>(raw);
+        case 8: return *reinterpret_cast<const uint64_t *>(raw);
+        default:
+            panic("%s: unsupported index element size %u bytes", __func__,
+                  index_size);
+    }
+}
+
+void
+AbstractController::markIndexRead(const DependentAccessGen &dag,
+                                  DataBlock &index_data, Addr line_addr)
+{
+    // The Gather Unit reads the index element as a core's load would: mark
+    // its bytes used in the block the IDR is built from (the TBE's, merged
+    // into the cache entry at Finalize_UpdateCacheFromTBE), as the
+    // Sequencer's hit callback does for core accesses. Without it the
+    // index lines at the Gather Unit show no use at all.
+    if (index_data.isAlloc()) {
+        index_data.setReadUsefulness(getOffset(dag.descriptor(0).indexAddr),
+                                     dag.indexSize(), name(), line_addr);
+    }
+}
+
 RequestPtr
 AbstractController::getDependentReq(Addr line_addr, DataBlock &index_data)
 {
     auto it = m_cachedEntries.find(line_addr);
-    panic_if(it == m_cachedEntries.end() || it->second.empty(),
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
              "getDependentReq: no cached entries for line_addr %#x. "
              "Ensure extractExtensions() was called when the TBE was "
              "allocated.", line_addr);
 
-    // Pop the front DAG (must be single-descriptor, not merged).
-    auto dag = std::move(it->second.front());
-    it->second.erase(it->second.begin());
+    // Pop the front entry (a single-descriptor DAG).
+    auto entry = std::move(it->second.entries.front());
+    it->second.entries.erase(it->second.entries.begin());
+    auto dag = std::move(entry.dag);
 
     panic_if(!dag, "getDependentReq: cached DependentAccessGen is null for "
             "line_addr %#x.", line_addr);
-    assert(!dag->isMerged());
 
     const auto& desc = dag->descriptor(0);
-    bool read = (desc.intent == DependentAccessGen::AccessIntent::Read);
-    int offset = getOffset(desc.indexAddr);
-
-    // Use the index element size from the DAG.
-    size_t index_size = dag->indexSize();
-    panic_if(index_size == 0, "getDependentReq: DAG has no indexSize set for line_addr %#x.", line_addr);
-
-    // Extract the index value from the DataBlock at the element's offset.
-    const uint8_t *raw = index_data.getData(offset, index_size);
-    DPRINTF(MSDebug, "%s: Generating dependent request from %s.\n", __func__, index_data);
-
-    uint64_t index_value = 0;
-    switch (index_size) {
-        case 4: index_value = *reinterpret_cast<const uint32_t *>(raw); break;
-        case 8: index_value = *reinterpret_cast<const uint64_t *>(raw); break;
-        default:
-            panic("getDependentReq: unsupported index element size %u bytes", index_size);
-    }
-    DPRINTF(MSDebug, "%s: line_addr=%#x offset=%d index_size=%d index_value=%" PRIu64
-            " read=%d\n", __func__, line_addr, offset, index_size, index_value, read);
+    // The IDR's intent: a write, or the DAG's own when nothing coalesced.
+    bool read = !entry.write;
+    int offset;
+    size_t index_size;
+    DPRINTF(MSDebug, "%s: Generating dependent request from %s.\n",
+            __func__, index_data);
+    uint64_t index_value = indexValue(*dag, index_data, offset, index_size);
+    DPRINTF(MSDebug, "%s: line_addr=%#x offset=%d index_size=%d "
+            "index_value=%" PRIu64 " read=%d absorbed=%u\n", __func__,
+            line_addr, offset, index_size, index_value, read,
+            entry.absorbed);
 
     // Generate the Phase 2 (data-fetch) request using the cached DAG.
     RequestPtr phase2 = dag->genNextRequest(index_value);
@@ -632,70 +662,193 @@ AbstractController::extractExtensions(Addr line_addr, RequestPtr req)
     for (auto& single : unwrapped) {
         auto shared = std::shared_ptr<DependentAccessGen>(single.release());
 
+        bool write = shared->descriptor(0).intent ==
+                     DependentAccessGen::AccessIntent::Write;
         DPRINTF(MSDebug, "%s: Cached DAG for line_addr %#x "
                 "(read=%d, offset=%d, dag=%p)\n",
-                __func__, line_addr,
-                shared->descriptor(0).intent ==
-                    DependentAccessGen::AccessIntent::Read,
+                __func__, line_addr, !write,
                 getOffset(shared->descriptor(0).indexAddr),
                 shared.get());
 
-        m_cachedEntries[line_addr].push_back(std::move(shared));
+        auto &line = m_cachedEntries[line_addr];
+        line.entries.push_back({std::move(shared), write});
+        // New entries may coalesce with the pending ones.
+        line.coalesced = false;
     }
+}
+
+void
+AbstractController::coalesceExtensions(Addr line_addr, DataBlock &index_data)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    if (it == m_cachedEntries.end() || it->second.coalesced) {
+        return;
+    }
+    auto &entries = it->second.entries;
+    std::vector<DependentEntry> kept;
+    std::vector<Addr> kept_lines;
+    for (auto &entry : entries) {
+        int offset;
+        size_t index_size;
+        uint64_t index_value =
+            indexValue(*entry.dag, index_data, offset, index_size);
+        Addr data_line = makeLineAddress(entry.dag->genAddress(index_value));
+        auto pos = std::find(kept_lines.begin(), kept_lines.end(), data_line);
+        if (pos == kept_lines.end()) {
+            kept.push_back(std::move(entry));
+            kept_lines.push_back(data_line);
+            continue;
+        }
+        // Absorbed: the kept IDR fetches its data line (a write makes that
+        // IDR a WriteValue); the Gather Unit still read its index element.
+        auto &survivor = kept[pos - kept_lines.begin()];
+        survivor.write |= entry.write;
+        survivor.absorbed++;
+        markIndexRead(*entry.dag, index_data, line_addr);
+        stats.idrCoalescedSameLine++;
+        DPRINTF(IndirectAccess, "DAG for data line %#x (offset %d, write %d) "
+                "coalesced into the IDR of index line %#x.\n", data_line,
+                offset, entry.write, line_addr);
+    }
+    for (const auto &entry : kept) {
+        if (entry.absorbed > 0) {
+            stats.idrCoalesceGroupSize.sample(entry.absorbed + 1);
+        }
+    }
+    entries = std::move(kept);
+    it->second.coalesced = true;
 }
 
 bool
 AbstractController::hasDependentWork(Addr line_addr)
 {
     auto it = m_cachedEntries.find(line_addr);
-    return it != m_cachedEntries.end() && !it->second.empty();
+    return it != m_cachedEntries.end() && !it->second.entries.empty();
 }
 
 Addr
 AbstractController::peekDependentAddr(Addr line_addr, DataBlock &index_data)
 {
     auto it = m_cachedEntries.find(line_addr);
-    panic_if(it == m_cachedEntries.end() || it->second.empty(),
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
              "peekDependentAddr: no cached entries for line_addr %#x.",
              line_addr);
 
-    const auto& dag = it->second.front();  // peek, don't pop
+    const auto& dag = it->second.entries.front().dag;  // peek, don't pop
     panic_if(!dag, "peekDependentAddr: cached DAG is null for "
              "line_addr %#x.", line_addr);
-    assert(!dag->isMerged());
 
-    const auto& desc = dag->descriptor(0);
-    int offset = getOffset(desc.indexAddr);
-
-    size_t index_size = dag->indexSize();
-    panic_if(index_size == 0,
-             "peekDependentAddr: DAG has no indexSize for line_addr %#x.",
-             line_addr);
-
-    const uint8_t *raw = index_data.getData(offset, index_size);
-    uint64_t index_value = 0;
-    switch (index_size) {
-        case 4: index_value = *reinterpret_cast<const uint32_t *>(raw); break;
-        case 8: index_value = *reinterpret_cast<const uint64_t *>(raw); break;
-        default:
-            panic("peekDependentAddr: unsupported index element size %u",
-                  index_size);
-    }
-
+    int offset;
+    size_t index_size;
+    uint64_t index_value = indexValue(*dag, index_data, offset, index_size);
+    markIndexRead(*dag, index_data, line_addr);
     return dag->genAddress(index_value);
+}
+
+bool
+AbstractController::peekDependentIsWrite(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
+             "peekDependentIsWrite: no cached entries for line_addr %#x.",
+             line_addr);
+    return it->second.entries.front().write;
 }
 
 void
 AbstractController::dropDependentReq(Addr line_addr)
 {
     auto it = m_cachedEntries.find(line_addr);
-    panic_if(it == m_cachedEntries.end() || it->second.empty(),
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
              "dropDependentReq: no cached entries for line_addr %#x.",
              line_addr);
 
     DPRINTF(MSDebug, "%s: Dropping front DAG entry for line_addr %#x "
             "(collision skip)\n", __func__, line_addr);
-    it->second.erase(it->second.begin());
+    it->second.entries.erase(it->second.entries.begin());
+}
+
+int
+AbstractController::idrVerdict(Addr data_line, bool write)
+{
+    auto in_flight = m_idrInFlight.find(data_line);
+    if (in_flight != m_idrInFlight.end()) {
+        if (write && !in_flight->second.write) {
+            if (in_flight->second.parked) {
+                in_flight->second.write = true;
+                stats.idrUpgradedInRetry++;
+                return IDR_UPGRADE;
+            }
+            stats.idrIntentLost++;
+        }
+        stats.idrDroppedInFlight++;
+        return IDR_DROP;
+    }
+    auto recent = m_idrRecent.find(data_line);
+    if (recent != m_idrRecent.end()) {
+        if (write && !recent->second) {
+            stats.idrIntentLost++;
+        }
+        stats.idrDroppedRecent++;
+        return IDR_DROP;
+    }
+    return IDR_SEND;
+}
+
+Addr
+AbstractController::parkedIdrHovId(Addr data_line)
+{
+    auto it = m_idrInFlight.find(data_line);
+    panic_if(it == m_idrInFlight.end() || !it->second.parked,
+             "parkedIdrHovId: no parked IDR to data line %#x.", data_line);
+    return it->second.hovId;
+}
+
+void
+AbstractController::noteIdrSent(Addr data_line, Addr hov_id, bool write,
+                                int recent_lines)
+{
+    auto inserted = m_idrInFlight.emplace(data_line,
+                                          IdrInFlight{hov_id, write});
+    panic_if(!inserted.second, "noteIdrSent: an IDR to data line %#x is "
+             "already in flight.", data_line);
+    if (recent_lines <= 0) {
+        return;
+    }
+    if (m_idrRecent.emplace(data_line, write).second) {
+        m_idrRecentFifo.push_back(data_line);
+        while (m_idrRecentFifo.size() > (size_t)recent_lines) {
+            m_idrRecent.erase(m_idrRecentFifo.front());
+            m_idrRecentFifo.pop_front();
+        }
+    } else {
+        m_idrRecent[data_line] |= write;
+    }
+}
+
+void
+AbstractController::noteIdrAcked(Addr data_line)
+{
+    panic_if(m_idrInFlight.erase(data_line) == 0,
+             "noteIdrAcked: no IDR in flight to data line %#x.", data_line);
+}
+
+void
+AbstractController::noteIdrParked(Addr data_line)
+{
+    auto it = m_idrInFlight.find(data_line);
+    panic_if(it == m_idrInFlight.end(),
+             "noteIdrParked: no IDR in flight to data line %#x.", data_line);
+    it->second.parked = true;
+}
+
+void
+AbstractController::noteIdrResent(Addr data_line)
+{
+    auto it = m_idrInFlight.find(data_line);
+    panic_if(it == m_idrInFlight.end() || !it->second.parked,
+             "noteIdrResent: no parked IDR to data line %#x.", data_line);
+    it->second.parked = false;
 }
 
 void
@@ -816,6 +969,22 @@ ControllerStats::ControllerStats(statistics::Group *parent)
       ADD_STAT(idrDroppedUnmapped,
                "IDRs dropped because the data address has no downstream "
                "mapping"),
+      ADD_STAT(idrCoalescedSameLine,
+               "DAGs absorbed into another DAG's IDR to the same data line "
+               "(one index line)"),
+      ADD_STAT(idrCoalesceGroupSize,
+               "DAGs per coalesced IDR (groups of two or more)"),
+      ADD_STAT(idrDroppedInFlight,
+               "IDRs dropped because one to their data line was in flight"),
+      ADD_STAT(idrDroppedRecent,
+               "IDRs dropped because one to their data line was sent "
+               "recently"),
+      ADD_STAT(idrIntentLost,
+               "write IDRs dropped over a read IDR to the same data line "
+               "(uop1's store upgrades the line)"),
+      ADD_STAT(idrUpgradedInRetry,
+               "read IDRs parked in retry lifted to WriteValue by a later "
+               "write"),
       ADD_STAT(hovStashOrphaned,
                "post-evict stashes turned into notifications because the "
                "line left without a replacement")
@@ -825,6 +994,18 @@ ControllerStats::ControllerStats(statistics::Group *parent)
     delayHistogram
         .flags(statistics::nozero);
     idrDroppedUnmapped
+        .flags(statistics::nozero);
+    idrCoalescedSameLine
+        .flags(statistics::nozero);
+    idrCoalesceGroupSize
+        .flags(statistics::nozero);
+    idrDroppedInFlight
+        .flags(statistics::nozero);
+    idrDroppedRecent
+        .flags(statistics::nozero);
+    idrIntentLost
+        .flags(statistics::nozero);
+    idrUpgradedInRetry
         .flags(statistics::nozero);
     hovStashOrphaned
         .flags(statistics::nozero);

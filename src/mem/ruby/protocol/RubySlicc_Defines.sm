@@ -51,10 +51,21 @@ bool hasDependentWork(Addr);
 void clearExtensions(Addr);
 
 Addr peekDependentAddr(Addr, DataBlock);
+bool peekDependentIsWrite(Addr);
 void dropDependentReq(Addr);
 bool isMappedDownstream(Addr);
 void countIdrDroppedUnmapped();
 void countStashOrphaned();
+
+// IDR coalescing at the Gather Unit (AbstractController::coalesceExtensions
+// and idrVerdict: 0 send, 1 drop, 2 lift the parked IDR to a write)
+void coalesceExtensions(Addr, DataBlock);
+int idrVerdict(Addr, bool);
+Addr parkedIdrHovId(Addr);
+void noteIdrSent(Addr, Addr, bool, int);
+void noteIdrAcked(Addr);
+void noteIdrParked(Addr);
+void noteIdrResent(Addr);
 
 // Index DAGs stashed above the Gather Unit until the line's write-back
 bool hasDAG(RequestPtr);

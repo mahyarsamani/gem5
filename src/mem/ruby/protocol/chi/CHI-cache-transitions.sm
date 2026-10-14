@@ -1673,6 +1673,7 @@ transition(HOV_PEND, HovAck, I) {
 
 transition(HOV_PEND, RetryAck) {
   Receive_RetryAck;
+  Note_IdrParked;
   Pop_RespInQueue;
 }
 

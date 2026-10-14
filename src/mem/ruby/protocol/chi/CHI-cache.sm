@@ -242,6 +242,15 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
   bool profile_usefulness := "True";
   bool notify_coalesced := "True";
+
+  // Coalesce IDRs at the Gather Unit: the DAGs of one index line whose
+  // dependent accesses share a data line send one IDR (a write among them
+  // makes it a WriteValue), and an IDR whose data line has one in flight,
+  // parked in retry (lifted to a write in place) or among the last
+  // idr_recent_lines sent is dropped. A dropped IDR costs only the early
+  // fill: uop1 is a real access and fetches the line itself.
+  bool idr_coalesce := "False";
+  int idr_recent_lines := 64;
   // FFUTSYM
 {
 

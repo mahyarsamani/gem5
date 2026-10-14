@@ -2861,6 +2861,17 @@ action(Send_Retry_Hov, desc="Resend an IDR after RetryAck + PCrdGrant") {
     DPRINTF(IndirectAccess, "IDR retry: hov_id=%#x data_line=%#x type=%s\n",
             tbe.txnId, out_msg.addr, out_msg.type);
   }
+  if (idr_coalesce) {
+    // Sent again: a later write can no longer lift it.
+    noteIdrResent(tbe.addr);
+  }
+}
+
+action(Note_IdrParked,
+       desc="A RetryAck holds the IDR here; a later write to its data line lifts it") {
+  if (idr_coalesce) {
+    noteIdrParked(tbe.addr);
+  }
 }
 // FFUTSYM
 
@@ -4465,10 +4476,14 @@ action(PostProcess,
         }
         // The transaction's initiator fetched the line when this Gather
         // Unit had no current copy (Initiate_FetchIndexLine_*), so the
-        // data is here by now. One IDR per DAG descriptor. Two IDRs to the
+        // data is here by now. One IDR per DAG descriptor, unless
+        // idr_coalesce merges those to one data line. Two IDRs to the
         // same data line are two Loads at the Indirect Unit; the second
         // stalls there and hits.
         assert(tbe.dataValid);
+        if (idr_coalesce) {
+            coalesceExtensions(address, tbe.dataBlk);
+        }
         tbe.actions.pushNB(Event:SendIDR);
     } else {
         State toBeState := makeFinalState(tbe, getCacheEntry(address), getDirEntry(address));
@@ -4498,62 +4513,89 @@ action(SendIDR,
         dropDependentReq(address);
         countIdrDroppedUnmapped();
     } else {
-        // Resource stall if HOV TBE pool is full
-        check_allocate(storHovTBEs);
-
-        RequestPtr depReq := getDependentReq(address, tbe.dataBlk);
-        Addr acc_addr := getAddr(depReq);
-
-        // Determine request type
-        CHIRequestType idr_type;
-        if (isDepReadReq(depReq)) {
-            idr_type := CHIRequestType:ReadValue;
-        } else {
-            idr_type := CHIRequestType:WriteValue;
+        // Coalescing across index lines: an IDR to a data line with one
+        // in flight or sent recently is dropped; a write to a line whose
+        // read IDR is parked in retry lifts that IDR instead.
+        Addr data_line := makeLineAddress(next_addr);
+        bool is_write := peekDependentIsWrite(address);
+        int verdict := 0;
+        if (idr_coalesce) {
+            verdict := idrVerdict(data_line, is_write);
         }
-
-        // Compute destination before enqueue so we can reuse it for hovTbe
-        NetDest idr_dest;
-        if (isInvalid(tbe.indirect_unit_id)) {
-            idr_dest.add(mapAddressToDownstreamMachine(makeLineAddress(acc_addr)));
-        } else {
-            idr_dest.add(tbe.indirect_unit_id);
-        }
-
-        // Allocate the hov TBE, a transaction keyed by its hov id (see hovTBEs)
-        int hov_slot := storHovTBEs.addEntryToNewSlot();
-        Addr hov_id := makeHovId(hov_slot, blockSize);
-        hovTBEs.allocate(hov_id);
-        TBE hovTbe := hovTBEs[hov_id];
-        initializeHovTBE(hovTbe, hov_id, acc_addr, hov_slot,
-                         idr_type, depReq, idr_dest, tbe);
-
-        enqueue(reqOutPort, CHIRequestMsg, request_latency) {
-            indirectDependentBoilerPlate(out_msg);
-            fillInMsgFromReq(out_msg, depReq);
-            // hov<p>_data, as uop1 names the same access
-            out_msg.access_name := getReqAccessName(depReq);
-
-            out_msg.type := idr_type;
-            out_msg.allowRetry := hovTbe.pendReqAllowRetry;
-            // The Indirect Unit returns this id on HovAck/RetryAck/PCrdGrant
-            out_msg.txnId := hov_id;
-
-            out_msg.indirect_unit_id := tbe.indirect_unit_id;
-            out_msg.value_unit_id := tbe.value_unit_id;
-            out_msg.gather_unit_id := tbe.gather_unit_id;
-            out_msg.alias := hovTbe.alias;
-
+        if (verdict == 2) {
+            TBE parked := hovTBEs[parkedIdrHovId(data_line)];
+            assert(is_valid(parked));
+            parked.pendReqType := CHIRequestType:WriteValue;
             DPRINTF(IndirectAccess,
-                "IDR: index_line=%#x -> data_addr=%#x alias=%#x isRead=%d hov_id=%#x\n",
-                address, out_msg.addr, hovTbe.alias, isDepReadReq(depReq), hov_id
-            );
+                "IDR to data line %#x lifts the parked IDR hov_id=%#x to WriteValue.\n",
+                data_line, parked.txnId);
+            dropDependentReq(address);
+        } else if (verdict == 1) {
+            DPRINTF(IndirectAccess,
+                "IDR from index line %#x to data line %#x dropped: one is in flight or recent.\n",
+                address, data_line);
+            dropDependentReq(address);
+        } else {
+            // Resource stall if HOV TBE pool is full
+            check_allocate(storHovTBEs);
 
-            out_msg.Destination := idr_dest;
-            if (isInvalid(tbe.indirect_unit_id)) {
-                DPRINTF(IndirectAccess, "Indirect unit id not set yet. Sending downstream.\n");
+            RequestPtr depReq := getDependentReq(address, tbe.dataBlk);
+            Addr acc_addr := getAddr(depReq);
+
+            // Determine request type
+            CHIRequestType idr_type;
+            if (isDepReadReq(depReq)) {
+                idr_type := CHIRequestType:ReadValue;
             } else {
-                DPRINTF(IndirectAccess, "Indirect unit id set. Sending upstream.\n");
+                idr_type := CHIRequestType:WriteValue;
+            }
+
+            // Compute destination before enqueue so we can reuse it for hovTbe
+            NetDest idr_dest;
+            if (isInvalid(tbe.indirect_unit_id)) {
+                idr_dest.add(mapAddressToDownstreamMachine(makeLineAddress(acc_addr)));
+            } else {
+                idr_dest.add(tbe.indirect_unit_id);
+            }
+
+            // Allocate the hov TBE, a transaction keyed by its hov id (see hovTBEs)
+            int hov_slot := storHovTBEs.addEntryToNewSlot();
+            Addr hov_id := makeHovId(hov_slot, blockSize);
+            hovTBEs.allocate(hov_id);
+            TBE hovTbe := hovTBEs[hov_id];
+            initializeHovTBE(hovTbe, hov_id, acc_addr, hov_slot,
+                             idr_type, depReq, idr_dest, tbe);
+            if (idr_coalesce) {
+                noteIdrSent(data_line, hov_id, is_write, idr_recent_lines);
+            }
+
+            enqueue(reqOutPort, CHIRequestMsg, request_latency) {
+                indirectDependentBoilerPlate(out_msg);
+                fillInMsgFromReq(out_msg, depReq);
+                // hov<p>_data, as uop1 names the same access
+                out_msg.access_name := getReqAccessName(depReq);
+
+                out_msg.type := idr_type;
+                out_msg.allowRetry := hovTbe.pendReqAllowRetry;
+                // The Indirect Unit returns this id on HovAck/RetryAck/PCrdGrant
+                out_msg.txnId := hov_id;
+
+                out_msg.indirect_unit_id := tbe.indirect_unit_id;
+                out_msg.value_unit_id := tbe.value_unit_id;
+                out_msg.gather_unit_id := tbe.gather_unit_id;
+                out_msg.alias := hovTbe.alias;
+
+                DPRINTF(IndirectAccess,
+                    "IDR: index_line=%#x -> data_addr=%#x alias=%#x isRead=%d hov_id=%#x\n",
+                    address, out_msg.addr, hovTbe.alias, isDepReadReq(depReq), hov_id
+                );
+
+                out_msg.Destination := idr_dest;
+                if (isInvalid(tbe.indirect_unit_id)) {
+                    DPRINTF(IndirectAccess, "Indirect unit id not set yet. Sending downstream.\n");
+                } else {
+                    DPRINTF(IndirectAccess, "Indirect unit id set. Sending upstream.\n");
+                }
             }
         }
     }
@@ -4679,6 +4721,10 @@ action(Receive_HovAck, desc="IDR accepted by the Indirect Unit: free the hov TBE
       error("Unexpected response on HOV TBE");
     }
     assert(tbe.expected_req_resp.hasExpected() == false);
+    if (idr_coalesce) {
+        // The IDR's data line (the hov TBE's addr) is no longer in flight.
+        noteIdrAcked(tbe.addr);
+    }
     // Read the slot and key before the entry goes away, then unset the TBE
     // so the transition's setState does not touch freed memory (as the DVM
     // Final transitions do).
