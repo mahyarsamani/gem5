@@ -40,22 +40,25 @@
 
 #include "arch/arm/mmu.hh"
 
+#include "arch/arm/faults.hh"
+#include "arch/arm/insts/dependent_access.hh"
 #include "arch/arm/isa.hh"
 #include "arch/arm/mpam.hh"
 #include "arch/arm/reg_abi.hh"
-#include "arch/arm/faults.hh"
-#include "arch/arm/insts/dependent_access.hh"
 #include "arch/arm/stage2_lookup.hh"
 #include "arch/arm/table_walker.hh"
 #include "arch/arm/tlb.hh"
 #include "arch/arm/tlbi_op.hh"
 #include "debug/MMU.hh"
+
 // MYSTUFF
 #include "debug/MSDebug.hh"
+
 // FFUTSYM
 #include "mem/packet_access.hh"
-#include "sim/pseudo_inst.hh"
+#include "mem/page_table.hh"
 #include "sim/process.hh"
+#include "sim/pseudo_inst.hh"
 
 namespace gem5
 {
@@ -1248,10 +1251,39 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
             Addr base_paddr = tmp_req->getPaddr();
             // baseAddr stays the VA; this translator is its only
             // translation (see ARMDependentAccessGen::dataAddr).
-            arm_dag->setTranslator(
-                [base_vaddr, base_paddr](Addr req_vaddr) -> Addr {
-                return base_paddr + (req_vaddr - base_vaddr);
-            });
+            if (FullSystem) {
+                // The hov pool maps a pair's arrays physically contiguous,
+                // so base plus offset is exact.
+                arm_dag->setTranslator(
+                    [base_vaddr, base_paddr](Addr req_vaddr) -> Addr {
+                    return base_paddr + (req_vaddr - base_vaddr);
+                });
+            } else {
+                // SE maps the arrays page by page (an ordinary heap
+                // array), so base plus offset is wrong off the base's
+                // page: look each address up in the process's page table,
+                // a functional lookup that costs the Gather Unit nothing,
+                // as the contiguous pool does in full system. An address
+                // that does not translate (a wrong-path index) becomes
+                // MaxAddr, which no downstream machine maps, so SendIDR
+                // drops the IDR (idrDroppedUnmapped).
+                EmulationPageTable *page_table =
+                    tc->getProcessPtr()->pTable;
+                Stats *mmu_stats = &stats;
+                arm_dag->setTranslator(
+                    [page_table, mmu_stats, base_vaddr, base_paddr](
+                        Addr req_vaddr) -> Addr {
+                    Addr paddr;
+                    if (!page_table->translate(req_vaddr, paddr)) {
+                        mmu_stats->dagUnmapped++;
+                        return MaxAddr;
+                    }
+                    if (paddr != base_paddr + (req_vaddr - base_vaddr)) {
+                        mmu_stats->dagNonContiguous++;
+                    }
+                    return paddr;
+                });
+            }
 
             // The index access is now translated.
             arm_dag->setPhysicalIndexAddr(req->getPaddr());
@@ -1746,8 +1778,15 @@ MMU::Stats::Stats(statistics::Group *parent)
     ADD_STAT(domainFaults, statistics::units::Count::get(),
              "Number of MMU faults due to domain restrictions"),
     ADD_STAT(permsFaults, statistics::units::Count::get(),
-             "Number of MMU faults due to permissions restrictions")
+             "Number of MMU faults due to permissions restrictions"),
+    ADD_STAT(dagNonContiguous, statistics::units::Count::get(),
+             "Indirect data address lookups (SE) whose physical address "
+             "differs from the array base's plus the offset"),
+    ADD_STAT(dagUnmapped, statistics::units::Count::get(),
+             "Indirect data address lookups (SE) that do not translate")
 {
+    dagNonContiguous.flags(statistics::nozero);
+    dagUnmapped.flags(statistics::nozero);
 }
 
 } // namespace gem5

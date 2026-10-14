@@ -440,6 +440,14 @@ class MMU : public BaseMMU
         mutable statistics::Scalar prefetchFaults;
         mutable statistics::Scalar domainFaults;
         mutable statistics::Scalar permsFaults;
+        // SE mode's per-address translation of indirect data accesses
+        // (translateComplete), counted per lookup (an IDR's address is
+        // looked up more than once): addresses whose physical address is
+        // not the base's plus the offset (the array is not physically
+        // contiguous there), and addresses that do not translate
+        // (wrong-path indices)
+        statistics::Scalar dagNonContiguous;
+        statistics::Scalar dagUnmapped;
     } stats;
 
 };
