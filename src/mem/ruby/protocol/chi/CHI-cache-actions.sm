@@ -444,6 +444,8 @@ action(Initiate_Snoop_Hazard, desc="") {
 
 action(RestoreFromHazard, desc="") {
   TBE hazard_tbe := getHazardTBE(tbe);
+  // The snoop's type, read before tbe switches to the hazard TBE.
+  CHIRequestType snpReqType := tbe.reqType;
 
   // update
   setDataToBeStates(tbe);
@@ -460,17 +462,25 @@ action(RestoreFromHazard, desc="") {
   replicateTBE(ms_dummy_tbe, tbe);
 
   // if the pending request is a WB or Evict then it becomes a stale request
-  // if data is no longer in the expected state
+  // if data is no longer in the expected state.
+  // Cherry-picked from upstream gem5 develop (918ac65af1, in v26.0): stale
+  // state is sticky across consecutive hazards, and an Evict or
+  // CleanUnique goes stale on an invalidating snoop rather than whenever
+  // the data is absent (a cache that evicts on behalf of an upstream
+  // sharer, e.g. from RSC, never had the data).
+  bool invalidating_snoop := (snpReqType == CHIRequestType:SnpCleanInvalid) ||
+                             (snpReqType == CHIRequestType:SnpUnique) ||
+                             (snpReqType == CHIRequestType:SnpUniqueFwd);
   if (tbe.pendReqType == CHIRequestType:WriteBackFull) {
-    tbe.is_stale := (tbe.dataValid && tbe.dataDirty) == false;
+    tbe.is_stale := tbe.is_stale || ((tbe.dataValid && tbe.dataDirty) == false);
   } else if (tbe.pendReqType == CHIRequestType:WriteCleanFull) {
-    tbe.is_stale := (tbe.dataValid && tbe.dataDirty) == false;
-  } else if (hazard_tbe.pendReqType == CHIRequestType:WriteEvictFull) {
-    tbe.is_stale := (tbe.dataValid && tbe.dataUnique) == false;
-  } else if (hazard_tbe.pendReqType == CHIRequestType:Evict) {
-    tbe.is_stale := tbe.dataValid == false;
-  } else if (hazard_tbe.pendReqType == CHIRequestType:CleanUnique) {
-    tbe.is_stale := tbe.dataValid == false;
+    tbe.is_stale := tbe.is_stale || ((tbe.dataValid && tbe.dataDirty) == false);
+  } else if (tbe.pendReqType == CHIRequestType:WriteEvictFull) {
+    tbe.is_stale := tbe.is_stale || ((tbe.dataValid && tbe.dataUnique) == false);
+  } else if (tbe.pendReqType == CHIRequestType:Evict) {
+    tbe.is_stale := tbe.is_stale || invalidating_snoop;
+  } else if (tbe.pendReqType == CHIRequestType:CleanUnique) {
+    tbe.is_stale := tbe.is_stale || invalidating_snoop;
   }
 
   // a pending action from the original request may have been stalled during
@@ -3306,12 +3316,20 @@ action(Send_RespSepData, desc="") {
 action(Send_CompI, desc="") {
   assert(is_valid(tbe));
 
-  if (!isStashReqType(tbe.reqType)) {
-    // Used to ack Evict request
-    assert(tbe.dir_sharers.isElement(tbe.requestor));
-    assert((tbe.dir_ownerExists == false) || (tbe.dir_owner != tbe.requestor));
+  // Cherry-picked from upstream gem5 develop (7522f5f70b, in v26.0): the
+  // requestor of an Evict may have been removed from the sharers by an
+  // invalidating snoop that hit this transaction as a hazard (the
+  // requestor saw the same snoop and marked its Evict stale), so the ack
+  // is flagged stale instead of asserting.
+  bool is_stale := (!isStashReqType(tbe.reqType)) && (!tbe.dir_sharers.isElement(tbe.requestor));
 
-    tbe.dir_sharers.remove(tbe.requestor);
+  if (!isStashReqType(tbe.reqType)) {
+    // Used to ack Evict request. upstream maybe invalidated by hazard SnpCleanInvalid.
+    if (tbe.dir_sharers.isElement(tbe.requestor)) {
+      assert((tbe.dir_ownerExists == false) || (tbe.dir_owner != tbe.requestor));
+
+      tbe.dir_sharers.remove(tbe.requestor);
+    }
   }
 
   enqueue(rspOutPort, CHIResponseMsg, response_latency) {
@@ -3333,6 +3351,7 @@ action(Send_CompUC, desc="") {
     out_msg.Destination.add(tbe.requestor);
     out_msg.txnId := tbe.txnId;
     out_msg.dbid := tbe.txnId;
+    out_msg.stale := is_stale;
   }
 }
 
