@@ -1505,18 +1505,25 @@ transition(BUSY_INTR, {PCrdGrant, PCrdGrant_PoC}) {
 // RetryAck/PCrdGrant on BUSY_BLKD is only expected in a PoC/HN when waiting
 // for CompAck after sending down a request with DMT enabled. Handle the same
 // as BUSY_INTR
+// MYSTUFF
+// Also for a plain RetryAck/PCrdGrant: an Indirect Unit that forwards a
+// notification it cannot absorb (Fwd_NotifyIndIdx from I) waits for the
+// Gather Unit's NotifAck in BUSY_BLKD, and the Gather Unit may be out of
+// TBEs (busy with IDRs); the resent NotifyIndIdx carries its DAG again
+// (prepareRequestRetry copies seqReq).
 
-transition(BUSY_BLKD, RetryAck_PoC) {
+transition(BUSY_BLKD, {RetryAck, RetryAck_PoC}) {
   Receive_RetryAck;
   Pop_RespInQueue;
   ProcessNextState;
 }
 
-transition(BUSY_BLKD, PCrdGrant_PoC) {
+transition(BUSY_BLKD, {PCrdGrant, PCrdGrant_PoC}) {
   Receive_PCrdGrant;
   Pop_RespInQueue;
   ProcessNextState;
 }
+// FFUTSYM
 
 // RetryAck/PCrdGrant received during a snoop hazard may arrive in both
 // BUSY_BLKD and BUSY_INTR
