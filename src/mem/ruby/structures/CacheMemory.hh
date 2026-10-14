@@ -297,6 +297,20 @@ class CacheMemory : public SimObject
     // lines are otherwise not sampled); rebuilt at every dump.
     std::unordered_map<std::string, statistics::Histogram*>
         residentUsefulBytes;
+    // Lines that leave without a replacement (an invalidating snoop, a
+    // back-invalidate, or a deallocation on a unique request upstream),
+    // sampled apart from usefulBytes (replacements).
+    std::unordered_map<std::string, statistics::Histogram*>
+        invalidatedUsefulBytes;
+    // Usage masks that an eviction from upstream brought to this cache
+    // while it did not hold the line, so that they did not count toward
+    // its CBU (masks are reset on insertion).
+    std::unordered_map<std::string, statistics::Histogram*>
+        droppedEvictUsefulBytes;
+    statistics::Histogram &usefulnessHistogram(
+        std::unordered_map<std::string, statistics::Histogram*> &family,
+        const std::string &family_name, const std::string &acc_name,
+        const std::string &desc);
     std::unordered_map<std::string,
         std::unordered_map<std::string,
             std::unordered_map<MachineID, statistics::Scalar*>>>
@@ -320,6 +334,14 @@ class CacheMemory : public SimObject
       // each time they are called
       // TODO: Implement this function.
       void profileUsefulness(Addr line_addr, bool is_prefetched, std::string access_name, const WriteMask read_usefulness, const WriteMask write_usefulness);
+      // MYSTUFF
+      void profileInvalidationUsefulness(std::string access_name,
+                                         const WriteMask read_usefulness,
+                                         const WriteMask write_usefulness);
+      void profileDroppedEvictUsefulness(std::string access_name,
+                                         const WriteMask read_usefulness,
+                                         const WriteMask write_usefulness);
+      // FFUTSYM
       void profileUnexplainedUselessness(Addr line_addr);
       void profileDemandHit();
       void profileDemandMiss();

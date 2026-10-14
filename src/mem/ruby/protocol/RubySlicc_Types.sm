@@ -254,6 +254,8 @@ structure (CacheMemory, external = "yes") {
   Addr getAddressAtIdx(int);
 
   void profileUsefulness(Addr, bool, std::string, WriteMask, WriteMask);
+  void profileInvalidationUsefulness(std::string, WriteMask, WriteMask);
+  void profileDroppedEvictUsefulness(std::string, WriteMask, WriteMask);
   void profileDemandHit();
   void profileDemandMiss();
   void profilePrefetchHit();

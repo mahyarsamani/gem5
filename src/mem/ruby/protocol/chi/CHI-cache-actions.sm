@@ -310,6 +310,14 @@ action(Initiate_Request, desc="") {
     tbe.dataBlk.copyWriteUsefulness(cache_entry.DataBlk.getWriteUsefulness(getName(), address), getName(), address);
     tbe.dataBlk.reduceUsefulness(read_usefulness, write_usefulness, getName(), address);
     DPRINTF(Usefulness, "Inside Initiate_Request. After calling functions from DataBlock.\n");
+  } else if (reduce_usefulness && profile_usefulness) {
+    // The eviction's masks reach a cache that does not hold the line (e.g.
+    // a victim cache allocating on the write-back): reset on insertion
+    // drops them from this cache's CBU, so count them apart.
+    peek(reqRdyPort, CHIRequestMsg) {
+      cache.profileDroppedEvictUsefulness(in_msg.access_name,
+                                          read_usefulness, write_usefulness);
+    }
   }
 
   tbe.indirect_unit_id := indirect_unit_id;
@@ -3339,6 +3347,7 @@ action(Send_CompI, desc="") {
     out_msg.Destination.add(tbe.requestor);
     out_msg.txnId := tbe.txnId;
     out_msg.dbid := tbe.txnId;
+    out_msg.stale := is_stale;
   }
 }
 
@@ -3351,7 +3360,6 @@ action(Send_CompUC, desc="") {
     out_msg.Destination.add(tbe.requestor);
     out_msg.txnId := tbe.txnId;
     out_msg.dbid := tbe.txnId;
-    out_msg.stale := is_stale;
   }
 }
 
@@ -3590,6 +3598,24 @@ action(Finalize_UpdateCacheFromTBE, desc="") {
     // make sure only deallocate the cache entry if data is invalid
     assert(tbe.dataValid == false);
     if (is_valid(cache_entry)) {
+      // MYSTUFF
+      // The line leaves without a replacement (an invalidating snoop, a
+      // back-invalidate, or a deallocation on a unique request from
+      // upstream): sample the bytes used during its stay, the block's own
+      // and those the Sequencer marked in the TBE during this transaction,
+      // apart from replacements (sampled in Initiate_Replacement).
+      if (profile_usefulness && cache_entry.DataBlk.isAlloc()) {
+        WriteMask read_usefulness := cache_entry.DataBlk.getReadUsefulness(getName(), address);
+        WriteMask write_usefulness := cache_entry.DataBlk.getWriteUsefulness(getName(), address);
+        if (tbe.dataBlk.isAlloc()) {
+          read_usefulness.orMask(tbe.dataBlk.getReadUsefulness(getName(), address));
+          write_usefulness.orMask(tbe.dataBlk.getWriteUsefulness(getName(), address));
+        }
+        cache.profileInvalidationUsefulness(
+          cache_entry.DataBlk.getAccessName(getName(), address),
+          read_usefulness, write_usefulness);
+      }
+      // FFUTSYM
       cache.deallocate(address);
       unset_cache_entry();
     }

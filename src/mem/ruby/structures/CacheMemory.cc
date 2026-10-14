@@ -946,6 +946,54 @@ CacheMemory::profileUsefulness(Addr line_addr, bool is_prefetched, std::string a
     writeUsefulBytes[eff_acc_name]->sample(write_count);
 }
 
+statistics::Histogram &
+CacheMemory::usefulnessHistogram(
+    std::unordered_map<std::string, statistics::Histogram*> &family,
+    const std::string &family_name, const std::string &acc_name,
+    const std::string &desc)
+{
+    std::string eff_acc_name = acc_name == "" ? "other" : acc_name;
+    auto it = family.find(eff_acc_name);
+    if (it == family.end()) {
+        statistics::Histogram* new_stat = new statistics::Histogram(
+                    this,
+                    csprintf("%s.%s", family_name, eff_acc_name).c_str(),
+                    statistics::units::Count::get(), desc.c_str());
+        new_stat->init(m_block_size + 1);
+        it = family.emplace(eff_acc_name, new_stat).first;
+    }
+    return *it->second;
+}
+
+void
+CacheMemory::profileInvalidationUsefulness(std::string access_name,
+                                           const WriteMask read_usefulness,
+                                           const WriteMask write_usefulness)
+{
+    WriteMask total_usefulness = read_usefulness;
+    total_usefulness.orMask(write_usefulness);
+    usefulnessHistogram(invalidatedUsefulBytes, "invalidatedUsefulBytes",
+        access_name,
+        "Number of bytes used from a cache block belonging to this access "
+        "name that left without a replacement (invalidated).")
+        .sample(total_usefulness.count());
+}
+
+void
+CacheMemory::profileDroppedEvictUsefulness(std::string access_name,
+                                           const WriteMask read_usefulness,
+                                           const WriteMask write_usefulness)
+{
+    WriteMask total_usefulness = read_usefulness;
+    total_usefulness.orMask(write_usefulness);
+    usefulnessHistogram(droppedEvictUsefulBytes, "droppedEvictUsefulBytes",
+        access_name,
+        "Number of bytes used upstream from a block belonging to this "
+        "access name whose eviction reached this cache while it did not "
+        "hold the block (not counted in its CBU: reset on insertion).")
+        .sample(total_usefulness.count());
+}
+
 void
 CacheMemory::profileUnexplainedUselessness(Addr line_addr)
 {
