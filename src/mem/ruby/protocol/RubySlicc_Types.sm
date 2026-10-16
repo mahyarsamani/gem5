@@ -273,6 +273,7 @@ structure (CacheMemory, external = "yes") {
   void profileGatherMiss(std::string);
   void profileAllocation(std::string);
   void profileTransfer(MachineID, std::string, int, std::string);
+  void profileSnoopSharing(DataBlock, RequestPtr, bool, bool, std::string);
   // FFUTSYM
 }
 

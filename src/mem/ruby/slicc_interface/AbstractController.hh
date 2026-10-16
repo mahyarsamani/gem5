@@ -214,6 +214,9 @@ class AbstractController : public ClockedObject, public Consumer
     bool isMappedDownstream(Addr addr) const;
     void countIdrDroppedUnmapped() { stats.idrDroppedUnmapped++; }
     void countStashOrphaned() { stats.hovStashOrphaned++; }
+    // DAG descriptors extracted at the Gather Unit, by carrier: 0 an
+    // index request, 1 a notification, 2 a post-evict write-back.
+    void countDAGCarrier(int carrier, RequestPtr req);
 
     // The post-evict stash (see m_postEvicts).
     bool hasDAG(RequestPtr req);
@@ -691,6 +694,11 @@ class AbstractController : public ClockedObject, public Consumer
         //! Post-evict stashes whose line left without a replacement (an
         //! invalidating snoop or a back-invalidate) and became notifications
         statistics::Scalar hovStashOrphaned;
+
+        //! DAG descriptors the Gather Unit extracted, by the message that
+        //! carried them: an index request, a notification, a post-evict
+        //! write-back
+        statistics::Vector hovDAGsByCarrier;
     } stats;
 
 };

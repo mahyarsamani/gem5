@@ -446,6 +446,19 @@ action(Initiate_Snoop, desc="") {
   if (is_valid(cache_entry)) {
     tbe.access_name := cache_entry.DataBlk.getAccessName(getName(), address);
   }
+  // False or true sharing, counted once per snooped core: at its topmost
+  // copy (the L1, or the L2 when no cache above holds the line), against
+  // the bytes of the request behind the snoop (its seqReq).
+  if (is_valid(cache_entry) && tbe.dir_sharers.isEmpty()) {
+    peek(snpRdyPort, CHIRequestMsg) {
+      bool unique := (in_msg.type == CHIRequestType:SnpUnique) ||
+                     (in_msg.type == CHIRequestType:SnpUniqueFwd) ||
+                     (in_msg.type == CHIRequestType:SnpCleanInvalid);
+      cache.profileSnoopSharing(cache_entry.DataBlk, in_msg.seqReq,
+                                in_msg.isSeqReqValid, unique,
+                                tbe.access_name);
+    }
+  }
   // FFUTSYM
 
   // if we end up with valid data drop it if no entry allocated
@@ -4741,6 +4754,16 @@ action(Extract_Extensions, desc="") {
     // entire functionality inside an if statement.
     assert(gather_unit);
     assert(tbe.isSeqReqValid && hasDAG(tbe.seqReq));
+    // MYSTUFF: count the DAG's descriptors by carrier: an index request,
+    // a notification, or a post-evict write-back
+    if (tbe.reqType == CHIRequestType:NotifyIndIdx) {
+      countDAGCarrier(1, tbe.seqReq);
+    } else if (isPropagateEvict(tbe.reqType, tbe.secondType)) {
+      countDAGCarrier(2, tbe.seqReq);
+    } else {
+      countDAGCarrier(0, tbe.seqReq);
+    }
+    // FFUTSYM
     extractExtensions(tbe.addr, tbe.seqReq);
 }
 

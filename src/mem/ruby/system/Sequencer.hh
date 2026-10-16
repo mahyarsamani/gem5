@@ -337,12 +337,25 @@ class Sequencer : public RubyPort
 
     // LDIND end-to-end latency: uop0 (index fetch) issue -> uop1 value
     // arrival, in cycles. Keyed by the data element's PA, since the two
-    // uops carry different aliases.
+    // uops carry different aliases. Each pending uop0 records how its DAG
+    // travelled to the Gather Unit: on its own LDIDX (leader), merged
+    // into the drain-time notification of a line already in flight
+    // (merged), or as a NotifyIndIdxReq, the LSQ-forwarded or register
+    // form (notified).
+    enum class HovDagKind : uint8_t { Leader, Merged, Notified };
+    struct HovPending
+    {
+        Cycles issue;
+        HovDagKind kind;
+    };
     void hovRecordLdindIndex(SequencerRequest *srequest,
-                             const DataBlock &data);
+                             const DataBlock &data, bool merged);
     void hovSampleLdindValue(SequencerRequest *srequest);
-    std::unordered_map<Addr, std::deque<Cycles>> m_hovLdindPending;
+    std::unordered_map<Addr, std::deque<HovPending>> m_hovLdindPending;
     statistics::Distribution *hovLdindE2ELatency;
+    statistics::Distribution *hovLdindE2ELatencyLeader;
+    statistics::Distribution *hovLdindE2ELatencyMerged;
+    statistics::Distribution *hovLdindE2ELatencyNotified;
     statistics::Scalar *hovLdindUnmatched;
     statistics::Scalar *hovLdindStale;
 

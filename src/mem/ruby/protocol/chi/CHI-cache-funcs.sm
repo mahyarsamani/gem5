@@ -654,6 +654,12 @@ TBE allocateSnoopTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes" {
   tbe.fwdRequestor := in_msg.fwdRequestor;
   tbe.reqType := in_msg.type;
   tbe.txnId := in_msg.txnId;
+  // MYSTUFF: the request behind the snoop, so a snoop this cache forwards
+  // upstream (prepareRequest copies tbe.seqReq) still names the
+  // requester's bytes (profileSnoopSharing)
+  tbe.seqReq := in_msg.seqReq;
+  tbe.isSeqReqValid := in_msg.isSeqReqValid;
+  // FFUTSYM
 
   tbe.snpNeedsData := in_msg.retToSrc;
 

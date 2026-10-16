@@ -1137,6 +1137,28 @@ CacheMemory::profileIdrMiss(std::string acc_name)
 }
 
 void
+CacheMemory::profileSnoopSharing(const DataBlock &blk, RequestPtr req,
+                                 bool req_valid, bool unique,
+                                 std::string acc_name)
+{
+    const char *kind = unique ? "Unique" : "Shared";
+    if (!req_valid || !req || !req->hasPaddr()) {
+        perNameStat(csprintf("snoopNoRequester%s", kind), acc_name)++;
+        return;
+    }
+    int offset = getOffset(req->getPaddr(), floorLog2(m_block_size));
+    int size = std::min<int>(req->getSize(), m_block_size - offset);
+    WriteMask read = blk.getReadUsefulness(name(), req->getPaddr());
+    WriteMask write = blk.getWriteUsefulness(name(), req->getPaddr());
+    bool used = false;
+    for (int i = 0; i < size && !used; i++) {
+        used = read.getMask(offset + i, 1) || write.getMask(offset + i, 1);
+    }
+    perNameStat(csprintf("snoop%sSharing%s", used ? "True" : "False", kind),
+                acc_name)++;
+}
+
+void
 CacheMemory::profileGatherHit(std::string acc_name)
 {
     cacheMemoryStats.m_gather_hits++;

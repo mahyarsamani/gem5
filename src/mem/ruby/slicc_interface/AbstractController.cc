@@ -875,6 +875,15 @@ AbstractController::hasDAG(RequestPtr req)
 }
 
 void
+AbstractController::countDAGCarrier(int carrier, RequestPtr req)
+{
+    assert(carrier >= 0 && carrier < 3);
+    auto dag = req->getExtension<DependentAccessGen>();
+    assert(dag);
+    stats.hovDAGsByCarrier[carrier] += dag->numDescriptors();
+}
+
+void
 AbstractController::stashPostEvictDAG(Addr line_addr, RequestPtr req)
 {
     auto dag = req->getExtension<DependentAccessGen>();
@@ -987,7 +996,10 @@ ControllerStats::ControllerStats(statistics::Group *parent)
                "write"),
       ADD_STAT(hovStashOrphaned,
                "post-evict stashes turned into notifications because the "
-               "line left without a replacement")
+               "line left without a replacement"),
+      ADD_STAT(hovDAGsByCarrier,
+               "DAG descriptors extracted at the Gather Unit, by the "
+               "message that carried them")
 {
     fullyBusyCycles
         .flags(statistics::nozero);
@@ -1008,6 +1020,12 @@ ControllerStats::ControllerStats(statistics::Group *parent)
     idrUpgradedInRetry
         .flags(statistics::nozero);
     hovStashOrphaned
+        .flags(statistics::nozero);
+    hovDAGsByCarrier
+        .init(3)
+        .subname(0, "request")
+        .subname(1, "notification")
+        .subname(2, "postEvict")
         .flags(statistics::nozero);
 }
 

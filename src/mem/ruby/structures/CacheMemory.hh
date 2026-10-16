@@ -368,6 +368,15 @@ class CacheMemory : public SimObject
       void profileAllocation(std::string acc_name);
       void profileTransfer(MachineID dst, std::string acc_name,
                            int num_bytes, std::string transfer_type);
+      // A snoop reaching this core's topmost copy of a line: false
+      // sharing when the copy never used (read or wrote) the bytes the
+      // requester accesses (`req`, the request behind the snoop), true
+      // sharing when it did; `unique` for snoops that take the line away
+      // (the requester writes). No requester (a prefetch, a back-
+      // invalidate) is counted apart.
+      void profileSnoopSharing(const DataBlock &blk, RequestPtr req,
+                               bool req_valid, bool unique,
+                               std::string acc_name);
       // FFUTSYM
 
 };

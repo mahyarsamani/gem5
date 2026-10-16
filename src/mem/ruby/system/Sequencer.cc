@@ -106,6 +106,17 @@ Sequencer::Sequencer(const Params &p)
     // MYSTUFF
     hovLdindE2ELatency = latencyDistribution("hovLdindE2ELatency",
         "LDIND latency from index-fetch issue to value arrival");
+    hovLdindE2ELatencyLeader = latencyDistribution(
+        "hovLdindE2ELatencyLeader",
+        "hovLdindE2ELatency of uop0s whose DAG rode their own LDIDX");
+    hovLdindE2ELatencyMerged = latencyDistribution(
+        "hovLdindE2ELatencyMerged",
+        "hovLdindE2ELatency of uop0s merged onto an index line in flight "
+        "(their DAG rode the drain-time notification)");
+    hovLdindE2ELatencyNotified = latencyDistribution(
+        "hovLdindE2ELatencyNotified",
+        "hovLdindE2ELatency of uop0s sent as a NotifyIndIdxReq (index "
+        "forwarded in the LSQ, or the register form)");
     hovLdindUnmatched = new statistics::Scalar(this, "hovLdindUnmatched",
         statistics::units::Count::get(),
         "LDIND value arrivals with no matching index fetch");
@@ -1099,7 +1110,9 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
         // value access that only carries the alias.
         if (type == RubyRequestType_LDIDX &&
             pkt->req->getExtension<DependentAccessGen>()) {
-            hovRecordLdindIndex(srequest, data);    // uop0: index arrived
+            // uop0: index arrived; a coalesced one aliased onto the line,
+            // so its DAG was merged into the drain-time notification
+            hovRecordLdindIndex(srequest, data, was_coalesced);
         } else if (type == RubyRequestType_LDVAL) {
             hovSampleLdindValue(srequest);          // uop1: value arrived
             hovCheckValue(pkt, data);
@@ -1123,7 +1136,7 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
 // MYSTUFF
 void
 Sequencer::hovRecordLdindIndex(SequencerRequest *srequest,
-                               const DataBlock &data)
+                               const DataBlock &data, bool merged)
 {
     PacketPtr pkt = srequest->pkt;
     auto dag = pkt->req->getExtension<DependentAccessGen>();
@@ -1137,7 +1150,9 @@ Sequencer::hovRecordLdindIndex(SequencerRequest *srequest,
     assert(size <= sizeof(index));
     std::memcpy(&index, data.getData(getOffset(pkt->getAddr()), size), size);
     Addr data_pa = dag->genAddress(index);
-    m_hovLdindPending[data_pa].push_back(srequest->issue_time);
+    m_hovLdindPending[data_pa].push_back(
+        {srequest->issue_time,
+         merged ? HovDagKind::Merged : HovDagKind::Leader});
 }
 
 void
@@ -1151,14 +1166,26 @@ Sequencer::hovSampleLdindValue(SequencerRequest *srequest)
     auto &pending = it->second;
     // Index fetches whose value never came (squashed uop1) age out.
     while (!pending.empty() &&
-           curCycle() - pending.front() > m_deadlock_threshold) {
+           curCycle() - pending.front().issue > m_deadlock_threshold) {
         pending.pop_front();
         (*hovLdindStale)++;
     }
     if (pending.empty()) {
         (*hovLdindUnmatched)++;
     } else {
-        hovLdindE2ELatency->sample(curCycle() - pending.front());
+        Cycles latency = curCycle() - pending.front().issue;
+        hovLdindE2ELatency->sample(latency);
+        switch (pending.front().kind) {
+          case HovDagKind::Leader:
+            hovLdindE2ELatencyLeader->sample(latency);
+            break;
+          case HovDagKind::Merged:
+            hovLdindE2ELatencyMerged->sample(latency);
+            break;
+          case HovDagKind::Notified:
+            hovLdindE2ELatencyNotified->sample(latency);
+            break;
+        }
         pending.pop_front();
     }
     if (pending.empty()) {
@@ -1395,7 +1422,7 @@ Sequencer::makeRequest(PacketPtr pkt)
         if (dag->hasIndexValue() && !dag->isMerged() &&
             dag->hasTranslator()) {
             m_hovLdindPending[dag->genAddress(dag->indexValue())]
-                .push_back(curCycle());
+                .push_back({curCycle(), HovDagKind::Notified});
         }
         if (dag->hasIndexValue()) {
             hovCheckIndex(pkt, *dag);
