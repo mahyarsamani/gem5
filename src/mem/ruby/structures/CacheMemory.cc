@@ -41,6 +41,8 @@
 
 #include "mem/ruby/structures/CacheMemory.hh"
 
+#include <algorithm>
+
 #include "base/compiler.hh"
 #include "base/intmath.hh"
 #include "base/logging.hh"
@@ -54,6 +56,7 @@
 #include "mem/cache/replacement_policies/weighted_lru_rp.hh"
 #include "mem/ruby/protocol/AccessPermission.hh"
 #include "mem/ruby/system/RubySystem.hh"
+#include "sim/cur_tick.hh"
 
 namespace gem5
 {
@@ -85,6 +88,9 @@ CacheMemory::CacheMemory(const Params &p)
     m_block_size = p.block_size;  // may be 0 at this point. Updated in init()
     m_use_occupancy = dynamic_cast<replacement_policy::WeightedLRU*>(
                                     m_replacementPolicy_ptr) ? true : false;
+    // MYSTUFF
+    s_lifetimeInstances.push_back(this);
+    // FFUTSYM
 }
 
 void
@@ -127,6 +133,11 @@ CacheMemory::init()
 
 CacheMemory::~CacheMemory()
 {
+    // MYSTUFF
+    s_lifetimeInstances.erase(std::remove(s_lifetimeInstances.begin(),
+                                          s_lifetimeInstances.end(), this),
+                              s_lifetimeInstances.end());
+    // FFUTSYM
     if (m_replacementPolicy_ptr)
         delete m_replacementPolicy_ptr;
     for (int i = 0; i < m_cache_num_sets; i++) {
@@ -735,6 +746,20 @@ CacheMemory::preDumpStats()
             it->second->sample(total.count());
         }
     }
+
+    // The chip-wide union of the resident lifetime sets: every instance
+    // drops its previous snapshot, and the first one called at this tick
+    // takes the new one (preDumpStats runs for the whole tree before any
+    // output).
+    for (auto &kv : lifetimeStats) {
+        if (kv.first.rfind("resident", 0) == 0) {
+            kv.second->reset();
+        }
+    }
+    if (s_lifetimeWalkTick != curTick()) {
+        s_lifetimeWalkTick = curTick();
+        sampleResidentLifetimes();
+    }
 }
 // FFUTSYM
 
@@ -1176,6 +1201,131 @@ void
 CacheMemory::profileAllocation(std::string acc_name)
 {
     perNameStat("bytesAllocated", acc_name) += m_block_size;
+}
+
+std::vector<CacheMemory *> CacheMemory::s_lifetimeInstances;
+Tick CacheMemory::s_lifetimeWalkTick = MaxTick;
+
+statistics::Histogram &
+CacheMemory::lifetimeHistogram(const std::string &family,
+                               const std::string &acc_name, int buckets,
+                               const std::string &desc)
+{
+    std::string eff_acc_name = acc_name == "" ? "other" : acc_name;
+    std::string key = family + "." + eff_acc_name;
+    auto it = lifetimeStats.find(key);
+    if (it == lifetimeStats.end()) {
+        statistics::Histogram* new_stat = new statistics::Histogram(
+            this, key.c_str(), statistics::units::Count::get(),
+            desc.c_str());
+        new_stat->init(buckets);
+        it = lifetimeStats.emplace(key, new_stat).first;
+    }
+    return *it->second;
+}
+
+void
+CacheMemory::profileLifetime(const DataBlock &blk, std::string acc_name,
+                             bool resident)
+{
+    profileLifetimeMasks(blk.getLifeOriginMask(), blk.getLifeOthersMask(),
+                         acc_name, resident);
+}
+
+void
+CacheMemory::profileLifetimeMasks(const WriteMask &origin,
+                                  const WriteMask &others,
+                                  const std::string &acc_name, bool resident)
+{
+    int origin_bytes = 0;
+    int all_bytes = 0;
+    bool shared = false;
+    if (origin.getBlockSize() == m_block_size &&
+        others.getBlockSize() == m_block_size) {
+        origin_bytes = origin.count();
+        shared = !others.isEmpty();
+        WriteMask all = origin;
+        all.orMask(others);
+        all_bytes = all.count();
+    }
+    const std::string prefix = resident ? "resident" : "";
+    const char *when = resident ? "still on chip at the stats dump"
+                                : "that left the chip";
+    lifetimeHistogram(resident ? "residentLifetimeUsefulBytes"
+                               : "lifetimeUsefulBytes",
+        acc_name, m_block_size + 1,
+        csprintf("Bytes any core used of a line of this access name over "
+                 "its time on chip, for lines %s.", when))
+        .sample(all_bytes);
+    lifetimeHistogram(resident ? "residentCrossCoreUsefulBytes"
+                               : "crossCoreUsefulBytes",
+        acc_name, m_block_size + 1,
+        csprintf("Bytes only cores other than the line's first user used, "
+                 "for lines of this access name %s.", when))
+        .sample(all_bytes - origin_bytes);
+    lifetimeHistogram(resident ? "residentLifetimeShared" : "lifetimeShared",
+        acc_name, 2,
+        csprintf("1 if a core other than the line's first user used it, "
+                 "for lines of this access name %s.", when))
+        .sample(shared ? 1 : 0);
+}
+
+void
+CacheMemory::sampleResidentLifetimes()
+{
+    // DataBlock::mergeLifetimeMasks, without a data block per line.
+    struct Union
+    {
+        int origin = -1;
+        WriteMask originMask;
+        WriteMask othersMask;
+        std::string accName;
+    };
+    std::unordered_map<Addr, Union> lines;
+    for (CacheMemory *cm : s_lifetimeInstances) {
+        for (auto &set : cm->m_cache) {
+            for (AbstractCacheEntry *entry : set) {
+                if (!entry || !entry->hasDataBlk()) {
+                    continue;
+                }
+                AccessPermission perm = entry->m_Permission;
+                if (perm == AccessPermission_NotPresent ||
+                    perm == AccessPermission_Invalid ||
+                    perm == AccessPermission_Busy) {
+                    continue;
+                }
+                DataBlock &blk = entry->getDataBlk();
+                if (!blk.isAlloc() || blk.getBlockSize() != m_block_size) {
+                    continue;
+                }
+                Addr addr = entry->m_Address;
+                Union &u = lines[addr];
+                if (u.originMask.getBlockSize() != m_block_size) {
+                    u.originMask = WriteMask(m_block_size);
+                    u.othersMask = WriteMask(m_block_size);
+                }
+                int origin = blk.getLifeOrigin();
+                if (origin >= 0) {
+                    if (u.origin < 0) {
+                        u.origin = origin;
+                    }
+                    WriteMask o = blk.getLifeOriginMask();
+                    if (o.getBlockSize() == m_block_size) {
+                        (origin == u.origin ? u.originMask : u.othersMask)
+                            .orMask(o);
+                        u.othersMask.orMask(blk.getLifeOthersMask());
+                    }
+                }
+                if (u.accName == "") {
+                    u.accName = blk.getAccessName(cm->name(), addr);
+                }
+            }
+        }
+    }
+    for (auto &kv : lines) {
+        profileLifetimeMasks(kv.second.originMask, kv.second.othersMask,
+                             kv.second.accName, true);
+    }
 }
 // FFUTSYM
 

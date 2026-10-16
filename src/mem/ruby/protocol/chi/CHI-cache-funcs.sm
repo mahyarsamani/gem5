@@ -813,6 +813,9 @@ void prepareRequest(TBE tbe, CHIRequestType type, CHIRequestMsg & out_msg) {
   out_msg.read_usefulness := tbe.read_usefulness;
   out_msg.write_usefulness := tbe.write_usefulness;
   out_msg.access_name := tbe.access_name;
+  out_msg.life_origin := tbe.dataBlk.getLifeOrigin();
+  out_msg.life_origin_mask := tbe.dataBlk.getLifeOriginMask();
+  out_msg.life_others_mask := tbe.dataBlk.getLifeOthersMask();
 
   out_msg.secondType := tbe.secondType;
   if (isConsideredEvict(out_msg.type)) {
@@ -879,6 +882,9 @@ void prepareRequestRetry(TBE tbe, CHIRequestMsg & out_msg) {
   out_msg.read_usefulness := tbe.read_usefulness;
   out_msg.write_usefulness := tbe.write_usefulness;
   out_msg.access_name := tbe.access_name;
+  out_msg.life_origin := tbe.dataBlk.getLifeOrigin();
+  out_msg.life_origin_mask := tbe.dataBlk.getLifeOriginMask();
+  out_msg.life_others_mask := tbe.dataBlk.getLifeOthersMask();
   out_msg.indirect_unit_id := tbe.indirect_unit_id;
   out_msg.value_unit_id := tbe.value_unit_id;
   out_msg.gather_unit_id := tbe.gather_unit_id;
@@ -2027,6 +2033,9 @@ void replicateRequestMsg(CHIRequestMsg &out_msg, CHIRequestMsg in_msg)
     out_msg.read_usefulness := in_msg.read_usefulness;
     out_msg.write_usefulness := in_msg.write_usefulness;
     out_msg.access_name := in_msg.access_name;
+    out_msg.life_origin := in_msg.life_origin;
+    out_msg.life_origin_mask := in_msg.life_origin_mask;
+    out_msg.life_others_mask := in_msg.life_others_mask;
 }
 
 

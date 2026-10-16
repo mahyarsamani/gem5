@@ -1052,6 +1052,10 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
                     makeLineAddress(request_address),
                     getOffset(request_address), pkt->getSize());
             data.setReadUsefulness(getOffset(request_address), pkt->getSize(), name(), makeLineAddress(request_address));
+            // MYSTUFF: lifetime usefulness, by this core (the Sequencer)
+            data.setLifetime(getOffset(request_address), pkt->getSize(),
+                             getId());
+            // FFUTSYM
 
            if (type == RubyRequestType_ATOMIC_RETURN) {
                DPRINTF(RubySequencer, "ATOMIC RETURN data %s\n", data);
@@ -1085,6 +1089,10 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
                 makeLineAddress(request_address),
                 getOffset(request_address), pkt->getSize());
             data.setWriteUsefulness(getOffset(request_address), pkt->getSize(), name(), makeLineAddress(request_address));
+            // MYSTUFF: lifetime usefulness, by this core (the Sequencer)
+            data.setLifetime(getOffset(request_address), pkt->getSize(),
+                             getId());
+            // FFUTSYM
             DPRINTF(RubySequencer, "set data %s\n", data);
         }
     }

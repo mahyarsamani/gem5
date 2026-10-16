@@ -274,6 +274,9 @@ action(Initiate_Request, desc="") {
   bool reduce_usefulness := false;
   WriteMask read_usefulness;
   WriteMask write_usefulness;
+  int life_origin := -1;
+  WriteMask life_origin_mask;
+  WriteMask life_others_mask;
 
   MachineID indirect_unit_id;
   MachineID gather_unit_id;
@@ -289,6 +292,9 @@ action(Initiate_Request, desc="") {
         read_usefulness := in_msg.read_usefulness;
         write_usefulness := in_msg.write_usefulness;
         reduce_usefulness := true;
+        life_origin := in_msg.life_origin;
+        life_origin_mask := in_msg.life_origin_mask;
+        life_others_mask := in_msg.life_others_mask;
         DPRINTF(Usefulness, "Got read usefulness for name %s with count %d from message.\n", in_msg.access_name, read_usefulness.count());
         DPRINTF(Usefulness, "Got write usefulness for name %s with count %d from message.\n", in_msg.access_name, write_usefulness.count());
     }
@@ -301,6 +307,12 @@ action(Initiate_Request, desc="") {
 
   DirEntry dir_entry := getDirEntry(address);
   copyCacheAndDir(cache_entry, dir_entry, tbe, initial);
+
+  // MYSTUFF: an eviction's lifetime set joins whatever this cache holds
+  // (a write-back's data brings its own copy again; OR is idempotent).
+  tbe.dataBlk.mergeLifetimeMasks(life_origin, life_origin_mask,
+                                 life_others_mask);
+  // FFUTSYM
 
   tbe.use_DMT := is_HN && enable_DMT;
   tbe.use_DCT := enable_DCT;
@@ -2321,6 +2333,10 @@ action(Receive_ReqDataResp, desc="") {
     if (tbe.expected_req_resp.receiveData(in_msg.type) == false) {
       error("Received unexpected message");
     }
+    // MYSTUFF: the copy's lifetime set joins the TBE's, whether or not
+    // its bytes are taken.
+    tbe.dataBlk.mergeLifetime(in_msg.dataBlk);
+    // FFUTSYM
     // Copy data to tbe only if we didn't have valid data or the received
     // data is dirty
     if ((in_msg.type == CHIDataType:NCBWrData) &&
@@ -2399,6 +2415,9 @@ action(Receive_SnpDataResp, desc="") {
     if (tbe.expected_snp_resp.receiveData(in_msg.type) == false) {
       error("Received unexpected message");
     }
+    // MYSTUFF: the snooped copy's lifetime set joins the TBE's.
+    tbe.dataBlk.mergeLifetime(in_msg.dataBlk);
+    // FFUTSYM
     // Copy data to tbe only if we didn't have valid data or the received
     // data is dirty
     if ((tbe.dataBlkValid.isFull() == false) ||
@@ -2864,6 +2883,12 @@ action(Receive_SnpResp, desc="") {
       error("Received unexpected message");
     }
     assert(in_msg.stale == tbe.is_stale);
+    // MYSTUFF: a dataless snoop response carries the snooped copy's
+    // lifetime set.
+    tbe.dataBlk.mergeLifetimeMasks(in_msg.life_origin,
+                                   in_msg.life_origin_mask,
+                                   in_msg.life_others_mask);
+    // FFUTSYM
   }
 }
 
@@ -3256,6 +3281,11 @@ action(Send_FwdSnpResp, desc="") {
     out_msg.addr := address;
     out_msg.responder := machineID;
     out_msg.Destination.add(tbe.requestor);
+    // MYSTUFF: the copy's lifetime set goes down with the response.
+    out_msg.life_origin := tbe.dataBlk.getLifeOrigin();
+    out_msg.life_origin_mask := tbe.dataBlk.getLifeOriginMask();
+    out_msg.life_others_mask := tbe.dataBlk.getLifeOthersMask();
+    // FFUTSYM
 
     // We have the data (locally or upstream) or are dropping it
     bool keepData := (tbe.dir_sharers.count() > 0) ||
@@ -3556,6 +3586,11 @@ action(Send_SnpRespI, desc="") {
     out_msg.type := CHIResponseType:SnpResp_I;
     out_msg.responder := machineID;
     out_msg.Destination.add(tbe.requestor);
+    // MYSTUFF: the copy's lifetime set goes down with the response.
+    out_msg.life_origin := tbe.dataBlk.getLifeOrigin();
+    out_msg.life_origin_mask := tbe.dataBlk.getLifeOriginMask();
+    out_msg.life_others_mask := tbe.dataBlk.getLifeOthersMask();
+    // FFUTSYM
   }
 }
 
@@ -3819,6 +3854,19 @@ action(Finalize_DeallocateRequest, desc="") {
   // Index-line post-processing (IDRs at the Gather Unit, StashAndPostEvict
   // above it) has run by now: processNextState pushes PostProcess until
   // needsPostProcess is false, and only then Final.
+
+  // MYSTUFF: the line leaves the chip when the home, whose downstream is
+  // memory, ends an eviction (or its own replacement) with no copy and no
+  // sharer left: sample the lifetime set the eviction and the snoops
+  // brought.
+  if (profile_usefulness && is_HN && (tbe.finalState == State:I) &&
+      (tbe.is_repl_tbe || (tbe.is_req_tbe && isConsideredEvict(tbe.reqType)))) {
+    if (machineIDToMachineType(mapAddressToDownstreamMachine(address)) ==
+        MachineType:Memory) {
+      cache.profileLifetime(tbe.dataBlk, tbe.access_name, false);
+    }
+  }
+  // FFUTSYM
 
   if (tbe.is_req_tbe) {
     deallocateReqTBE(tbe);

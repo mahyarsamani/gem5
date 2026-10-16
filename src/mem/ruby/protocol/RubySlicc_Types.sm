@@ -274,6 +274,7 @@ structure (CacheMemory, external = "yes") {
   void profileAllocation(std::string);
   void profileTransfer(MachineID, std::string, int, std::string);
   void profileSnoopSharing(DataBlock, RequestPtr, bool, bool, std::string);
+  void profileLifetime(DataBlock, std::string, bool);
   // FFUTSYM
 }
 

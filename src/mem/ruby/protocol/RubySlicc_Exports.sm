@@ -99,6 +99,13 @@ structure(DataBlock, external = "yes", desc="..."){
 
   void setAccessName(std::string name, bool can_override, std::string obj_name, Addr addr);
   std::string getAccessName(std::string, Addr);
+
+  // Lifetime usefulness (travels with the data; see DataBlock.hh)
+  void mergeLifetime(DataBlock);
+  void mergeLifetimeMasks(int, WriteMask, WriteMask);
+  int getLifeOrigin();
+  WriteMask getLifeOriginMask();
+  WriteMask getLifeOthersMask();
   // FFUTSYM:
 
   int numAtomicLogEntries();

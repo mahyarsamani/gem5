@@ -311,6 +311,24 @@ class CacheMemory : public SimObject
         std::unordered_map<std::string, statistics::Histogram*> &family,
         const std::string &family_name, const std::string &acc_name,
         const std::string &desc);
+    // Lifetime usefulness (DataBlock::setLifetime), keyed by
+    // "<family>.<access name>": lifetimeUsefulBytes, crossCoreUsefulBytes
+    // and lifetimeShared for lines leaving the chip, and the same with a
+    // "resident" prefix for the chip-wide union of the lines still on chip
+    // at a dump (rebuilt at every dump).
+    std::unordered_map<std::string, statistics::Histogram*> lifetimeStats;
+    statistics::Histogram &lifetimeHistogram(const std::string &family,
+                                             const std::string &acc_name,
+                                             int buckets,
+                                             const std::string &desc);
+    // Every CacheMemory, so that one of them can take the chip-wide union
+    // of the resident lifetime sets once per dump.
+    static std::vector<CacheMemory *> s_lifetimeInstances;
+    static Tick s_lifetimeWalkTick;
+    void sampleResidentLifetimes();
+    void profileLifetimeMasks(const WriteMask &origin,
+                              const WriteMask &others,
+                              const std::string &acc_name, bool resident);
     std::unordered_map<std::string,
         std::unordered_map<std::string,
             std::unordered_map<MachineID, statistics::Scalar*>>>
@@ -377,6 +395,10 @@ class CacheMemory : public SimObject
       void profileSnoopSharing(const DataBlock &blk, RequestPtr req,
                                bool req_valid, bool unique,
                                std::string acc_name);
+      // A line's lifetime set: on leaving the chip (`resident` false), or
+      // in the dump-time union of the lines still on chip (true).
+      void profileLifetime(const DataBlock &blk, std::string acc_name,
+                           bool resident);
       // FFUTSYM
 
 };
