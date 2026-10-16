@@ -1082,6 +1082,7 @@ transition(BUSY_BLKD, SendEvict, BUSY_INTR) {DestinationAvailable} {
 transition({BUSY_BLKD, BUSY_INTR}, SendCompData, BUSY_BLKD) {
   Pop_TriggerQueue;
   Send_CompData;
+  ScheduleIDRs;
   ProcessNextState_ClearPending;
 }
 

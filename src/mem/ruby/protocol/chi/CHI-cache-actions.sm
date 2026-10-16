@@ -4529,8 +4529,25 @@ action(PostProcess,
     }
 }
 
+// The Gather Unit sends the IDRs of an index request as soon as its data
+// goes to the Indirect Unit (SendCompData), not after the transaction's
+// CompAck, fill and tag write (PostProcess), so that an IDR reaches the
+// Indirect Unit about when the index does and before uop1 misses there.
+// PostProcess still sends what this does not reach: the IDRs of a
+// notification (answered with NotifAck) or of a post-evict write-back.
+action(ScheduleIDRs, desc="Gather Unit: send the IDRs once the index data leaves")
+{
+    if (gather_unit && hasDependentWork(address)) {
+        assert(tbe.dataValid);
+        if (idr_coalesce) {
+            coalesceExtensions(address, tbe.dataBlk);
+        }
+        tbe.actions.pushFrontNB(Event:SendIDR);
+    }
+}
+
 action(SendIDR,
-       desc="Send one ReadValue/WriteValue IDR (non-blocking, no self-chain)")
+       desc="Send one ReadValue/WriteValue IDR (non-blocking); the next follows at once")
 {
     assert(gather_unit);
     assert(hasDependentWork(address));
@@ -4635,7 +4652,11 @@ action(SendIDR,
             }
         }
     }
-    // No self-chain: PostProcess is pushed again by processNextState
+    // The line's next IDR follows at once (a non-blocking trigger), whether
+    // ScheduleIDRs or PostProcess pushed this one.
+    if (hasDependentWork(address)) {
+        tbe.actions.pushFrontNB(Event:SendIDR);
+    }
 }
 
 // A cache above the Gather Unit that holds an index line never forwards a
