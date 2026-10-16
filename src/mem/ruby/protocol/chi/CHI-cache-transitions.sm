@@ -75,6 +75,11 @@ transition({UD,UD_T,SD,UC,SC,I,BUSY_INTR,BUSY_BLKD}, AllocSeqRequest) {
   AllocateTBE_SeqRequest;
 }
 
+// MYSTUFF: a notification, outside the core's TBE budget
+transition({UD,UD_T,SD,UC,SC,I,BUSY_INTR,BUSY_BLKD}, AllocSeqNotif) {
+  AllocateTBE_SeqNotif;
+}
+
 // You can't allocate a DVM request on the same TBE as another DVM request,
 // so we don't need a long "Transition-from" list and we can change the output state.
 transition({I}, AllocSeqDvmRequest) {

@@ -145,11 +145,29 @@ action(AllocateTBE_DvmSnoop, desc="") {
 action(AllocateTBE_SeqRequest, desc="") {
   // No retry for sequencer requests; just create resource stall
   check_allocate(storTBEs);
+  // MYSTUFF: and within the core's budget (idr_reserved_tbes stay free)
+  check_allocate(storSeqTBEs);
 
   // reserve a slot for this request
   storTBEs.incrementReserved();
+  storSeqTBEs.incrementReserved();
 
   // Move request to rdy queue
+  peek(seqInPort, RubyRequest) {
+    enqueue(reqRdyOutPort, CHIRequestMsg, allocation_latency) {
+      populateFromSeqReqMsg(out_msg, in_msg);
+      out_msg.secondType := manipulateSecondType(out_msg);
+      out_msg.type := manipulateType(out_msg);
+    }
+  }
+  seqInPort.dequeue(clockEdge());
+}
+
+// MYSTUFF: a notification from the Sequencer takes a TBE outside the
+// core's budget, standing in for a notification path that needs none.
+action(AllocateTBE_SeqNotif, desc="") {
+  check_allocate(storTBEs);
+  storTBEs.incrementReserved();
   peek(seqInPort, RubyRequest) {
     enqueue(reqRdyOutPort, CHIRequestMsg, allocation_latency) {
       populateFromSeqReqMsg(out_msg, in_msg);
@@ -207,9 +225,12 @@ action(AllocateTBE_SeqDvmRequest, desc="") {
 action(AllocateTBE_PfRequest, desc="Allocate TBE for prefetch request") {
   // No retry for prefetch requests; just create resource stall
   check_allocate(storTBEs);
+  // MYSTUFF: prefetches are the core's too (idr_reserved_tbes stay free)
+  check_allocate(storSeqTBEs);
 
   // reserve a slot for this request
   storTBEs.incrementReserved();
+  storSeqTBEs.incrementReserved();
 
   // Move request to rdy queue
   peek(pfInPort, RubyRequest) {
@@ -353,8 +374,20 @@ action(Initiate_Request, desc="") {
                          (is_invalid(cache_entry) && (alloc_entry == false));
   tbe.doCacheFill := alloc_entry || is_valid(cache_entry);
 
+  // MYSTUFF: a value access this level means to keep (the Value Unit) must
+  // see the data: with DCT a sharer would forward it straight to the
+  // requester and the line would never fill here. Only the ReadShared
+  // flows fill from upstream (MaintainCoherence); a ReadOnce served from
+  // upstream drops its data whatever the snoop.
+  if (alloc_entry && isIndirectVal(tbe.reqType, tbe.secondType) &&
+      ((tbe.reqType == CHIRequestType:ReadShared) ||
+       (tbe.reqType == CHIRequestType:ReadNotSharedDirty))) {
+    tbe.use_DCT := false;
+  }
+  // FFUTSYM
+
   // Schedule HovAck before tag read so the gather unit knows we accepted
-  if (indirect_unit && isIndirectVal(tbe.reqType, tbe.secondType)) {
+  if (indirect_unit && isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
     tbe.actions.pushNB(Event:SendHovAck);
   }
 
@@ -1689,7 +1722,7 @@ action(Send_ReadNoSnp, desc="") {
   assert((tbe.use_DMT == false) ||
          ((tbe.reqType == CHIRequestType:AtomicReturn) ||
           (tbe.reqType == CHIRequestType:AtomicNoReturn)) ||
-          (tbe.reqType == CHIRequestType:ReadIndirect));
+          (tbe.reqType == CHIRequestType:ReadIndex));
 
   clearExpectedReqResp(tbe);
   tbe.expected_req_resp.addExpectedDataType(CHIDataType:CompData_UC);
@@ -3879,15 +3912,16 @@ action(Callback_LoadHit, desc="") {
   assert(tbe.reqType == CHIRequestType:Load);
 
   // MYSTUFF
-  // Two-uop model: only the index access (uop0, ReadIndirect) calls back;
+  // Two-uop model: only the index access (uop0, ReadIndex) calls back;
   // the CPU extracts index[i] from the line and writes it to Rd+1.
-  // Value accesses (ReadValue/WriteValue, sent by the Gather Unit) never
-  // call back: they only bring the line to the Indirect Unit, and the
-  // core's own value access (uop1) is a normal load/store.
-  if (isIndirect(tbe.reqType, tbe.secondType)) {
+  // IDRs (ReadValue/WriteValue, sent by the Gather Unit) never call back:
+  // they only bring the line to the Indirect Unit, and the core's own
+  // value access (uop1) is a Load/Store that calls back as any other.
+  if (isIndirectIdx(tbe.reqType, tbe.secondType) ||
+      isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
     if (tbe.dataValid && (tbe.reqType == CHIRequestType:Load)) {
         DPRINTF(IndirectAccess, "Finished servicing a hit for a load to addr %#lx.\n", tbe.addr);
-        if (tbe.secondType == CHIRequestType:ReadIndirect) {
+        if (tbe.secondType == CHIRequestType:ReadIndex) {
             DPRINTF(IndirectAccess, "Load to addr %#lx was to an index. Calling back to CPU.\n", tbe.addr);
             sequencer.readCallback(tbe.addr, tbe.accAddr, tbe.dataBlk, true);
         }
@@ -3908,7 +3942,7 @@ action(Callback_StoreHit, desc="") {
   // A WriteValue (sent by the Gather Unit for stind) only obtains unique
   // permission at the Indirect Unit: no callback and no data written. The
   // core's own value store (uop1) is a normal store that writes the data.
-  if (isIndirectVal(tbe.reqType, tbe.secondType)) {
+  if (isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
     DPRINTF(IndirectAccess, "WriteValue to addr %#lx hit. No callback.\n", tbe.addr);
   // FFUTSYM
   } else if (tbe.is_local_pf == false) {
@@ -3941,6 +3975,7 @@ action(Callback_ExpressPrefetchHit, desc="") {
   // have not allocated TBE, but must clear the reservation
   assert(is_invalid(tbe));
   storTBEs.decrementReserved();
+  storSeqTBEs.decrementReserved();
   assert(storTBEs.areNSlotsAvailable(1));
   assert(use_prefetcher);
 
@@ -3957,13 +3992,14 @@ action(Callback_ExpressPrefetchHit, desc="") {
 action(Callback_Miss, desc="") {
   assert(is_valid(tbe));
   // MYSTUFF
-  // Two-uop model: only the index access (uop0, ReadIndirect) calls back.
-  // Value accesses (ReadValue/WriteValue) never call back; see
+  // Two-uop model: only the index access (uop0, ReadIndex) calls back.
+  // IDRs (ReadValue/WriteValue from the Gather Unit) never call back; see
   // Callback_LoadHit.
-  if (isIndirect(tbe.reqType, tbe.secondType)) {
+  if (isIndirectIdx(tbe.reqType, tbe.secondType) ||
+      isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
     if (tbe.dataValid && (tbe.reqType == CHIRequestType:Load)) {
         DPRINTF(IndirectAccess, "Finished servicing a miss for a load to addr %#lx.\n", tbe.addr);
-        if (tbe.secondType == CHIRequestType:ReadIndirect) {
+        if (tbe.secondType == CHIRequestType:ReadIndex) {
             DPRINTF(IndirectAccess, "Load to addr %#lx was to an index. Calling back to CPU.\n", tbe.addr);
             sequencer.readCallback(tbe.addr, tbe.accAddr, tbe.dataBlk, true);
         }
@@ -4068,7 +4104,7 @@ action(Profile_Miss, desc="") {
   if (is_demand == false) {
     assert(use_prefetcher || tbe.is_remote_pf);
     cache.profilePrefetchMiss(tbe.access_name);
-  } else if (isIndirectVal(tbe.reqType, tbe.secondType)) {
+  } else if (isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
     cache.profileIdrMiss(tbe.access_name);
   } else if (isIndirectIdx(tbe.reqType, tbe.secondType)) {
     cache.profileIndexMiss(tbe.access_name);
@@ -4103,7 +4139,7 @@ action(Profile_Hit, desc="") {
   if (is_demand == false) {
     assert(use_prefetcher || tbe.is_remote_pf);
     cache.profilePrefetchHit(tbe.access_name);
-  } else if (isIndirectVal(tbe.reqType, tbe.secondType)) {
+  } else if (isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
     cache.profileIdrHit(tbe.access_name);
   } else if (isIndirectIdx(tbe.reqType, tbe.secondType)) {
     cache.profileIndexHit(tbe.access_name);

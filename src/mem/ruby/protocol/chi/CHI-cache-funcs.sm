@@ -223,18 +223,28 @@ bool isConsideredEvict(CHIRequestType type)
 bool isIndirectIdx(CHIRequestType type, CHIRequestType second_type) {
     return (
         ((type == CHIRequestType:Load) || (type == CHIRequestType:ReadOnce)) &&
-        ((second_type == CHIRequestType:ReadIndirect) ||
-        (second_type == CHIRequestType:WriteIndirect))
+        (second_type == CHIRequestType:ReadIndex)
     );
 }
 
-// An IDR (ReadValue/WriteValue), whatever type it was mapped to locally.
+// A value access (ReadValue/WriteValue), whatever type it was mapped to
+// locally: an IDR, or the core's own uop1 (LDVAL/STVAL).
 bool isIndirectVal(CHIRequestType type, CHIRequestType second_type)
 {
     return (
         (second_type == CHIRequestType:ReadValue) ||
         (second_type == CHIRequestType:WriteValue)
     );
+}
+
+// An IDR: a value access another controller (the Gather Unit) sent here.
+// The core's own uop1 (LDVAL/STVAL) is a value access whose requestor is
+// this controller; it is a normal load or store here (TBE id,
+// Sequencer callback, demand stats) and an IDR's HovAck is not its.
+bool isIdr(CHIRequestType type, CHIRequestType second_type,
+           MachineID requestor)
+{
+    return isIndirectVal(type, second_type) && (requestor != machineID);
 }
 // FFUTSYM
 
@@ -396,8 +406,7 @@ void notifyCoalesced(Addr addr, RubyRequestType type, RequestPtr req,
   DPRINTF(RubySlicc, "notifyCoalesced(addr=%#x, type=%s, was_miss=%d)\n",
                       addr, type, was_miss);
   // MYSTUFF: a coalesced index access (uop0) is counted apart from demand
-  bool is_index := (type == RubyRequestType:LDIND) ||
-                   (type == RubyRequestType:STIND);
+  bool is_index := (type == RubyRequestType:LDIDX);
   if (is_index && was_miss) {
     cache.profileIndexMiss(access_name);
   } else if (is_index) {
@@ -410,6 +419,7 @@ void notifyCoalesced(Addr addr, RubyRequestType type, RequestPtr req,
   // FFUTSYM
   if (use_prefetcher && notify_coalesced) {
     bool is_read := (type == RubyRequestType:LD) ||
+                    (type == RubyRequestType:LDVAL) ||
                     (type == RubyRequestType:Load_Linked) ||
                     (type == RubyRequestType:IFETCH);
     if (was_miss) {
@@ -534,7 +544,7 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   // MYSTUFF: an IDR becomes a Load/Store here (manipulateType) but keeps
   // the hov id the Gather Unit gave it as txnId; Send_HovAck returns it.
   if (fromSequencer(in_msg.type) &&
-      (isIndirectVal(in_msg.type, in_msg.secondType) == false)) {
+      (isIdr(in_msg.type, in_msg.secondType, in_msg.requestor) == false)) {
     assert(in_msg.txnId == max_outstanding_transactions);
     tbe.txnId := static_cast(Addr, "value", tbe.storSlot);
   } else {
@@ -963,8 +973,7 @@ void printResources() {
 bool indirectAllocCriterion(CHIRequestType second_type) {
   // Gather unit: allocate for index array cache lines
   bool gather_unit_criterion := (alloc_for_index &&
-                                  ((second_type == CHIRequestType:ReadIndirect) ||
-                                  (second_type == CHIRequestType:WriteIndirect)));
+                                  (second_type == CHIRequestType:ReadIndex));
   // Indirect unit (L1) and Value unit (shared): both allocate for data
   // array cache lines when they see ReadValue/WriteValue. The per-level
   // alloc_for_read_value/alloc_for_write_value booleans (set in config)
@@ -1001,9 +1010,13 @@ bool needCacheEntry(CHIRequestType req_type, CHIRequestType second_type,
     // Positive whitelist: Only allow requests that actively fetch or write data
     // to allocate blocks based on indirect criteria. This prevents crashes with
     // dataless requests like CleanUnique or CMOs.
+    // A ReadUnique is left to the default criteria: its requester is about
+    // to write the line, so a copy kept here would be stale at once, and
+    // the flow from a state with the line only upstream (RUSC, RU, ...)
+    // has no fill step (Initiate_ReadUnique_HitUpstream). A WriteValue line
+    // reaches the Value Unit with the writer's write-back instead.
     bool is_data_request := (req_type == CHIRequestType:ReadShared) ||
                             (req_type == CHIRequestType:ReadNotSharedDirty) ||
-                            (req_type == CHIRequestType:ReadUnique) ||
                             (req_type == CHIRequestType:Load) ||
                             (req_type == CHIRequestType:Store);
     if (is_data_request) {
@@ -1035,10 +1048,15 @@ bool needCacheEntry(CHIRequestType req_type, CHIRequestType second_type,
 bool needDeallocCacheEntry(CHIRequestType req_type,
                            CHIRequestType second_type) {
   // MYSTUFF
-  // A level that caches this kind of indirect line keeps it, even when the
-  // request takes it unique or shared (e.g. the Value Unit on a WriteValue's
-  // ReadUnique, so it keeps caching the data array at block granularity).
-  if ((second_type != CHIRequestType:null) &&
+  // A level that caches this kind of indirect line keeps it when the
+  // request takes it shared (e.g. the Value Unit on a ReadValue's
+  // ReadShared, so it keeps caching the data array at block granularity).
+  // A request that takes the line unique is left to the default criteria
+  // (see needCacheEntry): the copy would be stale once the requester writes.
+  bool takes_unique := (req_type == CHIRequestType:ReadUnique) ||
+                       (req_type == CHIRequestType:MakeReadUnique) ||
+                       (req_type == CHIRequestType:CleanUnique);
+  if ((second_type != CHIRequestType:null) && (takes_unique == false) &&
       indirectAllocCriterion(second_type)) {
     return false;
   }
@@ -1206,6 +1224,12 @@ void deallocateReqTBE(TBE tbe) {
   // Clear any cached Request extensions for this TBE's line address.
   if (gather_unit) {
       clearExtensions(tbe.addr);
+  }
+  // MYSTUFF: a Sequencer or prefetch request (its own requestor, not a
+  // notification) gives its place in the core's budget back.
+  if ((tbe.requestor == machineID) &&
+      (tbe.reqType != CHIRequestType:NotifyIndIdx)) {
+    storSeqTBEs.decrementReserved();
   }
   storTBEs.removeEntryFromSlot(tbe.storSlot);
   TBEs.deallocate(tbe.addr);
@@ -1931,12 +1955,25 @@ void populateFromSeqReqMsg(CHIRequestMsg &out_msg, RubyRequest in_msg) {
       } else {
         out_msg.type := CHIRequestType:Store;
       }
-    } else if (in_msg.Type == RubyRequestType:LDIND) {
-      out_msg.type := CHIRequestType:ReadIndirect;
-    } else if (in_msg.Type == RubyRequestType:STIND) {
-      out_msg.type := CHIRequestType:WriteIndirect;
+    // MYSTUFF: the two uops of an ldind or stind. Like an IDR arriving
+    // from the Gather Unit, each becomes a Load or Store here with its kind
+    // kept as secondType (manipulateType, manipulateSecondType), so the
+    // levels below see an index access (ReadIndex) or a value access
+    // (ReadValue/WriteValue: allocation by alloc_for_*_value, no training
+    // of the Gather Unit's prefetcher). Unmarked, a uop1 miss would reach
+    // the Gather Unit as a plain load sharing the ldind's PC with uop0,
+    // and its random data lines would keep the stride table from learning
+    // the index stream. IDRs stay apart from uop1 by requestor (isIdr).
+    } else if (in_msg.Type == RubyRequestType:LDIDX) {
+      out_msg.type := CHIRequestType:ReadIndex;
+    } else if (in_msg.Type == RubyRequestType:LDVAL) {
+      out_msg.type := CHIRequestType:ReadValue;
+    } else if (in_msg.Type == RubyRequestType:STVAL) {
+      assert(in_msg.Size < blockSize);
+      out_msg.type := CHIRequestType:WriteValue;
     } else if (in_msg.Type == RubyRequestType:NOTIFY_INDIDX) {
       out_msg.type := CHIRequestType:NotifyIndIdx;
+    // FFUTSYM
     } else if (in_msg.Type == RubyRequestType:ATOMIC_RETURN) {
       out_msg.type := CHIRequestType:AtomicLoad;
     } else if (in_msg.Type == RubyRequestType:ATOMIC_NO_RETURN) {
@@ -2058,9 +2095,7 @@ bool isPropagateEvict(CHIRequestType type, CHIRequestType second_type)
 
 CHIRequestType manipulateType(CHIRequestMsg msg)
 {
-    if (indirect_unit && msg.type == CHIRequestType:ReadIndirect) {
-        return CHIRequestType:Load;
-    } else if (indirect_unit && msg.type == CHIRequestType:WriteIndirect) {
+    if (indirect_unit && msg.type == CHIRequestType:ReadIndex) {
         return CHIRequestType:Load;
     } else if (indirect_unit && msg.type == CHIRequestType:ReadValue) {
         return CHIRequestType:Load;
@@ -2073,10 +2108,8 @@ CHIRequestType manipulateType(CHIRequestMsg msg)
 
 CHIRequestType manipulateSecondType(CHIRequestMsg msg)
 {
-    if (indirect_unit && msg.type == CHIRequestType:ReadIndirect) {
-        return CHIRequestType:ReadIndirect;
-    } else if (indirect_unit && msg.type == CHIRequestType:WriteIndirect) {
-        return CHIRequestType:WriteIndirect;
+    if (indirect_unit && msg.type == CHIRequestType:ReadIndex) {
+        return CHIRequestType:ReadIndex;
     } else if (indirect_unit && msg.type == CHIRequestType:ReadValue) {
         return CHIRequestType:ReadValue;
     } else if (indirect_unit && msg.type == CHIRequestType:WriteValue) {

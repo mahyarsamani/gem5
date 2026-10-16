@@ -377,7 +377,7 @@ struct IndCarriers
  *
  * The pair's base_index, base_alias, base_data and count come from the
  * side-car entry the instruction names (regs/misc.hh, hovPairReg); i is
- * the only register source. Issues a ReadIndReq with IndirectAccessAlias
+ * the only register source. Issues a ReadIdxReq with IndirectAccessAlias
  * and DependentAccessGen extensions. The CHI protocol treats this as a
  * Phase 1 index fetch. The alias is base_alias + i * sizeData.
  * On completion, writes index[i] to its one carrier (IndCarriers), and

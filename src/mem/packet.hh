@@ -149,10 +149,16 @@ class MemCmd
         HTMAbort,
         // Tlb shootdown
         TlbiExtSync,
-        ReadIndReq,
-        ReadIndResp,
-        WriteIndReq,
-        WriteIndResp,
+        // uop0 of an ldind or stind: reads index[i]; the access intent
+        // (read or write) is in the request's DependentAccessGen.
+        ReadIdxReq,
+        ReadIdxResp,
+        // uop1 of an ldind or stind: a normal read or write of the data
+        // address that carries the alias (IndirectAccessAlias).
+        ReadValReq,
+        ReadValResp,
+        WriteValReq,
+        WriteValResp,
         // A uop0 whose index value was forwarded in the LSQ: delivers its
         // DAG to the Gather Unit, no data comes back.
         NotifyIndIdxReq,
@@ -172,7 +178,8 @@ class MemCmd
     {
         IsRead,         //!< Data flows from responder to requester
         IsWrite,        //!< Data flows from requester to responder
-        IsIndirect,
+        IsIndirectIdx,  //!< An indirect access's index access (uop0)
+        IsIndirectVal,  //!< An indirect access's value access (uop1)
         IsCompact,
         IsUpgrade,
         IsInvalidate,
@@ -241,7 +248,8 @@ class MemCmd
     bool isRead() const            { return testCmdAttrib(IsRead); }
     bool isWrite() const           { return testCmdAttrib(IsWrite); }
     // MYSTUFF
-    bool isIndirect() const        { return testCmdAttrib(IsIndirect); }
+    bool isIndirectIdx() const     { return testCmdAttrib(IsIndirectIdx); }
+    bool isIndirectVal() const     { return testCmdAttrib(IsIndirectVal); }
     bool isCompact() const         { return testCmdAttrib(IsCompact); }
     // FFUTSYM
     bool isUpgrade() const         { return testCmdAttrib(IsUpgrade); }
@@ -610,7 +618,8 @@ class Packet : public Printable, public Extensible<Packet>
 
     bool isRead() const              { return cmd.isRead(); }
     bool isWrite() const             { return cmd.isWrite(); }
-    bool isIndirect() const          { return cmd.isIndirect(); }
+    bool isIndirectIdx() const       { return cmd.isIndirectIdx(); }
+    bool isIndirectVal() const       { return cmd.isIndirectVal(); }
     bool isCompact() const           { return cmd.isCompact(); }
     bool isDemand() const            { return cmd.isDemand(); }
     bool isUpgrade()  const          { return cmd.isUpgrade(); }

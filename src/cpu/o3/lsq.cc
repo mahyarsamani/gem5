@@ -1218,7 +1218,7 @@ LSQ::SingleDataRequest::recvTimingResp(PacketPtr pkt)
     assert(_numOutstandingPackets == 1);
     flags.set(Flag::Complete);
 
-    // Two-uop model: uop0 (ReadIndReq) and uop1 (a normal ReadReq/WriteReq
+    // Two-uop model: uop0 (ReadIdxReq) and uop1 (a ReadValReq/WriteValReq
     // that carries the alias) both complete through the Sequencer's normal
     // callbacks, with the original stored packet.
     assert(pkt == _packets.front());
@@ -1231,7 +1231,7 @@ LSQ::SingleDataRequest::recvTimingResp(PacketPtr pkt)
 bool
 LSQ::SplitDataRequest::recvTimingResp(PacketPtr pkt)
 {
-    assert(!pkt->isIndirect());
+    assert(!pkt->isIndirectIdx());
 
     uint32_t pktIdx = 0;
     while (pktIdx < _packets.size() && pkt != _packets[pktIdx])
@@ -1261,18 +1261,23 @@ LSQ::SingleDataRequest::buildPackets()
 {
     /* Retries do not create new packets. */
     if (_packets.size() == 0) {
-        // Only the index uop (uop0) carries a DependentAccessGen and is an
-        // indirect access; the value uop (uop1) carries just the alias and
-        // is a normal load or store (as in TimingSimpleCPU::buildPacket).
-        bool is_indirect =
+        // The index uop (uop0) carries a DependentAccessGen and reads
+        // index[i] (its read or write intent is in the DAG); the value uop
+        // (uop1) carries just the alias and is a load or store of the data
+        // address, marked as a value access.
+        bool is_index =
             req()->getExtension<DependentAccessGen>() != nullptr;
-        if (is_indirect) {
+        bool is_value = !is_index &&
+            (req()->getExtension<IndirectAccessAlias>() != nullptr);
+        if (is_index) {
             // A uop0 whose index value was forwarded in the LQ only
             // delivers its DAG (the data is already in memData).
             MemCmd cmd = isIdxForwarded() ? MemCmd::NotifyIndIdxReq
-                       : isLoad() ? MemCmd::ReadIndReq
-                       : MemCmd::WriteIndReq;
+                       : MemCmd::ReadIdxReq;
             _packets.push_back(new Packet(req(), cmd));
+        } else if (is_value) {
+            _packets.push_back(new Packet(req(),
+                    isLoad() ? MemCmd::ReadValReq : MemCmd::WriteValReq));
         } else {
             _packets.push_back(
                     isLoad()

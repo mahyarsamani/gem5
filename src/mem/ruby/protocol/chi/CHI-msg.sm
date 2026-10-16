@@ -98,9 +98,12 @@ enumeration(CHIRequestType, desc="") {
   DvmOpSync;
 
   // MYSTUFF:
-  ReadIndirect;
-  WriteIndirect;
+  // The index access of an ldind or stind (uop0, the Sequencer's LDIDX);
+  // its read or write intent is in the DAG.
+  ReadIndex;
 
+  // A value access: an IDR from the Gather Unit, or the core's own uop1
+  // (the Sequencer's LDVAL/STVAL), told apart by requestor (isIdr).
   ReadValue;
   WriteValue;
 

@@ -936,8 +936,9 @@ def template AmoArithmeticOpConstructor {{
 // Indirect Load (LDIND) macro-op templates — two-uop model
 //
 // The macro-op decomposes into:
-//   uop0 (MicroIndIdx):  load index[i] from the index array (ReadIndReq)
-//   uop1 (MicroLdIndVal): load data[index[i]] from the data array (ReadReq)
+//   uop0 (MicroIndIdx):  load index[i] from the index array (ReadIdxReq)
+//   uop1 (MicroLdIndVal): load data[index[i]] from the data array
+//                         (ReadValReq)
 // ---------------------------------------------------------------------------
 
 def template LoadIndirectDeclare {{
@@ -1042,8 +1043,8 @@ def template LoadIndirectCompleteAcc {{
 // Indirect Store (STIND) macro-op templates — two-uop model
 //
 // The macro-op decomposes into:
-//   uop0 (MicroIndIdx):   load index[i] from the index array (ReadIndReq)
-//   uop1 (MicroStIndVal): store data to data[index[i]] (WriteReq)
+//   uop0 (MicroIndIdx):   load index[i] from the index array (ReadIdxReq)
+//   uop1 (MicroStIndVal): store data to data[index[i]] (WriteValReq)
 // ---------------------------------------------------------------------------
 
 def template StoreIndirectDeclare {{

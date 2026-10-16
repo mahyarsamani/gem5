@@ -446,6 +446,11 @@ in_port(seqInPort, RubyRequest, mandatoryQueue, rank=1) {
             nullTBE(), // TBE isn't allocated yet
           );
         }
+      } else if (in_msg.Type == RubyRequestType:NOTIFY_INDIDX) {
+        // MYSTUFF: outside the core's TBE budget (idr_reserved_tbes)
+        trigger(Event:AllocSeqNotif, in_msg.LineAddress,
+                getCacheEntry(in_msg.LineAddress),
+                getCurrentActiveTBE(in_msg.LineAddress));
       } else {
         trigger(Event:AllocSeqRequest, in_msg.LineAddress,
                 getCacheEntry(in_msg.LineAddress),

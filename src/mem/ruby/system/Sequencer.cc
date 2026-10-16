@@ -419,8 +419,8 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType primary_type,
     }
 
     Addr line_addr = makeLineAddress(pkt->getAddr());
-    // Two-uop model: the index access (uop0, LDIND/STIND, carries the DAG)
-    // and the value access (uop1, a normal LD/ST that carries the alias)
+    // Two-uop model: the index access (uop0, LDIDX, carries the DAG) and
+    // the value access (uop1, LDVAL/STVAL, carries the alias)
     // both use m_RequestTable keyed by their line address.
     // Check if there is any outstanding request for the same cache line.
     auto &seq_req_list = m_RequestTable[line_addr];
@@ -580,6 +580,7 @@ Sequencer::writeCallback(Addr address, Addr accAddress, DataBlock& data,
 
         if (ruby_request) {
             assert(seq_req.m_type != RubyRequestType_LD);
+            assert(seq_req.m_type != RubyRequestType_LDVAL);
             assert(seq_req.m_type != RubyRequestType_Load_Linked);
             assert(seq_req.m_type != RubyRequestType_IFETCH);
             assert(seq_req.m_type != RubyRequestType_ATOMIC_RETURN);
@@ -588,6 +589,7 @@ Sequencer::writeCallback(Addr address, Addr accAddress, DataBlock& data,
 
         // handle write request
         if ((seq_req.m_type != RubyRequestType_LD) &&
+            (seq_req.m_type != RubyRequestType_LDVAL) &&
             (seq_req.m_type != RubyRequestType_Load_Linked) &&
             (seq_req.m_type != RubyRequestType_IFETCH)) {
             // LL/SC support (tested with ARMv8)
@@ -665,8 +667,8 @@ Sequencer::processReadCallback(SequencerRequest &seq_req,
                (seq_req.m_type == RubyRequestType_Load_Linked) ||
                (seq_req.m_type == RubyRequestType_IFETCH) ||
                // MYSTUFF
-               (seq_req.m_type == RubyRequestType_LDIND) ||
-               (seq_req.m_type == RubyRequestType_STIND));
+               (seq_req.m_type == RubyRequestType_LDVAL) ||
+               (seq_req.m_type == RubyRequestType_LDIDX));
                // FFUTSYM
     }
     if ((seq_req.m_type != RubyRequestType_LD) &&
@@ -674,8 +676,8 @@ Sequencer::processReadCallback(SequencerRequest &seq_req,
         (seq_req.m_type != RubyRequestType_IFETCH) &&
         (seq_req.m_type != RubyRequestType_REPLACEMENT) &&
         // MYSTUFF
-        (seq_req.m_type != RubyRequestType_LDIND) &&
-        (seq_req.m_type != RubyRequestType_STIND)) {
+        (seq_req.m_type != RubyRequestType_LDVAL) &&
+        (seq_req.m_type != RubyRequestType_LDIDX)) {
         // FFUTSYM
         // Write request: reissue request to the cache hierarchy
         issueRequest(seq_req.pkt, seq_req.m_second_type);
@@ -718,8 +720,8 @@ Sequencer::readCallback(Addr address, Addr accAddress, DataBlock& data,
                    (seq_req.m_type == RubyRequestType_Load_Linked) ||
                    (seq_req.m_type == RubyRequestType_IFETCH) ||
                    // MYSTUFF
-                   (seq_req.m_type == RubyRequestType_LDIND) ||
-                   (seq_req.m_type == RubyRequestType_STIND));
+                   (seq_req.m_type == RubyRequestType_LDVAL) ||
+                   (seq_req.m_type == RubyRequestType_LDIDX));
                    // FFUTSYM
         }
         if (ruby_request) {
@@ -1028,8 +1030,8 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
             (type == RubyRequestType_Load_Linked) ||
             (type == RubyRequestType_ATOMIC_RETURN) ||
             // MYSTUFF
-            (type == RubyRequestType_LDIND) ||
-            (type == RubyRequestType_STIND)
+            (type == RubyRequestType_LDVAL) ||
+            (type == RubyRequestType_LDIDX)
             // FFUTSYM
             ) {
             pkt->setData(
@@ -1093,13 +1095,12 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
     // MYSTUFF: must run before pkt can be freed (delete / ruby_hit_callback)
     handleIndArrival(pkt);
     if (!rs->getWarmupEnabled() && !rs->getCooldownEnabled()) {
-        // uop0 is an indirect read carrying the DAG; uop1 (the value) is a
-        // normal load that only carries the alias.
-        if (type == RubyRequestType_LDIND &&
+        // uop0 is an index read carrying the DAG; uop1 (the value) is a
+        // value access that only carries the alias.
+        if (type == RubyRequestType_LDIDX &&
             pkt->req->getExtension<DependentAccessGen>()) {
             hovRecordLdindIndex(srequest, data);    // uop0: index arrived
-        } else if (type == RubyRequestType_LD &&
-                   pkt->req->getExtension<IndirectAccessAlias>()) {
+        } else if (type == RubyRequestType_LDVAL) {
             hovSampleLdindValue(srequest);          // uop1: value arrived
             hovCheckValue(pkt, data);
         }
@@ -1129,7 +1130,7 @@ Sequencer::hovRecordLdindIndex(SequencerRequest *srequest,
     // A request's own DAG is never merged (merges happen in the
     // Sequencer's copies in m_IndirectDAGTable).
     if (dag->descriptor(0).intent != DependentAccessGen::AccessIntent::Read) {
-        return;                                     // STIND uop0
+        return;                                     // an stind's uop0
     }
     uint64_t index = 0;
     unsigned size = pkt->getSize();
@@ -1296,9 +1297,10 @@ Sequencer::completeHitCallback(std::vector<PacketPtr> & mylist)
 
             pkt->senderState = ss->predecessor;
 
-            if (pkt->cmd != MemCmd::WriteReq) {
-                // for WriteReq, we keep the original senderState until
-                // writeCompleteCallback
+            if ((pkt->cmd != MemCmd::WriteReq) &&
+                (pkt->cmd != MemCmd::WriteValReq)) {
+                // for WriteReq (and WriteValReq, uop1's), we keep the
+                // original senderState until writeCompleteCallback
                 delete ss;
             }
 
@@ -1481,8 +1483,10 @@ Sequencer::makeRequest(PacketPtr pkt)
             //
             // Note: M5 packets do not differentiate ST from RMW_Write
             //{
-            if (pkt->isIndirect()) {
-                primary_type = secondary_type = RubyRequestType_STIND;
+            if (pkt->isIndirectVal()) {
+                // uop1 of an stind: a store to the data address that the
+                // levels below treat as a value access.
+                primary_type = secondary_type = RubyRequestType_STVAL;
             } else {
                 primary_type = secondary_type = RubyRequestType_ST;
             }
@@ -1492,8 +1496,14 @@ Sequencer::makeRequest(PacketPtr pkt)
                 primary_type = secondary_type = htmCmdToRubyRequestType(pkt);
             } else if (pkt->req->isInstFetch()) {
                 primary_type = secondary_type = RubyRequestType_IFETCH;
-            } else if (pkt->isIndirect()) {
-                primary_type = secondary_type = RubyRequestType_LDIND;
+            } else if (pkt->isIndirectIdx()) {
+                // uop0 of an ldind or stind: reads index[i] and carries
+                // the DAG (its intent says read or write).
+                primary_type = secondary_type = RubyRequestType_LDIDX;
+            } else if (pkt->isIndirectVal()) {
+                // uop1 of an ldind: a load of the data address that the
+                // levels below treat as a value access.
+                primary_type = secondary_type = RubyRequestType_LDVAL;
             } else {
                 if (pkt->req->isReadModifyWrite()) {
                     primary_type = RubyRequestType_RMW_Read;
@@ -1532,14 +1542,12 @@ Sequencer::makeRequest(PacketPtr pkt)
         return status;
 
     // Log VA→PA mapping for indirect accesses (for trace analysis)
-    if (primary_type == RubyRequestType_LDIND ||
-        primary_type == RubyRequestType_STIND) {
-        DPRINTF(IndirectAccess, "SEQ: va=%#x pa=%#x line_pa=%#x type=%s "
+    if (primary_type == RubyRequestType_LDIDX) {
+        DPRINTF(IndirectAccess, "SEQ: va=%#x pa=%#x line_pa=%#x type=LDIDX "
                 "aliased=%d\n",
                 pkt->req->hasVaddr() ? pkt->req->getVaddr() : 0,
                 pkt->getAddr(),
                 makeLineAddress(pkt->getAddr()),
-                primary_type == RubyRequestType_LDIND ? "LDIND" : "STIND",
                 status == RequestStatus_Aliased ? 1 : 0);
     }
 

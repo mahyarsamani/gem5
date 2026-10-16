@@ -116,6 +116,7 @@ inline bool
 isWriteRequest(RubyRequestType type)
 {
     if ((type == RubyRequestType_ST) ||
+        (type == RubyRequestType_STVAL) ||
         (type == RubyRequestType_ATOMIC) ||
         (type == RubyRequestType_RMW_Read) ||
         (type == RubyRequestType_RMW_Write) ||
@@ -133,6 +134,7 @@ inline bool
 isDataReadRequest(RubyRequestType type)
 {
     if ((type == RubyRequestType_LD) ||
+        (type == RubyRequestType_LDVAL) ||
         (type == RubyRequestType_Load_Linked)) {
             return true;
     } else {

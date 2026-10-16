@@ -63,7 +63,9 @@ class RubyRequest : public Message
   public:
     // MYSTUFF
     std::string m_accessName;
-    Addr m_alias;
+    // Only uop1 (an alias from its IndirectAccessAlias) sets it; every other
+    // request has none (0).
+    Addr m_alias = 0;
     // FFUTSYM
     Addr m_PhysicalAddress;
     Addr m_LineAddress;
