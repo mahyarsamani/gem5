@@ -127,6 +127,16 @@ class RubySequencer(RubyPort):
         "core supplied (forwarded or register-form uop0) against a "
         "functional read of memory; 0 turns the checks off",
     )
+    # A path, not a SimObject parameter: the Gather Unit (an L2) reaches
+    # this sequencer through its upstream controllers, so a pointer would
+    # close a cycle in the configuration.
+    hov_gather_unit = Param.String(
+        "",
+        "Path of the Gather Unit whose cover rows (in-line speculation) "
+        "this sequencer asks before sending a DAG; a covered DAG is "
+        "skipped. Empty turns this off (a SimObject lookup standing in for "
+        "a message)",
+    )
     # FFUTSYM
     # id used by protocols that support multiple sequencers per controller
     # 99 is the dummy default value

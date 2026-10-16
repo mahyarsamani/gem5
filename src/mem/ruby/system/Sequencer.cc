@@ -63,6 +63,7 @@
 #include "mem/ruby/profiler/Profiler.hh"
 #include "mem/ruby/protocol/PrefetchBit.hh"
 #include "mem/ruby/protocol/RubyAccessMode.hh"
+#include "mem/ruby/slicc_interface/AbstractController.hh"
 #include "mem/ruby/slicc_interface/RubyRequest.hh"
 #include "mem/ruby/slicc_interface/RubySlicc_Util.hh"
 #include "mem/ruby/system/RubySystem.hh"
@@ -124,6 +125,23 @@ Sequencer::Sequencer(const Params &p)
         statistics::units::Count::get(),
         "LDIND index fetches dropped without a value (e.g. squashed)");
     m_hovCheckPeriod = p.hov_check_period;
+    m_hovGatherUnitPath = p.hov_gather_unit;
+    hovDagsSuppressed = new statistics::Vector(this, "hovDagsSuppressed",
+        statistics::units::Count::get(),
+        "DAG descriptors not sent because the Gather Unit's speculation "
+        "covered them, by path (aliased onto a line in flight, notify)");
+    hovDagsSuppressed->init(2)
+        .subname(0, "aliased")
+        .subname(1, "notify")
+        .flags(statistics::nozero);
+    hovDagsPrunedAtDrain = new statistics::Scalar(this,
+        "hovDagsPrunedAtDrain", statistics::units::Count::get(),
+        "DAG descriptors dropped from a line's drain notification because "
+        "the Gather Unit's speculation covered them");
+    hovNotifsElided = new statistics::Scalar(this, "hovNotifsElided",
+        statistics::units::Count::get(),
+        "drain notifications not sent because every descriptor was "
+        "covered");
     hovValueChecks = new statistics::Scalar(this, "hovValueChecks",
         statistics::units::Count::get(),
         "LDIND values compared with a functional read");
@@ -209,6 +227,20 @@ Sequencer::~Sequencer()
     delete invalidLabelCache;
     // FFUTSYM
 }
+
+// MYSTUFF
+void
+Sequencer::init()
+{
+    RubyPort::init();
+    if (!m_hovGatherUnitPath.empty()) {
+        SimObject *obj = SimObject::find(m_hovGatherUnitPath.c_str());
+        m_hovGatherUnit = dynamic_cast<AbstractController *>(obj);
+        fatal_if(!m_hovGatherUnit, "%s: hov_gather_unit %s is not a Ruby "
+                 "controller.", name(), m_hovGatherUnitPath);
+    }
+}
+// FFUTSYM
 
 void
 Sequencer::llscLoadLinked(const Addr claddr)
@@ -443,7 +475,14 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType primary_type,
         // descriptors into this line's DAG in m_IndirectDAGTable. The table
         // holds its own copy, so merging never changes a request's DAG
         // (which the CPU and the request still share).
-        if (auto new_dag = pkt->req->getExtension<DependentAccessGen>()) {
+        auto new_dag = pkt->req->getExtension<DependentAccessGen>();
+        // MYSTUFF: the Gather Unit's speculation already sent its IDR.
+        if (new_dag && hovCovered(*new_dag)) {
+            (*hovDagsSuppressed)[0] += new_dag->numDescriptors();
+            new_dag = nullptr;
+        }
+        // FFUTSYM
+        if (new_dag) {
             auto it = m_IndirectDAGTable.find(line_addr);
             if (it != m_IndirectDAGTable.end()) {
                 it->second->merge(*new_dag);
@@ -767,7 +806,47 @@ Sequencer::sendMergedDAGNotif(Addr address)
     if (it == m_IndirectDAGTable.end()) {
         return;
     }
+    // Descriptors the Gather Unit's speculation covered by now (the
+    // line's data has just come through it) need no notification.
+    if (m_hovGatherUnit) {
+        RequestorID rid = it->second->requestorId();
+        size_t pruned = it->second->eraseDescriptorsIf(
+            [&](const DependentAccessGen::DepDescriptor &d, size_t is) {
+                return hovCovered(d, is, rid);
+            });
+        *hovDagsPrunedAtDrain += pruned;
+        if (it->second->numDescriptors() == 0) {
+            (*hovNotifsElided)++;
+            DPRINTF(IndirectAccess, "Drain notification for %#x elided: "
+                    "%d descriptors covered.\n", address, pruned);
+            return;
+        }
+    }
     sendDAGNotif(address, it->second);
+}
+
+bool
+Sequencer::hovCovered(const DependentAccessGen::DepDescriptor &desc,
+                      size_t index_size, RequestorID rid)
+{
+    if (!m_hovGatherUnit || index_size == 0) {
+        return false;
+    }
+    int elem = getOffset(desc.indexAddr) / index_size;
+    bool write = desc.intent == DependentAccessGen::AccessIntent::Write;
+    return m_hovGatherUnit->hovCovers(makeLineAddress(desc.indexAddr), rid,
+                                      desc.pair, elem, write);
+}
+
+bool
+Sequencer::hovCovered(const DependentAccessGen &dag)
+{
+    // A single uop0's DAG; a merged one is left to the drain's prune.
+    if (!m_hovGatherUnit || dag.numDescriptors() != 1) {
+        return false;
+    }
+    return hovCovered(dag.descriptor(0), dag.indexSize(),
+                      dag.requestorId());
 }
 
 namespace
@@ -1435,7 +1514,12 @@ Sequencer::makeRequest(PacketPtr pkt)
         if (dag->hasIndexValue()) {
             hovCheckIndex(pkt, *dag);
         }
-        deliverDAG(makeLineAddress(pkt->getAddr()), *dag);
+        // The Gather Unit's speculation already sent its IDR.
+        if (hovCovered(*dag)) {
+            (*hovDagsSuppressed)[1] += dag->numDescriptors();
+        } else {
+            deliverDAG(makeLineAddress(pkt->getAddr()), *dag);
+        }
         ruby_hit_callback(pkt);
         return RequestStatus_Issued;
     }

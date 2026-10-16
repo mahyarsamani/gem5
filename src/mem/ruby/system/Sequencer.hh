@@ -97,6 +97,9 @@ class Sequencer : public RubyPort
     Sequencer(const Params &);
     ~Sequencer();
 
+    // MYSTUFF: resolves hov_gather_unit (every SimObject exists by now).
+    void init() override;
+
     /**
      * Proxy function to writeCallback that first
      * invalidates the line address in the local monitor.
@@ -358,6 +361,20 @@ class Sequencer : public RubyPort
     statistics::Distribution *hovLdindE2ELatencyNotified;
     statistics::Scalar *hovLdindUnmatched;
     statistics::Scalar *hovLdindStale;
+
+    // Sequencer-side suppression (hov_gather_unit): a DAG whose element a
+    // live cover row of the Gather Unit holds is not sent, whether it
+    // would merge onto a line in flight (aliased), go as a NotifyIndIdxReq
+    // (notify), or leave in a line's drain notification (pruned; a
+    // notification left empty is not sent at all).
+    AbstractController *m_hovGatherUnit = nullptr;
+    std::string m_hovGatherUnitPath;  // resolved in init()
+    bool hovCovered(const DependentAccessGen::DepDescriptor &desc,
+                    size_t index_size, RequestorID rid);
+    bool hovCovered(const DependentAccessGen &dag);
+    statistics::Vector *hovDagsSuppressed;
+    statistics::Scalar *hovDagsPrunedAtDrain;
+    statistics::Scalar *hovNotifsElided;
 
     // Functional checks of hov values (hov_check_period): every Nth
     // LDIND value and every Nth index value the core supplied is compared
