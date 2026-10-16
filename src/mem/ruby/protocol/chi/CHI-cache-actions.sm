@@ -2925,10 +2925,11 @@ action(Send_Retry_Hov, desc="Resend an IDR after RetryAck + PCrdGrant") {
   enqueue(reqOutPort, CHIRequestMsg, request_latency) {
     prepareRequestRetry(tbe, out_msg);
     // prepareRequestRetry fills what a line request needs; the IDR also
-    // carries its hov id and alias, and no secondType (see SendIDR).
+    // carries its hov id and alias, and no secondType (see IssueIDR).
     out_msg.txnId := tbe.txnId;
     out_msg.alias := tbe.alias;
     out_msg.secondType := CHIRequestType:null;
+    out_msg.hov_spec := tbe.hov_spec;
     DPRINTF(IndirectAccess, "IDR retry: hov_id=%#x data_line=%#x type=%s\n",
             tbe.txnId, out_msg.addr, out_msg.type);
   }
@@ -4167,6 +4168,9 @@ action(Profile_Miss, desc="") {
     cache.profilePrefetchMiss(tbe.access_name);
   } else if (isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
     cache.profileIdrMiss(tbe.access_name);
+    if (tbe.hov_spec) {
+      cache.profileIdrSpecMiss(tbe.access_name);
+    }
   } else if (isIndirectIdx(tbe.reqType, tbe.secondType)) {
     cache.profileIndexMiss(tbe.access_name);
   } else {
@@ -4202,6 +4206,9 @@ action(Profile_Hit, desc="") {
     cache.profilePrefetchHit(tbe.access_name);
   } else if (isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
     cache.profileIdrHit(tbe.access_name);
+    if (tbe.hov_spec) {
+      cache.profileIdrSpecHit(tbe.access_name);
+    }
   } else if (isIndirectIdx(tbe.reqType, tbe.secondType)) {
     cache.profileIndexHit(tbe.access_name);
   } else {
@@ -4578,10 +4585,12 @@ action(PostProcess,
         // same data line are two Loads at the Indirect Unit; the second
         // stalls there and hits.
         assert(tbe.dataValid);
+        speculateLine(address, tbe.dataBlk, hov_spec_mode, hov_spec_writes,
+                      hov_spec_lines, hov_spec_window);
         if (idr_coalesce) {
             coalesceExtensions(address, tbe.dataBlk);
         }
-        tbe.actions.pushNB(Event:SendIDR);
+        tbe.actions.pushNB(Event:TriageIDR);
     } else {
         State toBeState := makeFinalState(tbe, getCacheEntry(address), getDirEntry(address));
         if (idxLineAboveGU(tbe, toBeState) && (tbe.postEvictSent == false)) {
@@ -4600,15 +4609,23 @@ action(ScheduleIDRs, desc="Gather Unit: send the IDRs once the index data leaves
 {
     if (gather_unit && hasDependentWork(address)) {
         assert(tbe.dataValid);
+        speculateLine(address, tbe.dataBlk, hov_spec_mode, hov_spec_writes,
+                      hov_spec_lines, hov_spec_window);
         if (idr_coalesce) {
             coalesceExtensions(address, tbe.dataBlk);
         }
-        tbe.actions.pushFrontNB(Event:SendIDR);
+        tbe.actions.pushFrontNB(Event:TriageIDR);
     }
 }
 
-action(SendIDR,
-       desc="Send one ReadValue/WriteValue IDR (non-blocking); the next follows at once")
+// The IDRs of an index line go one at a time, in two steps, so that only
+// sending needs a hov TBE: SLICC checks a transition's resources before
+// any of its actions run, so a full hov TBE pool would stall even an IDR
+// that is then dropped. TriageIDR drops the next IDR or passes it to
+// IssueIDR, and IssueIDR (which needs a hov TBE) sends it; either pushes
+// the next TriageIDR at once (a non-blocking trigger) while work remains.
+action(TriageIDR,
+       desc="Gather Unit: drop the next IDR, or pass it to IssueIDR")
 {
     assert(gather_unit);
     assert(hasDependentWork(address));
@@ -4616,16 +4633,22 @@ action(SendIDR,
     // (copyCacheAndDir leaves it out in UC_RU/UD_RU).
     assert(tbe.dataValid);
 
-    // A wrong-path uop0 past the end of its pair reads a garbage index
-    // whose data address can lie outside memory. Drop such an IDR, as
-    // hardware drops a speculative access to an unmapped address.
+    bool issue := false;
+    // A wrong-path uop0 past the end of its pair (or a speculated element
+    // past it) reads a garbage index whose data address can lie outside
+    // memory. Drop such an IDR, as hardware drops a speculative access to
+    // an unmapped address.
     Addr next_addr := peekDependentAddr(address, tbe.dataBlk);
+    bool is_spec := peekDependentIsSpec(address);
     if (isMappedDownstream(makeLineAddress(next_addr)) == false) {
         DPRINTF(IndirectAccess,
             "IDR from index line %#x to unmapped address %#x dropped.\n",
             address, next_addr);
         dropDependentReq(address);
         countIdrDroppedUnmapped();
+        if (is_spec) {
+            countSpecIdr(1);
+        }
     } else {
         // Coalescing across index lines: an IDR to a data line with one
         // in flight or sent recently is dropped; a write to a line whose
@@ -4649,10 +4672,57 @@ action(SendIDR,
                 "IDR from index line %#x to data line %#x dropped: one is in flight or recent.\n",
                 address, data_line);
             dropDependentReq(address);
+            if (is_spec) {
+                countSpecIdr(2);
+            }
         } else {
-            // Resource stall if HOV TBE pool is full
-            check_allocate(storHovTBEs);
+            issue := true;
+        }
+    }
+    if (issue) {
+        tbe.actions.pushFrontNB(Event:IssueIDR);
+    } else if (hasDependentWork(address)) {
+        tbe.actions.pushFrontNB(Event:TriageIDR);
+    }
+}
 
+action(IssueIDR,
+       desc="Gather Unit: send the IDR TriageIDR passed (needs a hov TBE)")
+{
+    assert(gather_unit);
+    assert(hasDependentWork(address));
+    assert(tbe.dataValid);
+
+    // Resource stall if HOV TBE pool is full
+    check_allocate(storHovTBEs);
+
+    Addr next_addr := peekDependentAddr(address, tbe.dataBlk);
+    Addr data_line := makeLineAddress(next_addr);
+    bool is_write := peekDependentIsWrite(address);
+    bool is_spec := peekDependentIsSpec(address);
+    // Another index line may have sent to this data line while this one
+    // waited for a hov TBE: ask again.
+    int verdict := 0;
+    if (idr_coalesce) {
+        verdict := idrVerdict(data_line, is_write);
+    }
+    if (verdict == 2) {
+        TBE parked := hovTBEs[parkedIdrHovId(data_line)];
+        assert(is_valid(parked));
+        parked.pendReqType := CHIRequestType:WriteValue;
+        DPRINTF(IndirectAccess,
+            "IDR to data line %#x lifts the parked IDR hov_id=%#x to WriteValue.\n",
+            data_line, parked.txnId);
+        dropDependentReq(address);
+    } else if (verdict == 1) {
+        DPRINTF(IndirectAccess,
+            "IDR from index line %#x to data line %#x dropped: one is in flight or recent.\n",
+            address, data_line);
+        dropDependentReq(address);
+        if (is_spec) {
+            countSpecIdr(2);
+        }
+    } else {
             RequestPtr depReq := getDependentReq(address, tbe.dataBlk);
             Addr acc_addr := getAddr(depReq);
 
@@ -4679,6 +4749,10 @@ action(SendIDR,
             TBE hovTbe := hovTBEs[hov_id];
             initializeHovTBE(hovTbe, hov_id, acc_addr, hov_slot,
                              idr_type, depReq, idr_dest, tbe);
+            hovTbe.hov_spec := is_spec;
+            if (is_spec) {
+                countSpecIdr(0);
+            }
             if (idr_coalesce) {
                 noteIdrSent(data_line, hov_id, is_write, idr_recent_lines);
             }
@@ -4698,10 +4772,11 @@ action(SendIDR,
                 out_msg.value_unit_id := tbe.value_unit_id;
                 out_msg.gather_unit_id := tbe.gather_unit_id;
                 out_msg.alias := hovTbe.alias;
+                out_msg.hov_spec := is_spec;
 
                 DPRINTF(IndirectAccess,
-                    "IDR: index_line=%#x -> data_addr=%#x alias=%#x isRead=%d hov_id=%#x\n",
-                    address, out_msg.addr, hovTbe.alias, isDepReadReq(depReq), hov_id
+                    "IDR: index_line=%#x -> data_addr=%#x alias=%#x isRead=%d hov_id=%#x spec=%d\n",
+                    address, out_msg.addr, hovTbe.alias, isDepReadReq(depReq), hov_id, is_spec
                 );
 
                 out_msg.Destination := idr_dest;
@@ -4711,12 +4786,11 @@ action(SendIDR,
                     DPRINTF(IndirectAccess, "Indirect unit id set. Sending upstream.\n");
                 }
             }
-        }
     }
     // The line's next IDR follows at once (a non-blocking trigger), whether
-    // ScheduleIDRs or PostProcess pushed this one.
+    // ScheduleIDRs or PostProcess pushed the first.
     if (hasDependentWork(address)) {
-        tbe.actions.pushFrontNB(Event:SendIDR);
+        tbe.actions.pushFrontNB(Event:TriageIDR);
     }
 }
 
@@ -4812,7 +4886,7 @@ action(Extract_Extensions, desc="") {
       countDAGCarrier(0, tbe.seqReq);
     }
     // FFUTSYM
-    extractExtensions(tbe.addr, tbe.seqReq);
+    extractExtensions(tbe.addr, tbe.seqReq, tbe.dataBlk);
 }
 
 // Forward a notification downstream (this cache does not hold the line).

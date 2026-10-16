@@ -160,6 +160,8 @@ structure(CHIRequestMsg, desc="", interface="Message") {
 
   std::string access_name,       desc="Name of the access from high level program.";
 
+  bool hov_spec,                 default="false", desc="An IDR the Gather Unit speculated";
+
   // Lifetime usefulness (DataBlock::setLifetime) for dataless evictions.
   int life_origin,               default="-1", desc="Lifetime origin core (-1: none)";
   WriteMask life_origin_mask,    desc="Lifetime bytes the origin core used";

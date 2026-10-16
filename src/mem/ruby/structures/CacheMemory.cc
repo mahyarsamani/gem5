@@ -1162,6 +1162,18 @@ CacheMemory::profileIdrMiss(std::string acc_name)
 }
 
 void
+CacheMemory::profileIdrSpecHit(std::string acc_name)
+{
+    perNameStat("idrSpecHits", acc_name)++;
+}
+
+void
+CacheMemory::profileIdrSpecMiss(std::string acc_name)
+{
+    perNameStat("idrSpecMisses", acc_name)++;
+}
+
+void
 CacheMemory::profileSnoopSharing(const DataBlock &blk, RequestPtr req,
                                  bool req_valid, bool unique,
                                  std::string acc_name)

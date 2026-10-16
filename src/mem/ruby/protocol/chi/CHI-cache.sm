@@ -256,6 +256,18 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   // fill: uop1 is a real access and fetches the line itself.
   bool idr_coalesce := "False";
   int idr_recent_lines := 64;
+
+  // In-line speculation at the Gather Unit: with an index line's data
+  // here, the first DAG of each (core, pair) on it makes IDRs for the
+  // line's elements after its own (1, forward) or all of them (2, line);
+  // 0 is off. Cover rows (which elements have an IDR) live for
+  // hov_spec_window cycles on at most hov_spec_lines index lines; a real
+  // DAG for a covered element is dropped. A speculated write is a read
+  // unless hov_spec_writes.
+  int hov_spec_mode := 0;
+  int hov_spec_lines := 64;
+  Cycles hov_spec_window := 4000;
+  bool hov_spec_writes := "False";
   // FFUTSYM
 {
 
@@ -621,7 +633,8 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     UpdateDAG,        in_trans="yes", desc="";
     ExtractDAG,       desc="Cache the DAGs carried by a request's seqReq at the Gather Unit";
     PostProcess,      desc="Post-processing: push one IDR, or stash the DAG and post-evict the index line";
-    SendIDR,          in_trans="yes", desc="Send one ReadValue/WriteValue IDR (non-blocking)";
+    TriageIDR,        in_trans="yes", desc="Drop the next IDR, or pass it to IssueIDR (non-blocking)";
+    IssueIDR,         in_trans="yes", desc="Send one ReadValue/WriteValue IDR (non-blocking; needs a hov TBE)";
     StashAndPostEvict, desc="Above the Gather Unit: stash the DAG for the index line and schedule its post-evict";
 
     // HOV-specific events
@@ -851,6 +864,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     // MYSTUFF:
     Addr alias,                     default="0", desc="Alias";
+    bool hov_spec,                  default="false", desc="An IDR the Gather Unit speculated";
 
     MachineID indirect_unit_id,      desc="MachineID of the indirect unit for an indirect request";
     MachineID value_unit_id,         desc="MachineID of the value unit for an indirect request";

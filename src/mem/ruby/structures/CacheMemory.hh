@@ -379,6 +379,9 @@ class CacheMemory : public SimObject
       void profileIndexMiss(std::string acc_name);
       void profileIdrHit(std::string acc_name);
       void profileIdrMiss(std::string acc_name);
+      // The speculated IDRs among them (also counted as IDRs).
+      void profileIdrSpecHit(std::string acc_name);
+      void profileIdrSpecMiss(std::string acc_name);
       void profileGatherHit(std::string acc_name);
       void profileGatherMiss(std::string acc_name);
       // A block allocated for an access: bytesAllocated.<name> grows by

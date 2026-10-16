@@ -269,6 +269,8 @@ structure (CacheMemory, external = "yes") {
   void profileIndexMiss(std::string);
   void profileIdrHit(std::string);
   void profileIdrMiss(std::string);
+  void profileIdrSpecHit(std::string);
+  void profileIdrSpecMiss(std::string);
   void profileGatherHit(std::string);
   void profileGatherMiss(std::string);
   void profileAllocation(std::string);

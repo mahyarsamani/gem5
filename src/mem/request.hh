@@ -1327,11 +1327,27 @@ class DependentAccessGen: public Extension<Request, DependentAccessGen>
     virtual std::vector<std::unique_ptr<DependentAccessGen>>
         unwrap() const = 0;
 
+    /** Drop the descriptors `pred(descriptor, index size)` selects (a
+     *  merged DAG keeps one index size for all of them); returns how
+     *  many were dropped. */
+    template <typename Pred>
+    size_t eraseDescriptorsIf(Pred pred) {
+        size_t before = _descriptors.size();
+        _descriptors.erase(
+            std::remove_if(_descriptors.begin(), _descriptors.end(),
+                           [&](const DepDescriptor &d) {
+                               return pred(d, _indexSize);
+                           }),
+            _descriptors.end());
+        return before - _descriptors.size();
+    }
+
     // --- Per-access methods (all assert !isMerged()) ---
 
     void setRequestorId(RequestorID rid) {
         _requestorId = rid;
     }
+    RequestorID requestorId() const { return _requestorId; }
 
     size_t indexSize() const {
         assert(!isMerged() &&

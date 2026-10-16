@@ -1265,7 +1265,7 @@ MMU::translateComplete(const RequestPtr &req, ThreadContext *tc,
                 // a functional lookup that costs the Gather Unit nothing,
                 // as the contiguous pool does in full system. An address
                 // that does not translate (a wrong-path index) becomes
-                // MaxAddr, which no downstream machine maps, so SendIDR
+                // MaxAddr, which no downstream machine maps, so TriageIDR
                 // drops the IDR (idrDroppedUnmapped).
                 EmulationPageTable *page_table =
                     tc->getProcessPtr()->pTable;

@@ -46,8 +46,12 @@ void setAliasForAddr(Addr, Addr);
 Addr getAddr(Addr);
 
 RequestPtr getDependentReq(Addr, DataBlock);
-void extractExtensions(Addr, RequestPtr);
+void extractExtensions(Addr, RequestPtr, DataBlock);
 bool hasDependentWork(Addr);
+// In-line speculation at the Gather Unit (AbstractController::speculateLine)
+void speculateLine(Addr, DataBlock, int, bool, int, Cycles);
+bool peekDependentIsSpec(Addr);
+void countSpecIdr(int);
 void clearExtensions(Addr);
 
 Addr peekDependentAddr(Addr, DataBlock);

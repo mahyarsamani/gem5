@@ -1647,10 +1647,18 @@ transition({BUSY_BLKD, BUSY_INTR}, PostProcess) {
   ProcessNextState_ClearPending;
 }
 
-// SendIDR: fires in BUSY (NB), sends one ReadValue/WriteValue
-transition({BUSY_BLKD, BUSY_INTR}, SendIDR) {
+// TriageIDR and IssueIDR: fire in BUSY (NB); TriageIDR drops the next IDR
+// or passes it to IssueIDR, which sends one ReadValue/WriteValue (the only
+// one of the two that needs a hov TBE).
+transition({BUSY_BLKD, BUSY_INTR}, TriageIDR) {
   Pop_TriggerQueue;
-  SendIDR;
+  TriageIDR;
+  ProcessNextState_ClearPending;
+}
+
+transition({BUSY_BLKD, BUSY_INTR}, IssueIDR) {
+  Pop_TriggerQueue;
+  IssueIDR;
   ProcessNextState_ClearPending;
 }
 

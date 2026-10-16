@@ -649,7 +649,8 @@ AbstractController::getDependentReq(Addr line_addr, DataBlock &index_data)
 }
 
 void
-AbstractController::extractExtensions(Addr line_addr, RequestPtr req)
+AbstractController::extractExtensions(Addr line_addr, RequestPtr req,
+                                      DataBlock &index_data)
 {
     auto dag = req->getExtension<DependentAccessGen>();
     assert(dag && "extractExtensions called without a DependentAccessGen");
@@ -664,6 +665,21 @@ AbstractController::extractExtensions(Addr line_addr, RequestPtr req)
 
         bool write = shared->descriptor(0).intent ==
                      DependentAccessGen::AccessIntent::Write;
+
+        // A speculated IDR already stands for this element: drop the DAG,
+        // but the Gather Unit read its index element for it.
+        int elem = getOffset(shared->descriptor(0).indexAddr) /
+                   shared->indexSize();
+        if (hovCovers(line_addr, shared->requestorId(),
+                      shared->descriptor(0).pair, elem, write)) {
+            markIndexRead(*shared, index_data, line_addr);
+            stats.hovDagsCoveredAtGU++;
+            DPRINTF(IndirectAccess, "DAG for index line %#x element %d "
+                    "(pair %u, write %d) covered by speculation.\n",
+                    line_addr, elem, shared->descriptor(0).pair, write);
+            continue;
+        }
+
         DPRINTF(MSDebug, "%s: Cached DAG for line_addr %#x "
                 "(read=%d, offset=%d, dag=%p)\n",
                 __func__, line_addr, !write,
@@ -704,7 +720,12 @@ AbstractController::coalesceExtensions(Addr line_addr, DataBlock &index_data)
         auto &survivor = kept[pos - kept_lines.begin()];
         survivor.write |= entry.write;
         survivor.absorbed++;
-        markIndexRead(*entry.dag, index_data, line_addr);
+        // A speculated element is read only when a core asks for it.
+        if (entry.spec) {
+            stats.hovSpecCoalesced++;
+        } else {
+            markIndexRead(*entry.dag, index_data, line_addr);
+        }
         stats.idrCoalescedSameLine++;
         DPRINTF(IndirectAccess, "DAG for data line %#x (offset %d, write %d) "
                 "coalesced into the IDR of index line %#x.\n", data_line,
@@ -734,15 +755,199 @@ AbstractController::peekDependentAddr(Addr line_addr, DataBlock &index_data)
              "peekDependentAddr: no cached entries for line_addr %#x.",
              line_addr);
 
-    const auto& dag = it->second.entries.front().dag;  // peek, don't pop
+    const auto &front = it->second.entries.front();  // peek, don't pop
+    const auto& dag = front.dag;
     panic_if(!dag, "peekDependentAddr: cached DAG is null for "
              "line_addr %#x.", line_addr);
 
     int offset;
     size_t index_size;
     uint64_t index_value = indexValue(*dag, index_data, offset, index_size);
-    markIndexRead(*dag, index_data, line_addr);
+    // A speculated element is read only when a core asks for it (its DAG
+    // is then dropped as covered and marks it).
+    if (!front.spec) {
+        markIndexRead(*dag, index_data, line_addr);
+    }
     return dag->genAddress(index_value);
+}
+
+bool
+AbstractController::peekDependentIsSpec(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
+             "peekDependentIsSpec: no cached entries for line_addr %#x.",
+             line_addr);
+    return it->second.entries.front().spec;
+}
+
+void
+AbstractController::countSpecIdr(int what)
+{
+    if (what == 0) {
+        stats.hovSpecIdrsSent++;
+    } else {
+        stats.hovSpecIdrsDropped[what - 1]++;
+    }
+}
+
+AbstractController::HovCover *
+AbstractController::findCover(Addr line_addr, RequestorID rid,
+                              unsigned pair, Cycles now)
+{
+    auto it = m_hovCover.find(line_addr);
+    if (it == m_hovCover.end()) {
+        return nullptr;
+    }
+    for (auto &row : it->second) {
+        if (row.rid == rid && row.pair == pair) {
+            return now - row.made < m_hovSpecWindow ? &row : nullptr;
+        }
+    }
+    return nullptr;
+}
+
+AbstractController::HovCover &
+AbstractController::makeCover(Addr line_addr, RequestorID rid,
+                              unsigned pair, int leader_elem, Cycles now)
+{
+    auto it = m_hovCover.find(line_addr);
+    if (it == m_hovCover.end()) {
+        // A new line: the oldest lines give up their rows first.
+        while (m_hovSpecLines > 0 &&
+               (int)m_hovCoverFifo.size() >= m_hovSpecLines) {
+            auto old = m_hovCover.find(m_hovCoverFifo.front());
+            if (old != m_hovCover.end()) {
+                stats.hovCoverReplaced += old->second.size();
+                m_hovCover.erase(old);
+            }
+            m_hovCoverFifo.pop_front();
+        }
+        m_hovCoverFifo.push_back(line_addr);
+        it = m_hovCover.emplace(line_addr, std::vector<HovCover>()).first;
+    }
+    for (auto &row : it->second) {
+        if (row.rid == rid && row.pair == pair) {
+            // A stale row of the same pair starts over.
+            row = HovCover{rid, static_cast<uint8_t>(pair), leader_elem,
+                           0, 0, now};
+            return row;
+        }
+    }
+    it->second.push_back(HovCover{rid, static_cast<uint8_t>(pair),
+                                  leader_elem, 0, 0, now});
+    return it->second.back();
+}
+
+bool
+AbstractController::hovCovers(Addr line_addr, RequestorID rid,
+                              unsigned pair, int elem, bool write)
+{
+    if (elem < 0 || elem >= 64) {
+        return false;
+    }
+    HovCover *row = findCover(line_addr, rid, pair, curCycle());
+    if (!row) {
+        return false;
+    }
+    uint64_t bit = uint64_t(1) << elem;
+    return (row->covered & bit) && (!write || (row->writes & bit));
+}
+
+void
+AbstractController::speculateLine(Addr line_addr, DataBlock &index_data,
+                                  int mode, bool spec_writes, int max_lines,
+                                  Cycles window)
+{
+    m_hovSpecLines = max_lines;
+    m_hovSpecWindow = window;
+    if (mode == 0) {
+        return;
+    }
+    auto it = m_cachedEntries.find(line_addr);
+    if (it == m_cachedEntries.end() || it->second.entries.empty()) {
+        return;
+    }
+    Cycles now = curCycle();
+    int block_size = m_ruby_system->getBlockSizeBytes();
+    auto &entries = it->second.entries;
+    std::vector<DependentEntry> made;
+    for (size_t i = 0; i < entries.size(); i++) {
+        if (entries[i].spec) {
+            continue;
+        }
+        const auto &leader = *entries[i].dag;
+        const auto &ld = leader.descriptor(0);
+        RequestorID rid = leader.requestorId();
+        unsigned pair = ld.pair;
+        if (findCover(line_addr, rid, pair, now)) {
+            continue;  // this pair is already speculated on this line
+        }
+        int index_size = leader.indexSize();
+        int elems = std::min(block_size / index_size, 64);
+        int k_leader = getOffset(ld.indexAddr) / index_size;
+
+        // The real entries of this pair hold their own elements.
+        HovCover &row = makeCover(line_addr, rid, pair, k_leader, now);
+        for (const auto &other : entries) {
+            const auto &od = other.dag->descriptor(0);
+            if (other.spec || other.dag->requestorId() != rid ||
+                od.pair != pair) {
+                continue;
+            }
+            int k = getOffset(od.indexAddr) / index_size;
+            if (k < 64) {
+                row.covered |= uint64_t(1) << k;
+                if (other.write) {
+                    row.writes |= uint64_t(1) << k;
+                }
+            }
+        }
+
+        bool write = ld.intent == DependentAccessGen::AccessIntent::Write;
+        if (write && !spec_writes) {
+            write = false;
+        }
+        int first = mode == 1 ? k_leader + 1 : 0;
+        for (int k = first; k < elems; k++) {
+            uint64_t bit = uint64_t(1) << k;
+            if (row.covered & bit) {
+                continue;
+            }
+            auto clones = leader.unwrap();
+            std::shared_ptr<DependentAccessGen> spec(clones.front().release());
+            auto &sd = spec->mutableDescriptor(0);
+            sd.indexAddr = line_addr + k * index_size;
+            sd.alias = ld.alias + (Addr)((int64_t)(k - k_leader) *
+                                         (int64_t)ld.dataSize);
+            if (ld.intent == DependentAccessGen::AccessIntent::Write &&
+                !write) {
+                sd.intent = DependentAccessGen::AccessIntent::Read;
+                stats.hovSpecWritesDemoted++;
+            }
+            made.push_back({std::move(spec), write, 0, true});
+            row.covered |= bit;
+            if (write) {
+                row.writes |= bit;
+            }
+            stats.hovSpecEntries++;
+        }
+        if (mode == 1) {
+            stats.hovSpecLinesForward++;
+        } else {
+            stats.hovSpecLinesLine++;
+        }
+        DPRINTF(IndirectAccess, "Speculated index line %#x from element %d "
+                "(pair %u, rid %u): covered %#lx.\n", line_addr, k_leader,
+                pair, rid, row.covered);
+    }
+    if (!made.empty()) {
+        // After the real entries, so real IDRs go first.
+        for (auto &entry : made) {
+            entries.push_back(std::move(entry));
+        }
+        it->second.coalesced = false;
+    }
 }
 
 bool
@@ -999,7 +1204,26 @@ ControllerStats::ControllerStats(statistics::Group *parent)
                "line left without a replacement"),
       ADD_STAT(hovDAGsByCarrier,
                "DAG descriptors extracted at the Gather Unit, by the "
-               "message that carried them")
+               "message that carried them"),
+      ADD_STAT(hovSpecEntries,
+               "dependent entries speculated from a leader's index line"),
+      ADD_STAT(hovSpecLinesForward,
+               "leaders speculated forward (their element to the line end)"),
+      ADD_STAT(hovSpecLinesLine,
+               "leaders speculated over the whole index line"),
+      ADD_STAT(hovSpecIdrsSent, "speculated IDRs sent"),
+      ADD_STAT(hovSpecIdrsDropped, "speculated IDRs dropped, by reason"),
+      ADD_STAT(hovDagsCoveredAtGU,
+               "real DAG descriptors dropped at the Gather Unit because a "
+               "cover row already held their element"),
+      ADD_STAT(hovCoverReplaced,
+               "cover rows dropped by the hov_spec_lines limit"),
+      ADD_STAT(hovSpecWritesDemoted,
+               "speculated entries made reads from a write leader "
+               "(hov_spec_writes off)"),
+      ADD_STAT(hovSpecCoalesced,
+               "speculated entries absorbed into another IDR to the same "
+               "data line (one index line)")
 {
     fullyBusyCycles
         .flags(statistics::nozero);
@@ -1027,6 +1251,19 @@ ControllerStats::ControllerStats(statistics::Group *parent)
         .subname(1, "notification")
         .subname(2, "postEvict")
         .flags(statistics::nozero);
+    hovSpecEntries.flags(statistics::nozero);
+    hovSpecLinesForward.flags(statistics::nozero);
+    hovSpecLinesLine.flags(statistics::nozero);
+    hovSpecIdrsSent.flags(statistics::nozero);
+    hovSpecIdrsDropped
+        .init(2)
+        .subname(0, "unmapped")
+        .subname(1, "coalesced")
+        .flags(statistics::nozero);
+    hovDagsCoveredAtGU.flags(statistics::nozero);
+    hovCoverReplaced.flags(statistics::nozero);
+    hovSpecWritesDemoted.flags(statistics::nozero);
+    hovSpecCoalesced.flags(statistics::nozero);
 }
 
 } // namespace ruby

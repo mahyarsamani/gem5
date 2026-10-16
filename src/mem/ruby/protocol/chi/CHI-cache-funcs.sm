@@ -566,6 +566,7 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   tbe.reqType := in_msg.type;
   tbe.secondType := in_msg.secondType;
 //   tbe.access_name := in_msg.access_name;
+  tbe.hov_spec := in_msg.hov_spec;
 // FFUTSYM
 
   tbe.isSeqReqValid := in_msg.isSeqReqValid;
@@ -2036,6 +2037,7 @@ void replicateRequestMsg(CHIRequestMsg &out_msg, CHIRequestMsg in_msg)
     out_msg.life_origin := in_msg.life_origin;
     out_msg.life_origin_mask := in_msg.life_origin_mask;
     out_msg.life_others_mask := in_msg.life_others_mask;
+    out_msg.hov_spec := in_msg.hov_spec;
 }
 
 
