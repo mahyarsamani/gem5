@@ -4942,24 +4942,6 @@ action(Hov_FwdHeld, desc="Gather Unit: drop an injected request for a block the 
   processRetryQueue();
 }
 
-// Gather Unit, reqRdyPort: the Indirect Unit's own request for a block
-// the directory already lists it as holding with the permission asked for.
-// In this protocol that happens only when a delivery reached the
-// Indirect Unit while this request was in flight, and its TBE took the
-// delivery as this request's data: nothing is owed.
-action(Hov_DupDrop, desc="Gather Unit: drop a request a delivery already served") {
-  assert(gather_unit);
-  assert(is_invalid(tbe));
-  peek(reqRdyPort, CHIRequestMsg) {
-    DPRINTF(IndirectAccess,
-        "%s for %#x from %s dropped: a delivery already served it.\n",
-        in_msg.type, address, in_msg.requestor);
-  }
-  countHovDupDropped();
-  storTBEs.decrementReserved();
-  processRetryQueue();
-}
-
 // Indirect Unit: the index data names a data block to expect (3a). Queue
 // it for that line on reqRdy, with a TBE reserved for it; with no TBE free,
 // the expect is dropped (the delivery is then taken on arrival).
@@ -5070,29 +5052,26 @@ action(Initiate_HovDeliver, desc="Indirect Unit: allocate a TBE for a delivered 
   incomingTransactionStart(address, curTransitionEvent(), initial, false);
 }
 
-// Indirect Unit, stock CompData transition: count a delivery that a TBE
-// waiting for data takes (an expect's, or the core's own miss)
-action(Hov_CountDelivery, desc="Indirect Unit: count a delivery a waiting TBE takes") {
+// Indirect Unit, stock CompData transition: count a delivery the TBE of
+// its expect takes
+action(Hov_CountDelivery, desc="Indirect Unit: count a delivery its expect takes") {
   if (indirect_unit) {
     peek(datInPort, CHIDataMsg) {
-      if (in_msg.hov_fwd && (tbe.dataBlkValid.count() == 0)) {
-        if (tbe.hov_recv == 1) {
-          countHovDeliver(0);
-          DPRINTF(IndirectAccess, "5: data block %#x delivered into its expect.\n", address);
-        } else if (tbe.hov_recv == 0) {
-          countHovDeliver(2);
-          DPRINTF(IndirectAccess, "5: data block %#x delivered; the core's own miss takes it.\n", address);
-        }
+      if (in_msg.hov_fwd && (tbe.hov_recv == 1) &&
+          (tbe.dataBlkValid.count() == 0)) {
+        countHovDeliver(0);
+        DPRINTF(IndirectAccess, "5: data block %#x delivered into its expect.\n", address);
       }
     }
   }
 }
 
 // Indirect Unit: a delivered block it cannot take (the line is here, or
-// busy with a transaction that does not wait for this data, or no TBE is
-// free). Acknowledge it as declined so the Gather Unit keeps the block and
-// leaves its directory as it was, and drop the data. Never recycled: the
-// Gather Unit's transaction waits for this CompAck.
+// busy with a transaction of its own, such as the core's own miss, which
+// sees its own request through; or no TBE is free). Acknowledge it as
+// declined so the Gather Unit keeps the block and leaves its directory as
+// it was, and drop the data. Never recycled: the Gather Unit's transaction
+// waits for this CompAck.
 action(Hov_Decline, desc="Indirect Unit: decline a delivered block") {
   peek(datInPort, CHIDataMsg) {
     assert(in_msg.hov_fwd);
@@ -5106,7 +5085,7 @@ action(Hov_Decline, desc="Indirect Unit: decline a delivered block") {
     }
     hovDeclineBegin(address, (blockSize / data_channel_size) - 1);
   }
-  countHovDeliver(3);
+  countHovDeliver(2);
   DPRINTF(IndirectAccess, "5: data block %#x delivered but declined.\n", address);
 }
 

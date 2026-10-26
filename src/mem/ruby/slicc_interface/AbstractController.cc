@@ -1354,9 +1354,6 @@ ControllerStats::ControllerStats(statistics::Group *parent)
                "Indirect Unit's CompAck"),
       ADD_STAT(hovExpectSent,
                "Gather Unit: index data that named a data block to expect"),
-      ADD_STAT(hovDupDropped,
-               "Gather Unit: requests of an upstream cache dropped because "
-               "a delivery already served them"),
       ADD_STAT(hovExpect,
                "Indirect Unit: expected data blocks, by outcome"),
       ADD_STAT(hovDeliver,
@@ -1416,8 +1413,6 @@ ControllerStats::ControllerStats(statistics::Group *parent)
         .flags(statistics::nozero);
     hovExpectSent
         .flags(statistics::nozero);
-    hovDupDropped
-        .flags(statistics::nozero);
     hovExpect
         .init(6)
         .subname(0, "allocated")
@@ -1428,11 +1423,10 @@ ControllerStats::ControllerStats(statistics::Group *parent)
         .subname(5, "timedOut")
         .flags(statistics::nozero);
     hovDeliver
-        .init(4)
+        .init(3)
         .subname(0, "intoExpect")
         .subname(1, "onArrival")
-        .subname(2, "absorbed")
-        .subname(3, "declined")
+        .subname(2, "declined")
         .flags(statistics::nozero);
     hovStashOrphaned
         .flags(statistics::nozero);

@@ -294,7 +294,6 @@ class AbstractController : public ClockedObject, public Consumer
     void countHovFwd(int what) { stats.hovFwd[what]++; }
     void countHovExpect(int what) { stats.hovExpect[what]++; }
     void countHovDeliver(int what) { stats.hovDeliver[what]++; }
-    void countHovDupDropped() { stats.hovDupDropped++; }
     // Indirect Unit: deliveries filled with no expect waiting, and the
     // chunks of a declined delivery still to come.
     void hovNoteDeliveredNoExpect(Addr line_addr);
@@ -801,16 +800,14 @@ class AbstractController : public ClockedObject, public Consumer
         //! The target flow (docs/agents/2026-10-25-wp0/PLAN.md). Gather
         //! Unit: requests injected on the Indirect Unit's behalf by
         //! outcome (issued, skippedHeld, completed, declined,
-        //! droppedNoTarget), cycles from injection to the CompAck, index
-        //! data that named a block to expect, and upstream requests dropped
-        //! because a delivery served them. Indirect Unit: expects by
-        //! outcome (allocated, present, droppedNoTBE, afterData, busy,
+        //! droppedNoTarget), cycles from injection to the CompAck, and
+        //! index data that named a block to expect. Indirect Unit: expects
+        //! by outcome (allocated, present, droppedNoTBE, afterData, busy,
         //! timedOut) and deliveries by outcome (intoExpect, onArrival,
-        //! absorbed, declined).
+        //! declined).
         statistics::Vector hovFwd;
         statistics::Histogram hovFwdLatency;
         statistics::Scalar hovExpectSent;
-        statistics::Scalar hovDupDropped;
         statistics::Vector hovExpect;
         statistics::Vector hovDeliver;
 

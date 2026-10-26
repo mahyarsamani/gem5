@@ -120,17 +120,18 @@ in_port(datInPort, CHIDataMsg, datIn, rank=9,
       assert(!in_msg.usesTxnId);
       assert((in_msg.bitMask.count() <= data_channel_size) && (in_msg.bitMask.count() > 0));
       // MYSTUFF: the target flow. A block the Gather Unit delivered to this
-      // Indirect Unit (hov_fwd) goes to a TBE that still waits for data of
-      // its type (an expect's, or the core's own miss: the stock CompData
-      // transitions), else into a TBE allocated on arrival when the line is
-      // absent and idle, else it is declined. Never recycled: the Gather
-      // Unit's transaction waits for this cache's CompAck.
+      // Indirect Unit (hov_fwd) goes to the TBE that waits for it (an
+      // expect's, or one allocated on arrival for an earlier chunk: the
+      // stock CompData transitions), else into a TBE allocated on arrival
+      // when the line is absent and idle, else it is declined: a TBE of
+      // the core's own request sees that request through. Never recycled:
+      // the Gather Unit's transaction waits for this cache's CompAck.
       if (indirect_unit && in_msg.hov_fwd) {
         TBE tbe := getCurrentActiveTBE(in_msg.addr);
         CacheEntry cache_entry := getCacheEntry(in_msg.addr);
         if (hovDeclining(in_msg.addr)) {
           trigger(Event:HovDeclineCont, in_msg.addr, cache_entry, tbe);
-        } else if (is_valid(tbe) && tbe.is_req_tbe &&
+        } else if (is_valid(tbe) && tbe.is_req_tbe && (tbe.hov_recv != 0) &&
                    tbe.expected_req_resp.expectsData(in_msg.type)) {
           trigger(dataToEvent(in_msg.type), in_msg.addr, cache_entry, tbe);
         } else if (is_invalid(tbe) && is_invalid(cache_entry) &&
@@ -360,16 +361,11 @@ in_port(reqRdyPort, CHIRequestMsg, reqRdy, rank=3,
 
         // MYSTUFF: the target flow at the Gather Unit, decided by the line's
         // directory when no transaction holds the line (a busy line stalls
-        // the request, which is decided again when woken). An injected
-        // request for a block the Indirect Unit holds sends nothing; the
-        // Indirect Unit's own request for a block a delivery already gave
-        // it is dropped.
-        if (gather_unit && is_invalid(tbe)) {
-          if (in_msg.hov_fwd && hovIUHolds(dir_entry, in_msg.requestor)) {
-            trigger(Event:HovFwdHeld, in_msg.addr, cache_entry, tbe);
-          } else if (isHovDup(in_msg, dir_entry)) {
-            trigger(Event:HovDupDrop, in_msg.addr, cache_entry, tbe);
-          }
+        // the request, which is decided again when woken): an injected
+        // request for a block the Indirect Unit holds sends nothing.
+        if (gather_unit && is_invalid(tbe) && in_msg.hov_fwd &&
+            hovIUHolds(dir_entry, in_msg.requestor)) {
+          trigger(Event:HovFwdHeld, in_msg.addr, cache_entry, tbe);
         }
         // FFUTSYM
 

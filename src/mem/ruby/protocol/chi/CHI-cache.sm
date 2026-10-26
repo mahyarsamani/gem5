@@ -645,7 +645,6 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     // The target flow (docs/agents/2026-10-25-wp0/PLAN.md)
     HovFwdHeld,       desc="Gather Unit: an injected request for a block the directory says the Indirect Unit holds; send nothing";
-    HovDupDrop,       desc="Gather Unit: the Indirect Unit's own request for a block a delivery already gave it; drop";
     HovExpect,        in_trans="yes", desc="Indirect Unit: an expected block (3a); wait for it, unless here or busy";
     HovDeliver,       in_trans="yes", desc="Indirect Unit: a delivered block (5) with no TBE waiting for it; take it on arrival";
     HovDecline,       desc="Indirect Unit: a delivered block it cannot take; CompAck it as declined and drop it";

@@ -80,7 +80,6 @@ void hovTrackerClose(int, int, bool);
 void countHovFwd(int);
 void countHovExpect(int);
 void countHovDeliver(int);
-void countHovDupDropped();
 void hovNoteDeliveredNoExpect(Addr);
 bool hovTakeDeliveredNoExpect(Addr);
 void hovDeclineBegin(Addr, int);

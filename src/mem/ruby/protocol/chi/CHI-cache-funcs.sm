@@ -1244,24 +1244,6 @@ bool hovIUHolds(DirEntry dir_entry, MachineID iu) {
   return false;
 }
 
-// Gather Unit: an upstream cache's own read for a line the directory lists
-// it as holding with the permission it asks for. A cache never re-requests
-// such a line in this protocol (a clean eviction sends Evict first), except
-// when its TBE took a delivery as this request's data: nothing is owed.
-bool isHovDup(CHIRequestMsg msg, DirEntry dir_entry) {
-  if ((gather_unit == false) || msg.hov_fwd || is_invalid(dir_entry)) {
-    return false;
-  }
-  if ((msg.type == CHIRequestType:ReadShared) ||
-      (msg.type == CHIRequestType:ReadNotSharedDirty)) {
-    return dir_entry.sharers.isElement(msg.requestor);
-  }
-  if (msg.type == CHIRequestType:ReadUnique) {
-    return dir_entry.ownerExists && dir_entry.ownerIsExcl &&
-           (dir_entry.owner == msg.requestor);
-  }
-  return false;
-}
 // FFUTSYM
 
 void deallocateReqTBE(TBE tbe) {
