@@ -2733,9 +2733,13 @@ action(UpdateDataState_FromSnpDataResp, desc="") {
 action(UpdateDirState_FromReqResp, desc="") {
   peek(rspInPort, CHIResponseMsg) {
     // MYSTUFF: the Indirect Unit declined a delivery (the target flow): it
-    // holds nothing, so the directory stays as it was and this cache keeps
-    // the block it fetched (the CheckCacheFill queued after WaitCompAck
-    // fills it), so neither it nor the Value Unit loses track of a copy.
+    // holds nothing, so the directory stays as it was. A block this cache
+    // held before stays; one it fetched for the delivery is dropped as a
+    // replacement drops it (an Evict for a clean shared copy, a WriteBack
+    // or WriteEvict for a unique or dirty one), so the Value Unit's
+    // directory stays exact and no victim is needed: a fill here could
+    // wait on a victim index line whose transaction waits in IssueIDR for
+    // the tracker slot this transaction holds.
     if ((in_msg.type == CHIResponseType:CompAck) && in_msg.hov_declined) {
       assert(tbe.hov_fwd);
       assert(tbe.requestor == in_msg.responder);
@@ -2743,8 +2747,23 @@ action(UpdateDirState_FromReqResp, desc="") {
       tbe.requestorToBeOwner := false;
       tbe.requestorToBeExclusiveOwner := false;
       tbe.dataMaybeDirtyUpstream := tbe.dir_ownerExists;
-      tbe.dataToBeInvalid := false;
-      tbe.doCacheFill := true;
+      if (is_valid(cache_entry)) {
+        tbe.dataToBeInvalid := false;
+      } else {
+        tbe.dataToBeInvalid := true;
+        tbe.doCacheFill := false;
+        // other upstream holders keep a clean copy below them; a dirty
+        // copy with other holders is not reachable here (they would make
+        // the Indirect Unit's request a hit)
+        assert(tbe.dir_sharers.isEmpty() || (tbe.dataDirty == false));
+        if (tbe.dir_sharers.isEmpty() && (tbe.dataDirty || tbe.dataUnique)) {
+          tbe.actions.pushFront(Event:SendWBData);
+          tbe.actions.pushFront(Event:WriteBEPipe);
+          tbe.actions.pushFront(Event:SendWriteBackOrWriteEvict);
+        } else if (tbe.dir_sharers.isEmpty()) {
+          tbe.actions.pushFront(Event:SendEvict);
+        }
+      }
     } else
     // FFUTSYM
     if ((in_msg.type == CHIResponseType:CompAck) && tbe.updateDirOnCompAck) {
