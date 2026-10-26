@@ -198,4 +198,5 @@ class BaseO3CPU(BaseCPU):
         PyBindMethod("addProducerConsumerChain"),
         PyBindMethod("addDestIdxOverride"),
         PyBindMethod("registerFunctionInfo"),
+        PyBindMethod("addHovEntryNames"),
     ]

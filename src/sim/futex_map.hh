@@ -138,6 +138,15 @@ class FutexMap : public std::unordered_map<FutexKey, WaiterList>
      */
     bool is_waiting(ThreadContext *tc);
 
+    // MYSTUFF
+    /**
+     * A CPU switch moved a thread from old_tc to new_tc: the waits of
+     * old_tc become new_tc's, so that a later wakeup activates the
+     * switched-in context, not the switched-out one.
+     */
+    void replaceThreadContext(ThreadContext *old_tc, ThreadContext *new_tc);
+    // FFUTSYM
+
   private:
 
     std::unordered_set<ThreadContext *> waitingTcs;

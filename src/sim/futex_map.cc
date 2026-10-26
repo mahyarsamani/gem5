@@ -187,4 +187,19 @@ FutexMap::is_waiting(ThreadContext *tc)
     return waitingTcs.find(tc) != waitingTcs.end();
 }
 
+// MYSTUFF
+void
+FutexMap::replaceThreadContext(ThreadContext *old_tc, ThreadContext *new_tc)
+{
+    if (waitingTcs.erase(old_tc))
+        waitingTcs.insert(new_tc);
+    for (auto &kv : *this) {
+        for (auto &waiter : kv.second) {
+            if (waiter.tc == old_tc)
+                waiter.tc = new_tc;
+        }
+    }
+}
+// FFUTSYM
+
 } // namespace gem5

@@ -41,6 +41,8 @@
 
 #include "mem/ruby/structures/CacheMemory.hh"
 
+#include <algorithm>
+
 #include "base/compiler.hh"
 #include "base/intmath.hh"
 #include "base/logging.hh"
@@ -54,6 +56,7 @@
 #include "mem/cache/replacement_policies/weighted_lru_rp.hh"
 #include "mem/ruby/protocol/AccessPermission.hh"
 #include "mem/ruby/system/RubySystem.hh"
+#include "sim/cur_tick.hh"
 
 namespace gem5
 {
@@ -85,6 +88,9 @@ CacheMemory::CacheMemory(const Params &p)
     m_block_size = p.block_size;  // may be 0 at this point. Updated in init()
     m_use_occupancy = dynamic_cast<replacement_policy::WeightedLRU*>(
                                     m_replacementPolicy_ptr) ? true : false;
+    // MYSTUFF
+    s_lifetimeInstances.push_back(this);
+    // FFUTSYM
 }
 
 void
@@ -127,6 +133,11 @@ CacheMemory::init()
 
 CacheMemory::~CacheMemory()
 {
+    // MYSTUFF
+    s_lifetimeInstances.erase(std::remove(s_lifetimeInstances.begin(),
+                                          s_lifetimeInstances.end(), this),
+                              s_lifetimeInstances.end());
+    // FFUTSYM
     if (m_replacementPolicy_ptr)
         delete m_replacementPolicy_ptr;
     for (int i = 0; i < m_cache_num_sets; i++) {
@@ -575,6 +586,22 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
       ADD_STAT(m_prefetch_misses, "Number of cache prefetch misses"),
       ADD_STAT(m_prefetch_accesses, "Number of cache prefetch accesses",
                m_prefetch_hits + m_prefetch_misses),
+      // MYSTUFF
+      ADD_STAT(m_index_hits, "Number of hov index access (uop0) hits"),
+      ADD_STAT(m_index_misses, "Number of hov index access (uop0) misses"),
+      ADD_STAT(m_index_accesses, "Number of hov index accesses (uop0)",
+               m_index_hits + m_index_misses),
+      ADD_STAT(m_idr_hits, "Number of IDR hits"),
+      ADD_STAT(m_idr_misses, "Number of IDR misses"),
+      ADD_STAT(m_idr_accesses, "Number of IDRs",
+               m_idr_hits + m_idr_misses),
+      ADD_STAT(m_gather_hits, "Number of Gather Unit index line lookups "
+                              "that found the data here"),
+      ADD_STAT(m_gather_misses, "Number of Gather Unit index line lookups "
+                                "that fetched the data"),
+      ADD_STAT(m_gather_accesses, "Number of Gather Unit index line lookups",
+               m_gather_hits + m_gather_misses),
+      // FFUTSYM
       ADD_STAT(m_accessModeType, ""),
       ADD_STAT(uselessBlocksNotExplainedbyPrefetch,
                "Number of useless blocks not explained by prefetch")
@@ -631,6 +658,18 @@ CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
 
     m_prefetch_accesses
         .flags(statistics::nozero);
+
+    // MYSTUFF
+    m_index_hits.flags(statistics::nozero);
+    m_index_misses.flags(statistics::nozero);
+    m_index_accesses.flags(statistics::nozero);
+    m_idr_hits.flags(statistics::nozero);
+    m_idr_misses.flags(statistics::nozero);
+    m_idr_accesses.flags(statistics::nozero);
+    m_gather_hits.flags(statistics::nozero);
+    m_gather_misses.flags(statistics::nozero);
+    m_gather_accesses.flags(statistics::nozero);
+    // FFUTSYM
 
     m_accessModeType
         .init(RubyRequestType_NUM)
@@ -706,6 +745,20 @@ CacheMemory::preDumpStats()
             }
             it->second->sample(total.count());
         }
+    }
+
+    // The chip-wide union of the resident lifetime sets: every instance
+    // drops its previous snapshot, and the first one called at this tick
+    // takes the new one (preDumpStats runs for the whole tree before any
+    // output).
+    for (auto &kv : lifetimeStats) {
+        if (kv.first.rfind("resident", 0) == 0) {
+            kv.second->reset();
+        }
+    }
+    if (s_lifetimeWalkTick != curTick()) {
+        s_lifetimeWalkTick = curTick();
+        sampleResidentLifetimes();
     }
 }
 // FFUTSYM
@@ -918,6 +971,54 @@ CacheMemory::profileUsefulness(Addr line_addr, bool is_prefetched, std::string a
     writeUsefulBytes[eff_acc_name]->sample(write_count);
 }
 
+statistics::Histogram &
+CacheMemory::usefulnessHistogram(
+    std::unordered_map<std::string, statistics::Histogram*> &family,
+    const std::string &family_name, const std::string &acc_name,
+    const std::string &desc)
+{
+    std::string eff_acc_name = acc_name == "" ? "other" : acc_name;
+    auto it = family.find(eff_acc_name);
+    if (it == family.end()) {
+        statistics::Histogram* new_stat = new statistics::Histogram(
+                    this,
+                    csprintf("%s.%s", family_name, eff_acc_name).c_str(),
+                    statistics::units::Count::get(), desc.c_str());
+        new_stat->init(m_block_size + 1);
+        it = family.emplace(eff_acc_name, new_stat).first;
+    }
+    return *it->second;
+}
+
+void
+CacheMemory::profileInvalidationUsefulness(std::string access_name,
+                                           const WriteMask read_usefulness,
+                                           const WriteMask write_usefulness)
+{
+    WriteMask total_usefulness = read_usefulness;
+    total_usefulness.orMask(write_usefulness);
+    usefulnessHistogram(invalidatedUsefulBytes, "invalidatedUsefulBytes",
+        access_name,
+        "Number of bytes used from a cache block belonging to this access "
+        "name that left without a replacement (invalidated).")
+        .sample(total_usefulness.count());
+}
+
+void
+CacheMemory::profileDroppedEvictUsefulness(std::string access_name,
+                                           const WriteMask read_usefulness,
+                                           const WriteMask write_usefulness)
+{
+    WriteMask total_usefulness = read_usefulness;
+    total_usefulness.orMask(write_usefulness);
+    usefulnessHistogram(droppedEvictUsefulBytes, "droppedEvictUsefulBytes",
+        access_name,
+        "Number of bytes used upstream from a block belonging to this "
+        "access name whose eviction reached this cache while it did not "
+        "hold the block (not counted in its CBU: reset on insertion).")
+        .sample(total_usefulness.count());
+}
+
 void
 CacheMemory::profileUnexplainedUselessness(Addr line_addr)
 {
@@ -984,6 +1085,261 @@ CacheMemory::profilePrefetchMiss()
 {
     cacheMemoryStats.m_prefetch_misses++;
 }
+
+// MYSTUFF
+statistics::Scalar &
+CacheMemory::perNameStat(const std::string &family,
+                         const std::string &acc_name)
+{
+    std::string eff_acc_name = acc_name == "" ? "other" : acc_name;
+    auto &stats = perNameStats[family];
+    auto it = stats.find(eff_acc_name);
+    if (it == stats.end()) {
+        auto *stat = new statistics::Scalar(
+            this, csprintf("%s.%s", family, eff_acc_name).c_str(),
+            statistics::units::Count::get(),
+            csprintf("%s per access name", family).c_str());
+        *stat = 0;
+        it = stats.emplace(eff_acc_name, stat).first;
+    }
+    return *it->second;
+}
+
+void
+CacheMemory::profileDemandHit(std::string acc_name)
+{
+    profileDemandHit();
+    perNameStat("demandHits", acc_name)++;
+}
+
+void
+CacheMemory::profileDemandMiss(std::string acc_name)
+{
+    profileDemandMiss();
+    perNameStat("demandMisses", acc_name)++;
+}
+
+void
+CacheMemory::profilePrefetchHit(std::string acc_name)
+{
+    profilePrefetchHit();
+    perNameStat("prefetchHits", acc_name)++;
+}
+
+void
+CacheMemory::profilePrefetchMiss(std::string acc_name)
+{
+    profilePrefetchMiss();
+    perNameStat("prefetchMisses", acc_name)++;
+}
+
+void
+CacheMemory::profileIndexHit(std::string acc_name)
+{
+    cacheMemoryStats.m_index_hits++;
+    perNameStat("indexHits", acc_name)++;
+}
+
+void
+CacheMemory::profileIndexMiss(std::string acc_name)
+{
+    cacheMemoryStats.m_index_misses++;
+    perNameStat("indexMisses", acc_name)++;
+}
+
+void
+CacheMemory::profileIdrHit(std::string acc_name)
+{
+    cacheMemoryStats.m_idr_hits++;
+    perNameStat("idrHits", acc_name)++;
+}
+
+void
+CacheMemory::profileIdrMiss(std::string acc_name)
+{
+    cacheMemoryStats.m_idr_misses++;
+    perNameStat("idrMisses", acc_name)++;
+}
+
+void
+CacheMemory::profileIdrSpecHit(std::string acc_name)
+{
+    perNameStat("idrSpecHits", acc_name)++;
+}
+
+void
+CacheMemory::profileIdrSpecMiss(std::string acc_name)
+{
+    perNameStat("idrSpecMisses", acc_name)++;
+}
+
+void
+CacheMemory::profileSnoopSharing(const DataBlock &blk, RequestPtr req,
+                                 bool req_valid, bool unique,
+                                 std::string acc_name)
+{
+    const char *kind = unique ? "Unique" : "Shared";
+    if (!req_valid || !req || !req->hasPaddr()) {
+        perNameStat(csprintf("snoopNoRequester%s", kind), acc_name)++;
+        return;
+    }
+    int offset = getOffset(req->getPaddr(), floorLog2(m_block_size));
+    int size = std::min<int>(req->getSize(), m_block_size - offset);
+    WriteMask read = blk.getReadUsefulness(name(), req->getPaddr());
+    WriteMask write = blk.getWriteUsefulness(name(), req->getPaddr());
+    bool used = false;
+    for (int i = 0; i < size && !used; i++) {
+        used = read.getMask(offset + i, 1) || write.getMask(offset + i, 1);
+    }
+    perNameStat(csprintf("snoop%sSharing%s", used ? "True" : "False", kind),
+                acc_name)++;
+}
+
+void
+CacheMemory::profileGatherHit(std::string acc_name)
+{
+    cacheMemoryStats.m_gather_hits++;
+    perNameStat("gatherHits", acc_name)++;
+}
+
+void
+CacheMemory::profileGatherMiss(std::string acc_name)
+{
+    cacheMemoryStats.m_gather_misses++;
+    perNameStat("gatherMisses", acc_name)++;
+}
+
+void
+CacheMemory::profileAllocation(std::string acc_name)
+{
+    perNameStat("bytesAllocated", acc_name) += m_block_size;
+}
+
+std::vector<CacheMemory *> CacheMemory::s_lifetimeInstances;
+Tick CacheMemory::s_lifetimeWalkTick = MaxTick;
+
+statistics::Histogram &
+CacheMemory::lifetimeHistogram(const std::string &family,
+                               const std::string &acc_name, int buckets,
+                               const std::string &desc)
+{
+    std::string eff_acc_name = acc_name == "" ? "other" : acc_name;
+    std::string key = family + "." + eff_acc_name;
+    auto it = lifetimeStats.find(key);
+    if (it == lifetimeStats.end()) {
+        statistics::Histogram* new_stat = new statistics::Histogram(
+            this, key.c_str(), statistics::units::Count::get(),
+            desc.c_str());
+        new_stat->init(buckets);
+        it = lifetimeStats.emplace(key, new_stat).first;
+    }
+    return *it->second;
+}
+
+void
+CacheMemory::profileLifetime(const DataBlock &blk, std::string acc_name,
+                             bool resident)
+{
+    profileLifetimeMasks(blk.getLifeOriginMask(), blk.getLifeOthersMask(),
+                         acc_name, resident);
+}
+
+void
+CacheMemory::profileLifetimeMasks(const WriteMask &origin,
+                                  const WriteMask &others,
+                                  const std::string &acc_name, bool resident)
+{
+    int origin_bytes = 0;
+    int all_bytes = 0;
+    bool shared = false;
+    if (origin.getBlockSize() == m_block_size &&
+        others.getBlockSize() == m_block_size) {
+        origin_bytes = origin.count();
+        shared = !others.isEmpty();
+        WriteMask all = origin;
+        all.orMask(others);
+        all_bytes = all.count();
+    }
+    const std::string prefix = resident ? "resident" : "";
+    const char *when = resident ? "still on chip at the stats dump"
+                                : "that left the chip";
+    lifetimeHistogram(resident ? "residentLifetimeUsefulBytes"
+                               : "lifetimeUsefulBytes",
+        acc_name, m_block_size + 1,
+        csprintf("Bytes any core used of a line of this access name over "
+                 "its time on chip, for lines %s.", when))
+        .sample(all_bytes);
+    lifetimeHistogram(resident ? "residentCrossCoreUsefulBytes"
+                               : "crossCoreUsefulBytes",
+        acc_name, m_block_size + 1,
+        csprintf("Bytes only cores other than the line's first user used, "
+                 "for lines of this access name %s.", when))
+        .sample(all_bytes - origin_bytes);
+    lifetimeHistogram(resident ? "residentLifetimeShared" : "lifetimeShared",
+        acc_name, 2,
+        csprintf("1 if a core other than the line's first user used it, "
+                 "for lines of this access name %s.", when))
+        .sample(shared ? 1 : 0);
+}
+
+void
+CacheMemory::sampleResidentLifetimes()
+{
+    // DataBlock::mergeLifetimeMasks, without a data block per line.
+    struct Union
+    {
+        int origin = -1;
+        WriteMask originMask;
+        WriteMask othersMask;
+        std::string accName;
+    };
+    std::unordered_map<Addr, Union> lines;
+    for (CacheMemory *cm : s_lifetimeInstances) {
+        for (auto &set : cm->m_cache) {
+            for (AbstractCacheEntry *entry : set) {
+                if (!entry || !entry->hasDataBlk()) {
+                    continue;
+                }
+                AccessPermission perm = entry->m_Permission;
+                if (perm == AccessPermission_NotPresent ||
+                    perm == AccessPermission_Invalid ||
+                    perm == AccessPermission_Busy) {
+                    continue;
+                }
+                DataBlock &blk = entry->getDataBlk();
+                if (!blk.isAlloc() || blk.getBlockSize() != m_block_size) {
+                    continue;
+                }
+                Addr addr = entry->m_Address;
+                Union &u = lines[addr];
+                if (u.originMask.getBlockSize() != m_block_size) {
+                    u.originMask = WriteMask(m_block_size);
+                    u.othersMask = WriteMask(m_block_size);
+                }
+                int origin = blk.getLifeOrigin();
+                if (origin >= 0) {
+                    if (u.origin < 0) {
+                        u.origin = origin;
+                    }
+                    WriteMask o = blk.getLifeOriginMask();
+                    if (o.getBlockSize() == m_block_size) {
+                        (origin == u.origin ? u.originMask : u.othersMask)
+                            .orMask(o);
+                        u.othersMask.orMask(blk.getLifeOthersMask());
+                    }
+                }
+                if (u.accName == "") {
+                    u.accName = blk.getAccessName(cm->name(), addr);
+                }
+            }
+        }
+    }
+    for (auto &kv : lines) {
+        profileLifetimeMasks(kv.second.originMask, kv.second.othersMask,
+                             kv.second.accName, true);
+    }
+}
+// FFUTSYM
 
 } // namespace ruby
 } // namespace gem5

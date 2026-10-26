@@ -423,7 +423,11 @@ TimingSimpleCPU::buildPacket(const RequestPtr &req, bool read)
 
     PacketPtr pkt;
     if (dag_ext) {
-        pkt = new Packet(req, read ? MemCmd::ReadIndReq : MemCmd::WriteIndReq);
+        // An index access reads index[i]; a write carrying a DAG is the
+        // single-access stind, which only O3's two-uop model supports.
+        panic_if(!read, "TimingSimpleCPU: stind needs the O3 CPU "
+                 "(two-uop model).");
+        pkt = new Packet(req, MemCmd::ReadIdxReq);
     } else {
         pkt = read ? Packet::createRead(req) : Packet::createWrite(req);
     }

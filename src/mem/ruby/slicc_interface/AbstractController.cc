@@ -40,8 +40,12 @@
 
 #include "mem/ruby/slicc_interface/AbstractController.hh"
 
+#include <algorithm>
+#include <iterator>
+
 #include "RubySlicc_Util.hh"
 // MYSTUFF
+#include "debug/IndirectAccess.hh"
 #include "debug/MSDebug.hh"
 // FFUTSYM
 #include "debug/ProtocolTrace.hh"
@@ -54,7 +58,6 @@
 #include "mem/ruby/system/RubySystem.hh"
 #include "mem/ruby/system/Sequencer.hh"
 #include "sim/system.hh"
-#include <iterator>
 
 namespace gem5
 {
@@ -89,6 +92,7 @@ void
 AbstractController::init()
 {
     stats.delayHistogram.init(10);
+    stats.idrCoalesceGroupSize.init(8);
     uint32_t size = Network::getNumberOfVirtualNetworks();
     for (uint32_t i = 0; i < size; i++) {
         stats.delayVCHistogram.push_back(new statistics::Histogram(this));
@@ -128,6 +132,14 @@ AbstractController::init()
     for (auto abs_cntrl : params().upstream_destinations) {
         upstreamDestinations.add(abs_cntrl->getMachineID());
     }
+
+    // MYSTUFF: the target flow asks the Gather Unit's own downstream path
+    // for a data block; naming other Value Units is the shared Gather
+    // Unit's extension (post-QE plan, WP13), not implemented yet.
+    fatal_if(!params().value_unit_destinations.empty(),
+             "%s: value_unit_destinations is not implemented yet (the "
+             "shared Gather Unit, WP13); leave it empty.", name());
+    // FFUTSYM
 }
 
 void
@@ -550,44 +562,70 @@ AbstractController::canOverride(std::string label, Addr address)
     }
 }
 
+uint64_t
+AbstractController::indexValue(const DependentAccessGen &dag,
+                               DataBlock &index_data, int &offset,
+                               size_t &index_size)
+{
+    assert(!dag.isMerged());
+    offset = getOffset(dag.descriptor(0).indexAddr);
+    index_size = dag.indexSize();
+    panic_if(index_size == 0, "%s: DAG has no indexSize set.", __func__);
+
+    const uint8_t *raw = index_data.getData(offset, index_size);
+    switch (index_size) {
+        case 4: return *reinterpret_cast<const uint32_t *>(raw);
+        case 8: return *reinterpret_cast<const uint64_t *>(raw);
+        default:
+            panic("%s: unsupported index element size %u bytes", __func__,
+                  index_size);
+    }
+}
+
+void
+AbstractController::markIndexRead(const DependentAccessGen &dag,
+                                  DataBlock &index_data, Addr line_addr)
+{
+    // The Gather Unit reads the index element as a core's load would: mark
+    // its bytes used in the block the IDR is built from (the TBE's, merged
+    // into the cache entry at Finalize_UpdateCacheFromTBE), as the
+    // Sequencer's hit callback does for core accesses. Without it the
+    // index lines at the Gather Unit show no use at all.
+    if (index_data.isAlloc()) {
+        index_data.setReadUsefulness(getOffset(dag.descriptor(0).indexAddr),
+                                     dag.indexSize(), name(), line_addr);
+    }
+}
+
 RequestPtr
 AbstractController::getDependentReq(Addr line_addr, DataBlock &index_data)
 {
     auto it = m_cachedEntries.find(line_addr);
-    panic_if(it == m_cachedEntries.end() || it->second.empty(),
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
              "getDependentReq: no cached entries for line_addr %#x. "
              "Ensure extractExtensions() was called when the TBE was "
              "allocated.", line_addr);
 
-    // Pop the front DAG (must be single-descriptor, not merged).
-    auto dag = std::move(it->second.front());
-    it->second.erase(it->second.begin());
+    // Pop the front entry (a single-descriptor DAG).
+    auto entry = std::move(it->second.entries.front());
+    it->second.entries.erase(it->second.entries.begin());
+    auto dag = std::move(entry.dag);
 
     panic_if(!dag, "getDependentReq: cached DependentAccessGen is null for "
             "line_addr %#x.", line_addr);
-    assert(!dag->isMerged());
 
     const auto& desc = dag->descriptor(0);
-    bool read = (desc.intent == DependentAccessGen::AccessIntent::Read);
-    int offset = getOffset(desc.indexAddr);
-
-    // Use the index element size from the DAG.
-    size_t index_size = dag->indexSize();
-    panic_if(index_size == 0, "getDependentReq: DAG has no indexSize set for line_addr %#x.", line_addr);
-
-    // Extract the index value from the DataBlock at the element's offset.
-    const uint8_t *raw = index_data.getData(offset, index_size);
-    DPRINTF(MSDebug, "%s: Generating dependent request from %s.\n", __func__, index_data);
-
-    uint64_t index_value = 0;
-    switch (index_size) {
-        case 4: index_value = *reinterpret_cast<const uint32_t *>(raw); break;
-        case 8: index_value = *reinterpret_cast<const uint64_t *>(raw); break;
-        default:
-            panic("getDependentReq: unsupported index element size %u bytes", index_size);
-    }
-    DPRINTF(MSDebug, "%s: line_addr=%#x offset=%d index_size=%d index_value=%" PRIu64
-            " read=%d\n", __func__, line_addr, offset, index_size, index_value, read);
+    // The IDR's intent: a write, or the DAG's own when nothing coalesced.
+    bool read = !entry.write;
+    int offset;
+    size_t index_size;
+    DPRINTF(MSDebug, "%s: Generating dependent request from %s.\n",
+            __func__, index_data);
+    uint64_t index_value = indexValue(*dag, index_data, offset, index_size);
+    DPRINTF(MSDebug, "%s: line_addr=%#x offset=%d index_size=%d "
+            "index_value=%" PRIu64 " read=%d absorbed=%u\n", __func__,
+            line_addr, offset, index_size, index_value, read,
+            entry.absorbed);
 
     // Generate the Phase 2 (data-fetch) request using the cached DAG.
     RequestPtr phase2 = dag->genNextRequest(index_value);
@@ -601,6 +639,13 @@ AbstractController::getDependentReq(Addr line_addr, DataBlock &index_data)
     phase2->setExtension<IndirectAccessAlias>(
         std::make_shared<IndirectAccessAlias>(desc.alias));
 
+    // The IDR is an access to the pair's data array: name it as uop1 names
+    // its own (the array's registered name, else hov<p>_data), so the
+    // caches' per-name stats add them up.
+    phase2->setExtension<MemAccessName>(std::make_shared<MemAccessName>(
+        desc.dataName.empty() ? csprintf("hov%u_data", desc.pair)
+                              : desc.dataName));
+
     DPRINTFR(ProtocolTrace, "%15s %3s %10s%20s %6s>%-6s %#x %s idx_line=%#x "
              "offset=%d idx_val=%" PRIu64 "\n",
              curTick(), m_version, "GatherU", "IDR_Begin", "", "",
@@ -612,7 +657,8 @@ AbstractController::getDependentReq(Addr line_addr, DataBlock &index_data)
 }
 
 void
-AbstractController::extractExtensions(Addr line_addr, RequestPtr req)
+AbstractController::extractExtensions(Addr line_addr, RequestPtr req,
+                                      DataBlock &index_data)
 {
     auto dag = req->getExtension<DependentAccessGen>();
     assert(dag && "extractExtensions called without a DependentAccessGen");
@@ -625,70 +671,539 @@ AbstractController::extractExtensions(Addr line_addr, RequestPtr req)
     for (auto& single : unwrapped) {
         auto shared = std::shared_ptr<DependentAccessGen>(single.release());
 
+        bool write = shared->descriptor(0).intent ==
+                     DependentAccessGen::AccessIntent::Write;
+
+        // A speculated IDR already stands for this element: drop the DAG,
+        // but the Gather Unit read its index element for it.
+        int elem = getOffset(shared->descriptor(0).indexAddr) /
+                   shared->indexSize();
+        if (hovCovers(line_addr, shared->requestorId(),
+                      shared->descriptor(0).pair, elem, write)) {
+            markIndexRead(*shared, index_data, line_addr);
+            stats.hovDagsCoveredAtGU++;
+            DPRINTF(IndirectAccess, "DAG for index line %#x element %d "
+                    "(pair %u, write %d) covered by speculation.\n",
+                    line_addr, elem, shared->descriptor(0).pair, write);
+            continue;
+        }
+
         DPRINTF(MSDebug, "%s: Cached DAG for line_addr %#x "
                 "(read=%d, offset=%d, dag=%p)\n",
-                __func__, line_addr,
-                shared->descriptor(0).intent ==
-                    DependentAccessGen::AccessIntent::Read,
+                __func__, line_addr, !write,
                 getOffset(shared->descriptor(0).indexAddr),
                 shared.get());
 
-        m_cachedEntries[line_addr].push_back(std::move(shared));
+        auto &line = m_cachedEntries[line_addr];
+        line.entries.push_back({std::move(shared), write});
+        // New entries may coalesce with the pending ones.
+        line.coalesced = false;
     }
+}
+
+void
+AbstractController::coalesceExtensions(Addr line_addr, DataBlock &index_data)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    if (it == m_cachedEntries.end() || it->second.coalesced) {
+        return;
+    }
+    auto &entries = it->second.entries;
+    std::vector<DependentEntry> kept;
+    std::vector<Addr> kept_lines;
+    for (auto &entry : entries) {
+        int offset;
+        size_t index_size;
+        uint64_t index_value =
+            indexValue(*entry.dag, index_data, offset, index_size);
+        Addr data_line = makeLineAddress(entry.dag->genAddress(index_value));
+        auto pos = std::find(kept_lines.begin(), kept_lines.end(), data_line);
+        if (pos == kept_lines.end()) {
+            kept.push_back(std::move(entry));
+            kept_lines.push_back(data_line);
+            continue;
+        }
+        // Absorbed: the kept IDR fetches its data line (a write makes that
+        // IDR a WriteValue); the Gather Unit still read its index element.
+        auto &survivor = kept[pos - kept_lines.begin()];
+        survivor.write |= entry.write;
+        survivor.absorbed++;
+        // A speculated element is read only when a core asks for it.
+        if (entry.spec) {
+            stats.hovSpecCoalesced++;
+        } else {
+            markIndexRead(*entry.dag, index_data, line_addr);
+        }
+        stats.idrCoalescedSameLine++;
+        DPRINTF(IndirectAccess, "DAG for data line %#x (offset %d, write %d) "
+                "coalesced into the IDR of index line %#x.\n", data_line,
+                offset, entry.write, line_addr);
+    }
+    for (const auto &entry : kept) {
+        if (entry.absorbed > 0) {
+            stats.idrCoalesceGroupSize.sample(entry.absorbed + 1);
+        }
+    }
+    entries = std::move(kept);
+    it->second.coalesced = true;
 }
 
 bool
 AbstractController::hasDependentWork(Addr line_addr)
 {
     auto it = m_cachedEntries.find(line_addr);
-    return it != m_cachedEntries.end() && !it->second.empty();
+    return it != m_cachedEntries.end() && !it->second.entries.empty();
 }
 
 Addr
 AbstractController::peekDependentAddr(Addr line_addr, DataBlock &index_data)
 {
     auto it = m_cachedEntries.find(line_addr);
-    panic_if(it == m_cachedEntries.end() || it->second.empty(),
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
              "peekDependentAddr: no cached entries for line_addr %#x.",
              line_addr);
 
-    const auto& dag = it->second.front();  // peek, don't pop
+    const auto &front = it->second.entries.front();  // peek, don't pop
+    const auto& dag = front.dag;
     panic_if(!dag, "peekDependentAddr: cached DAG is null for "
              "line_addr %#x.", line_addr);
-    assert(!dag->isMerged());
 
-    const auto& desc = dag->descriptor(0);
-    int offset = getOffset(desc.indexAddr);
-
-    size_t index_size = dag->indexSize();
-    panic_if(index_size == 0,
-             "peekDependentAddr: DAG has no indexSize for line_addr %#x.",
-             line_addr);
-
-    const uint8_t *raw = index_data.getData(offset, index_size);
-    uint64_t index_value = 0;
-    switch (index_size) {
-        case 4: index_value = *reinterpret_cast<const uint32_t *>(raw); break;
-        case 8: index_value = *reinterpret_cast<const uint64_t *>(raw); break;
-        default:
-            panic("peekDependentAddr: unsupported index element size %u",
-                  index_size);
+    int offset;
+    size_t index_size;
+    uint64_t index_value = indexValue(*dag, index_data, offset, index_size);
+    // A speculated element is read only when a core asks for it (its DAG
+    // is then dropped as covered and marks it).
+    if (!front.spec) {
+        markIndexRead(*dag, index_data, line_addr);
     }
-
     return dag->genAddress(index_value);
+}
+
+bool
+AbstractController::peekDependentIsSpec(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
+             "peekDependentIsSpec: no cached entries for line_addr %#x.",
+             line_addr);
+    return it->second.entries.front().spec;
+}
+
+void
+AbstractController::countSpecIdr(int what)
+{
+    if (what == 0) {
+        stats.hovSpecIdrsSent++;
+    } else {
+        stats.hovSpecIdrsDropped[what - 1]++;
+    }
+}
+
+AbstractController::HovCover *
+AbstractController::findCover(Addr line_addr, RequestorID rid,
+                              unsigned pair, Cycles now)
+{
+    auto it = m_hovCover.find(line_addr);
+    if (it == m_hovCover.end()) {
+        return nullptr;
+    }
+    for (auto &row : it->second) {
+        if (row.rid == rid && row.pair == pair) {
+            return now - row.made < m_hovSpecWindow ? &row : nullptr;
+        }
+    }
+    return nullptr;
+}
+
+AbstractController::HovCover &
+AbstractController::makeCover(Addr line_addr, RequestorID rid,
+                              unsigned pair, int leader_elem, Cycles now)
+{
+    auto it = m_hovCover.find(line_addr);
+    if (it == m_hovCover.end()) {
+        // A new line: the oldest lines give up their rows first.
+        while (m_hovSpecLines > 0 &&
+               (int)m_hovCoverFifo.size() >= m_hovSpecLines) {
+            auto old = m_hovCover.find(m_hovCoverFifo.front());
+            if (old != m_hovCover.end()) {
+                stats.hovCoverReplaced += old->second.size();
+                m_hovCover.erase(old);
+            }
+            m_hovCoverFifo.pop_front();
+        }
+        m_hovCoverFifo.push_back(line_addr);
+        it = m_hovCover.emplace(line_addr, std::vector<HovCover>()).first;
+    }
+    for (auto &row : it->second) {
+        if (row.rid == rid && row.pair == pair) {
+            // A stale row of the same pair starts over.
+            row = HovCover{rid, static_cast<uint8_t>(pair), leader_elem,
+                           0, 0, now};
+            return row;
+        }
+    }
+    it->second.push_back(HovCover{rid, static_cast<uint8_t>(pair),
+                                  leader_elem, 0, 0, now});
+    return it->second.back();
+}
+
+bool
+AbstractController::hovCovers(Addr line_addr, RequestorID rid,
+                              unsigned pair, int elem, bool write)
+{
+    if (elem < 0 || elem >= 64) {
+        return false;
+    }
+    HovCover *row = findCover(line_addr, rid, pair, curCycle());
+    if (!row) {
+        return false;
+    }
+    uint64_t bit = uint64_t(1) << elem;
+    return (row->covered & bit) && (!write || (row->writes & bit));
+}
+
+void
+AbstractController::speculateLine(Addr line_addr, DataBlock &index_data,
+                                  int mode, bool spec_writes, int max_lines,
+                                  Cycles window)
+{
+    m_hovSpecLines = max_lines;
+    m_hovSpecWindow = window;
+    if (mode == 0) {
+        return;
+    }
+    auto it = m_cachedEntries.find(line_addr);
+    if (it == m_cachedEntries.end() || it->second.entries.empty()) {
+        return;
+    }
+    Cycles now = curCycle();
+    int block_size = m_ruby_system->getBlockSizeBytes();
+    auto &entries = it->second.entries;
+    std::vector<DependentEntry> made;
+    for (size_t i = 0; i < entries.size(); i++) {
+        if (entries[i].spec) {
+            continue;
+        }
+        const auto &leader = *entries[i].dag;
+        const auto &ld = leader.descriptor(0);
+        RequestorID rid = leader.requestorId();
+        unsigned pair = ld.pair;
+        if (findCover(line_addr, rid, pair, now)) {
+            continue;  // this pair is already speculated on this line
+        }
+        int index_size = leader.indexSize();
+        int elems = std::min(block_size / index_size, 64);
+        int k_leader = getOffset(ld.indexAddr) / index_size;
+
+        // The real entries of this pair hold their own elements.
+        HovCover &row = makeCover(line_addr, rid, pair, k_leader, now);
+        for (const auto &other : entries) {
+            const auto &od = other.dag->descriptor(0);
+            if (other.spec || other.dag->requestorId() != rid ||
+                od.pair != pair) {
+                continue;
+            }
+            int k = getOffset(od.indexAddr) / index_size;
+            if (k < 64) {
+                row.covered |= uint64_t(1) << k;
+                if (other.write) {
+                    row.writes |= uint64_t(1) << k;
+                }
+            }
+        }
+
+        bool write = ld.intent == DependentAccessGen::AccessIntent::Write;
+        if (write && !spec_writes) {
+            write = false;
+        }
+        int first = mode == 1 ? k_leader + 1 : 0;
+        for (int k = first; k < elems; k++) {
+            uint64_t bit = uint64_t(1) << k;
+            if (row.covered & bit) {
+                continue;
+            }
+            auto clones = leader.unwrap();
+            std::shared_ptr<DependentAccessGen> spec(clones.front().release());
+            auto &sd = spec->mutableDescriptor(0);
+            sd.indexAddr = line_addr + k * index_size;
+            sd.alias = ld.alias + (Addr)((int64_t)(k - k_leader) *
+                                         (int64_t)ld.dataSize);
+            if (ld.intent == DependentAccessGen::AccessIntent::Write &&
+                !write) {
+                sd.intent = DependentAccessGen::AccessIntent::Read;
+                stats.hovSpecWritesDemoted++;
+            }
+            made.push_back({std::move(spec), write, 0, true});
+            row.covered |= bit;
+            if (write) {
+                row.writes |= bit;
+            }
+            stats.hovSpecEntries++;
+        }
+        if (mode == 1) {
+            stats.hovSpecLinesForward++;
+        } else {
+            stats.hovSpecLinesLine++;
+        }
+        DPRINTF(IndirectAccess, "Speculated index line %#x from element %d "
+                "(pair %u, rid %u): covered %#lx.\n", line_addr, k_leader,
+                pair, rid, row.covered);
+    }
+    if (!made.empty()) {
+        // After the real entries, so real IDRs go first.
+        for (auto &entry : made) {
+            entries.push_back(std::move(entry));
+        }
+        it->second.coalesced = false;
+    }
+}
+
+bool
+AbstractController::peekDependentIsWrite(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
+             "peekDependentIsWrite: no cached entries for line_addr %#x.",
+             line_addr);
+    return it->second.entries.front().write;
 }
 
 void
 AbstractController::dropDependentReq(Addr line_addr)
 {
     auto it = m_cachedEntries.find(line_addr);
-    panic_if(it == m_cachedEntries.end() || it->second.empty(),
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
              "dropDependentReq: no cached entries for line_addr %#x.",
              line_addr);
 
     DPRINTF(MSDebug, "%s: Dropping front DAG entry for line_addr %#x "
             "(collision skip)\n", __func__, line_addr);
-    it->second.erase(it->second.begin());
+    it->second.entries.erase(it->second.entries.begin());
+}
+
+int
+AbstractController::idrVerdict(Addr data_line, bool write)
+{
+    auto in_flight = m_idrInFlight.find(data_line);
+    if (in_flight != m_idrInFlight.end()) {
+        if (write && !in_flight->second.write) {
+            stats.idrIntentLost++;
+        }
+        stats.idrDroppedInFlight++;
+        return IDR_DROP;
+    }
+    auto recent = m_idrRecent.find(data_line);
+    if (recent != m_idrRecent.end()) {
+        if (write && !recent->second) {
+            stats.idrIntentLost++;
+        }
+        stats.idrDroppedRecent++;
+        return IDR_DROP;
+    }
+    return IDR_SEND;
+}
+
+void
+AbstractController::noteIdrSent(Addr data_line, Addr hov_id, bool write,
+                                int recent_lines)
+{
+    // More than one in flight to a line only when the Indirect Unit
+    // expects each (an expect-named entry is never coalesced away).
+    auto in_flight = m_idrInFlight.find(data_line);
+    if (in_flight != m_idrInFlight.end()) {
+        in_flight->second.count++;
+        in_flight->second.write |= write;
+    } else {
+        m_idrInFlight.emplace(data_line, IdrInFlight{hov_id, write});
+    }
+    if (recent_lines <= 0) {
+        return;
+    }
+    if (m_idrRecent.emplace(data_line, write).second) {
+        m_idrRecentFifo.push_back(data_line);
+        while (m_idrRecentFifo.size() > (size_t)recent_lines) {
+            m_idrRecent.erase(m_idrRecentFifo.front());
+            m_idrRecentFifo.pop_front();
+        }
+    } else {
+        m_idrRecent[data_line] |= write;
+    }
+}
+
+void
+AbstractController::noteIdrAcked(Addr data_line)
+{
+    auto it = m_idrInFlight.find(data_line);
+    panic_if(it == m_idrInFlight.end(),
+             "noteIdrAcked: no IDR in flight to data line %#x.", data_line);
+    if (--it->second.count == 0) {
+        m_idrInFlight.erase(it);
+    }
+}
+
+bool
+AbstractController::hovMarkExpect(Addr line_addr, DataBlock &index_data,
+                                  bool coalesce)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    if (it == m_cachedEntries.end()) {
+        return false;
+    }
+    for (auto &entry : it->second.entries) {
+        if (entry.spec) {
+            continue;
+        }
+        // The uop0's own entry: its data line, read without marking the
+        // index element (TriageIDR reads it when it handles the entry).
+        int offset;
+        size_t index_size;
+        uint64_t index_value =
+            indexValue(*entry.dag, index_data, offset, index_size);
+        Addr data_line = makeLineAddress(entry.dag->genAddress(index_value));
+        if (!isMappedDownstream(data_line)) {
+            return false;
+        }
+        if (coalesce && (m_idrInFlight.count(data_line) ||
+                         m_idrRecent.count(data_line))) {
+            return false;
+        }
+        entry.expect = true;
+        entry.expectLine = data_line;
+        stats.hovExpectSent++;
+        return true;
+    }
+    return false;
+}
+
+const AbstractController::DependentEntry &
+AbstractController::expectEntry(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end(),
+             "expectEntry: no entries for index line %#x.", line_addr);
+    for (const auto &entry : it->second.entries) {
+        if (entry.expect) {
+            return entry;
+        }
+    }
+    panic("expectEntry: no expect on index line %#x.", line_addr);
+}
+
+Addr
+AbstractController::hovExpectAddr(Addr line_addr)
+{
+    return expectEntry(line_addr).expectLine;
+}
+
+bool
+AbstractController::hovExpectWrite(Addr line_addr)
+{
+    return expectEntry(line_addr).write;
+}
+
+std::string
+AbstractController::hovExpectName(Addr line_addr)
+{
+    // As getDependentReq names the IDR: the array's name, else hov<p>_data
+    const auto &desc = expectEntry(line_addr).dag->descriptor(0);
+    return desc.dataName.empty() ? csprintf("hov%u_data", desc.pair)
+                                 : desc.dataName;
+}
+
+bool
+AbstractController::peekDependentHasExpect(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
+             "peekDependentHasExpect: no cached entries for line_addr %#x.",
+             line_addr);
+    return it->second.entries.front().expect;
+}
+
+void
+AbstractController::hovTrackerOpen(int slot, Addr data_line, bool write,
+                                   bool spec, bool expect)
+{
+    auto inserted = m_hovTracker.emplace(
+        slot, HovTrack{data_line, write, spec, expect, curCycle()});
+    panic_if(!inserted.second, "hovTrackerOpen: tracker slot %d is in use.",
+             slot);
+    stats.hovFwd[0]++;
+}
+
+void
+AbstractController::hovTrackerClose(int slot, int outcome, bool coalesce)
+{
+    auto it = m_hovTracker.find(slot);
+    panic_if(it == m_hovTracker.end(),
+             "hovTrackerClose: tracker slot %d is free.", slot);
+    switch (outcome) {
+      case 0:
+        stats.hovFwd[2]++;
+        stats.hovFwdLatency.sample(curCycle() - it->second.made);
+        break;
+      case 1:
+        stats.hovFwd[3]++;
+        stats.hovFwdLatency.sample(curCycle() - it->second.made);
+        break;
+      case 2:
+        stats.hovFwd[1]++;
+        break;
+      default:
+        panic("hovTrackerClose: unknown outcome %d.", outcome);
+    }
+    if (coalesce) {
+        noteIdrAcked(it->second.dataLine);
+    }
+    m_hovTracker.erase(it);
+}
+
+void
+AbstractController::hovNoteDeliveredNoExpect(Addr line_addr)
+{
+    m_hovDeliveredFifo.push_back(line_addr);
+    while (m_hovDeliveredFifo.size() > 64) {
+        m_hovDeliveredFifo.pop_front();
+    }
+}
+
+bool
+AbstractController::hovTakeDeliveredNoExpect(Addr line_addr)
+{
+    auto it = std::find(m_hovDeliveredFifo.begin(), m_hovDeliveredFifo.end(),
+                        line_addr);
+    if (it == m_hovDeliveredFifo.end()) {
+        return false;
+    }
+    m_hovDeliveredFifo.erase(it);
+    return true;
+}
+
+void
+AbstractController::hovDeclineBegin(Addr line_addr, int more_chunks)
+{
+    panic_if(m_hovDeclining.count(line_addr),
+             "hovDeclineBegin: %#x is already being declined.", line_addr);
+    if (more_chunks > 0) {
+        m_hovDeclining[line_addr] = more_chunks;
+    }
+}
+
+bool
+AbstractController::hovDeclining(Addr line_addr)
+{
+    return m_hovDeclining.count(line_addr) != 0;
+}
+
+void
+AbstractController::hovDeclineChunk(Addr line_addr)
+{
+    auto it = m_hovDeclining.find(line_addr);
+    panic_if(it == m_hovDeclining.end(),
+             "hovDeclineChunk: %#x is not being declined.", line_addr);
+    if (--it->second == 0) {
+        m_hovDeclining.erase(it);
+    }
 }
 
 void
@@ -696,6 +1211,96 @@ AbstractController::clearExtensions(Addr line_addr)
 {
     DPRINTF(MSDebug, "%s: Clearing cached entries for line_addr %#x\n", __func__, line_addr);
     m_cachedEntries.erase(line_addr);
+}
+
+bool
+AbstractController::isMappedDownstream(Addr addr) const
+{
+    for (const auto &i : downstreamAddrMap) {
+        if (i.second.contains(addr) != i.second.end())
+            return true;
+    }
+    return false;
+}
+
+bool
+AbstractController::hasDAG(RequestPtr req)
+{
+    return req && req->getExtension<DependentAccessGen>() != nullptr;
+}
+
+void
+AbstractController::countDAGCarrier(int carrier, RequestPtr req)
+{
+    assert(carrier >= 0 && carrier < 3);
+    auto dag = req->getExtension<DependentAccessGen>();
+    assert(dag);
+    stats.hovDAGsByCarrier[carrier] += dag->numDescriptors();
+}
+
+void
+AbstractController::stashPostEvictDAG(Addr line_addr, RequestPtr req)
+{
+    auto dag = req->getExtension<DependentAccessGen>();
+    assert(dag && "stashPostEvictDAG called without a DependentAccessGen");
+    auto &entry = m_postEvicts[line_addr];
+    if (entry.dag) {
+        // The stash holds its own copy, so merging never changes the
+        // request's DAG, which the CPU may still share.
+        entry.dag->merge(*dag);
+    } else {
+        entry.dag = std::shared_ptr<DependentAccessGen>(
+            static_cast<DependentAccessGen *>(dag->clone().release()));
+    }
+    DPRINTF(MSDebug, "%s: stashed %u descriptor(s) for line %#x (%u total)\n",
+            __func__, dag->numDescriptors(), line_addr,
+            entry.dag->numDescriptors());
+}
+
+bool
+AbstractController::hasStash(Addr line_addr)
+{
+    auto it = m_postEvicts.find(line_addr);
+    return it != m_postEvicts.end() && it->second.dag != nullptr;
+}
+
+RequestPtr
+AbstractController::takePostEvictDAG(Addr line_addr)
+{
+    auto it = m_postEvicts.find(line_addr);
+    panic_if(it == m_postEvicts.end() || !it->second.dag,
+             "takePostEvictDAG: no stashed DAG for line %#x", line_addr);
+    // A fresh line-sized request carries the merged DAG on the
+    // write-back, as the Sequencer's merged notification does.
+    RequestPtr req = std::make_shared<Request>(
+        line_addr, m_ruby_system->getBlockSizeBytes(), 0, m_id);
+    req->setExtension<DependentAccessGen>(it->second.dag);
+    m_postEvicts.erase(it);
+    return req;
+}
+
+bool
+AbstractController::isReplEnqueued(Addr line_addr)
+{
+    auto it = m_postEvicts.find(line_addr);
+    return it != m_postEvicts.end() && it->second.replEnqueued;
+}
+
+void
+AbstractController::markReplEnqueued(Addr line_addr)
+{
+    m_postEvicts[line_addr].replEnqueued = true;
+}
+
+void
+AbstractController::clearReplEnqueued(Addr line_addr)
+{
+    auto it = m_postEvicts.find(line_addr);
+    if (it == m_postEvicts.end())
+        return;
+    it->second.replEnqueued = false;
+    if (!it->second.dag)
+        m_postEvicts.erase(it);
 }
 // FFUTSYM
 
@@ -724,12 +1329,128 @@ ControllerStats::ControllerStats(statistics::Group *parent)
     : statistics::Group(parent),
       ADD_STAT(fullyBusyCycles,
                "cycles for which number of transistions == max transitions"),
-      ADD_STAT(delayHistogram, "delay_histogram")
+      ADD_STAT(delayHistogram, "delay_histogram"),
+      ADD_STAT(idrDroppedUnmapped,
+               "IDRs dropped because the data address has no downstream "
+               "mapping"),
+      ADD_STAT(idrCoalescedSameLine,
+               "DAGs absorbed into another DAG's IDR to the same data line "
+               "(one index line)"),
+      ADD_STAT(idrCoalesceGroupSize,
+               "DAGs per coalesced IDR (groups of two or more)"),
+      ADD_STAT(idrDroppedInFlight,
+               "IDRs dropped because one to their data line was in flight"),
+      ADD_STAT(idrDroppedRecent,
+               "IDRs dropped because one to their data line was sent "
+               "recently"),
+      ADD_STAT(idrIntentLost,
+               "write IDRs dropped over a read IDR to the same data line "
+               "(uop1's store upgrades the line)"),
+      ADD_STAT(hovFwd,
+               "Gather Unit: requests injected on the Indirect Unit's "
+               "behalf, by outcome"),
+      ADD_STAT(hovFwdLatency,
+               "Gather Unit: cycles from injecting a request to the "
+               "Indirect Unit's CompAck"),
+      ADD_STAT(hovExpectSent,
+               "Gather Unit: index data that named a data block to expect"),
+      ADD_STAT(hovExpect,
+               "Indirect Unit: expected data blocks, by outcome"),
+      ADD_STAT(hovDeliver,
+               "Indirect Unit: delivered data blocks, by outcome"),
+      ADD_STAT(hovStashOrphaned,
+               "post-evict stashes turned into notifications because the "
+               "line left without a replacement"),
+      ADD_STAT(hovDAGsByCarrier,
+               "DAG descriptors extracted at the Gather Unit, by the "
+               "message that carried them"),
+      ADD_STAT(hovSpecEntries,
+               "dependent entries speculated from a leader's index line"),
+      ADD_STAT(hovSpecLinesForward,
+               "leaders speculated forward (their element to the line end)"),
+      ADD_STAT(hovSpecLinesLine,
+               "leaders speculated over the whole index line"),
+      ADD_STAT(hovSpecIdrsSent, "speculated IDRs sent"),
+      ADD_STAT(hovSpecIdrsDropped, "speculated IDRs dropped, by reason"),
+      ADD_STAT(hovDagsCoveredAtGU,
+               "real DAG descriptors dropped at the Gather Unit because a "
+               "cover row already held their element"),
+      ADD_STAT(hovCoverReplaced,
+               "cover rows dropped by the hov_spec_lines limit"),
+      ADD_STAT(hovSpecWritesDemoted,
+               "speculated entries made reads from a write leader "
+               "(hov_spec_writes off)"),
+      ADD_STAT(hovSpecCoalesced,
+               "speculated entries absorbed into another IDR to the same "
+               "data line (one index line)")
 {
     fullyBusyCycles
         .flags(statistics::nozero);
     delayHistogram
         .flags(statistics::nozero);
+    idrDroppedUnmapped
+        .flags(statistics::nozero);
+    idrCoalescedSameLine
+        .flags(statistics::nozero);
+    idrCoalesceGroupSize
+        .flags(statistics::nozero);
+    idrDroppedInFlight
+        .flags(statistics::nozero);
+    idrDroppedRecent
+        .flags(statistics::nozero);
+    idrIntentLost
+        .flags(statistics::nozero);
+    hovFwd
+        .init(6)
+        .subname(0, "issued")
+        .subname(1, "skippedHeld")
+        .subname(2, "completed")
+        .subname(3, "declined")
+        .subname(4, "droppedNoTarget")
+        .subname(5, "mergedCoreRequest")
+        .flags(statistics::nozero);
+    hovFwdLatency
+        .init(16)
+        .flags(statistics::nozero);
+    hovExpectSent
+        .flags(statistics::nozero);
+    hovExpect
+        .init(6)
+        .subname(0, "allocated")
+        .subname(1, "present")
+        .subname(2, "droppedNoTBE")
+        .subname(3, "afterData")
+        .subname(4, "busy")
+        .subname(5, "timedOut")
+        .flags(statistics::nozero);
+    hovDeliver
+        .init(4)
+        .subname(0, "intoExpect")
+        .subname(1, "onArrival")
+        .subname(2, "declined")
+        .subname(3, "intoCoreRequest")
+        .flags(statistics::nozero);
+    hovStashOrphaned
+        .flags(statistics::nozero);
+    hovDAGsByCarrier
+        .init(3)
+        .subname(0, "request")
+        .subname(1, "notification")
+        .subname(2, "postEvict")
+        .flags(statistics::nozero);
+    hovSpecEntries.flags(statistics::nozero);
+    hovSpecLinesForward.flags(statistics::nozero);
+    hovSpecLinesLine.flags(statistics::nozero);
+    hovSpecIdrsSent.flags(statistics::nozero);
+    hovSpecIdrsDropped
+        .init(2)
+        .subname(0, "unmapped")
+        .subname(1, "coalesced")
+        .flags(statistics::nozero);
+    hovDagsCoveredAtGU.flags(statistics::nozero);
+    hovCoverReplaced.flags(statistics::nozero);
+    hovSpecWritesDemoted.flags(statistics::nozero);
+    hovSpecCoalesced.flags(statistics::nozero);
 }
 
 } // namespace ruby

@@ -120,6 +120,13 @@ class GicV2 : public BaseGic, public GicV2Registers
     static const AddrRange GICD_IPRIORITYR; // interrupt priority registers
     static const AddrRange GICD_ITARGETSR;  // processor target registers
     static const AddrRange GICD_ICFGR;      // interrupt config registers
+    // SGI pending registers, banked per target CPU: one byte per SGI, bit m
+    // of which says that the SGI is pending from CPU m. The one register
+    // that carries an SGI together with its source, so the one through
+    // which pending SGIs move between this model and a KVM in-kernel GIC
+    // (copyGicState).
+    static const AddrRange GICD_CPENDSGIR;  // SGI clear-pending registers
+    static const AddrRange GICD_SPENDSGIR;  // SGI set-pending registers
 
     // cpu memory addresses
     enum
@@ -485,6 +492,29 @@ class GicV2 : public BaseGic, public GicV2Registers
 
     /** generate a bit mask to check cpuSgi for an interrupt. */
     uint64_t genSwiMask(int cpu);
+
+    /** SGI state as the distributor registers expose it. Without the gem5
+     * extensions, cpuSgiPending[sgi] and cpuSgiActive[sgi] hold bit
+     * (target + 8 * source); with them, cpuSgiPendingExt[target] and
+     * cpuSgiActiveExt[target] hold bit sgi and the source is not kept
+     * (it is reported as, and set from, CPU 0). PPIs live in cpuPpiPending
+     * and cpuPpiActive likewise; the banked word 0 of pendingInt and
+     * activeInt is never used, so that a register write (the guest's, or
+     * a copy from a KVM GIC) lands where IAR, EOIR, updateIntState and
+     * the devices look. */
+    /** The CPUs `sgi` is pending from, for target `ctx` (GICD_SPENDSGIR). */
+    uint8_t sgiPendingSources(ContextID ctx, int sgi);
+    /** Make `sgi` pending for `ctx` from each CPU in `sources`. */
+    void setSgiPending(ContextID ctx, int sgi, uint8_t sources);
+    /** Clear `sgi` pending for `ctx` from each CPU in `sources`. */
+    void clearSgiPending(ContextID ctx, int sgi, uint8_t sources);
+    /** Bit sgi set when `sgi` is active on `ctx` from any CPU. */
+    uint32_t sgiActiveBits(ContextID ctx);
+    /** `sgi` active on `ctx`; the source is not architected state, so it
+     * is recorded as CPU 0 (GICD_ISACTIVER0). */
+    void setSgiActive(ContextID ctx, int sgi);
+    /** `sgi` no longer active on `ctx`, from any CPU (GICD_ICACTIVER0). */
+    void clearSgiActive(ContextID ctx, int sgi);
 
     int intNumToWord(int num) const { return num >> 5; }
     int intNumToBit(int num) const { return num % 32; }

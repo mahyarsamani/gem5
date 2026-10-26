@@ -1110,4 +1110,23 @@ CommitCPUStats::updateComCtrlStats(const StaticInstPtr staticInst)
     }
 }
 
+// MYSTUFF
+void
+BaseCPU::
+CommitCPUStats::countNamedAccess(const std::string &name, bool is_load)
+{
+    auto &family = is_load ? committedLoads : committedStores;
+    auto it = family.find(name);
+    if (it == family.end()) {
+        const char *kind = is_load ? "Loads" : "Stores";
+        auto *stat = new statistics::Scalar(
+            this, csprintf("committed%s.%s", kind, name).c_str(),
+            statistics::units::Count::get(),
+            csprintf("Committed %s per access name", kind).c_str());
+        it = family.emplace(name, stat).first;
+    }
+    (*it->second)++;
+}
+// FFUTSYM
+
 } // namespace gem5

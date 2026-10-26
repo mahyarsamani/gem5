@@ -118,6 +118,20 @@ class DataBlock
 
     void setAccessName(std::string name, bool can_override, std::string proxy_simobject_name, Addr addr);
     std::string getAccessName(std::string proxy_simobject_name, Addr addr) { return accessName; }
+
+    // Lifetime usefulness: the bytes the chip used while the line was on
+    // chip, split into those its origin core (the first core to use it)
+    // used and those other cores used. Unlike the per-residency masks it
+    // travels with the data (copies and assignments carry it) and is
+    // merged, never reset, when copies meet; clear() starts a new one.
+    void setLifetime(int offset, int len, int core);
+    void mergeLifetime(const DataBlock &other);
+    void mergeLifetimeMasks(int origin, const WriteMask &origin_mask,
+                            const WriteMask &others_mask);
+    void clearLifetime();
+    int getLifeOrigin() const { return lifeOrigin; }
+    WriteMask getLifeOriginMask() const;
+    WriteMask getLifeOthersMask() const;
     // FFUTSYM
 
   private:
@@ -132,6 +146,13 @@ class DataBlock
     // null.
     WriteMask* readUsefulness = nullptr;
     WriteMask* writeUsefulness = nullptr;
+
+    // Lifetime usefulness (see setLifetime): the origin core (-1: none
+    // yet) and the bytes it and the other cores used.
+    int lifeOrigin = -1;
+    WriteMask* lifeOriginMask = nullptr;
+    WriteMask* lifeOthersMask = nullptr;
+    void copyLifetimeFrom(const DataBlock &other);
 
     std::string accessName;
     // FFUTSYM:

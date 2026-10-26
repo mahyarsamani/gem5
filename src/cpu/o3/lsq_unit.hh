@@ -516,6 +516,13 @@ class LSQUnit
         /** Total number of loads forwaded from LSQ stores. */
         statistics::Scalar forwLoads;
 
+        /** Index uops (uop0) whose index[i] an older uop0 in the LQ
+          * supplied (hov load-to-load forwarding). */
+        statistics::Scalar hovForwIdxLoads;
+        /** Index uops of the register form: index[i] supplied by the
+          * program, no memory read. */
+        statistics::Scalar hovRegIdxLoads;
+
         /** Total number of squashed loads. */
         statistics::Scalar squashedLoads;
 

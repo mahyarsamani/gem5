@@ -75,6 +75,11 @@ transition({UD,UD_T,SD,UC,SC,I,BUSY_INTR,BUSY_BLKD}, AllocSeqRequest) {
   AllocateTBE_SeqRequest;
 }
 
+// MYSTUFF: a notification, outside the core's TBE budget
+transition({UD,UD_T,SD,UC,SC,I,BUSY_INTR,BUSY_BLKD}, AllocSeqNotif) {
+  AllocateTBE_SeqNotif;
+}
+
 // You can't allocate a DVM request on the same TBE as another DVM request,
 // so we don't need a long "Transition-from" list and we can change the output state.
 transition({I}, AllocSeqDvmRequest) {
@@ -990,6 +995,7 @@ transition({BUSY_BLKD,BUSY_INTR},
 // Kill the timer and try again as a snoop may be pending as well
 transition(UD_T, {Global_Eviction, Local_Eviction, LocalHN_Eviction}, UD) {
   Unset_Timeout_Cache;
+  ClearReplEnqueued;
   Pop_ReplTriggerQueue;
 }
 
@@ -1076,6 +1082,8 @@ transition(BUSY_BLKD, SendEvict, BUSY_INTR) {DestinationAvailable} {
 transition({BUSY_BLKD, BUSY_INTR}, SendCompData, BUSY_BLKD) {
   Pop_TriggerQueue;
   Send_CompData;
+  ScheduleIDRs;
+  Hov_AttachExpect;
   ProcessNextState_ClearPending;
 }
 
@@ -1472,9 +1480,11 @@ transition({BUSY_BLKD,BUSY_INTR}, DataSepResp_UC, BUSY_BLKD) {
 transition({BUSY_BLKD,BUSY_INTR},
             {CompData_I,CompData_SC,CompData_SD_PD,CompData_UC,CompData_UD_PD},
             BUSY_BLKD) {
+  Hov_CountDelivery;
   Receive_RespSepDataFromCompData;
   Receive_ReqDataResp;
   UpdateDataState_FromReqDataResp;
+  Hov_RecvExpect;
   Callback_Miss;
   Profile_OutgoingEnd_DataResp;
   Pop_DataInQueue;
@@ -1504,18 +1514,25 @@ transition(BUSY_INTR, {PCrdGrant, PCrdGrant_PoC}) {
 // RetryAck/PCrdGrant on BUSY_BLKD is only expected in a PoC/HN when waiting
 // for CompAck after sending down a request with DMT enabled. Handle the same
 // as BUSY_INTR
+// MYSTUFF
+// Also for a plain RetryAck/PCrdGrant: an Indirect Unit that forwards a
+// notification it cannot absorb (Fwd_NotifyIndIdx from I) waits for the
+// Gather Unit's NotifAck in BUSY_BLKD, and the Gather Unit may be out of
+// TBEs (busy with IDRs); the resent NotifyIndIdx carries its DAG again
+// (prepareRequestRetry copies seqReq).
 
-transition(BUSY_BLKD, RetryAck_PoC) {
+transition(BUSY_BLKD, {RetryAck, RetryAck_PoC}) {
   Receive_RetryAck;
   Pop_RespInQueue;
   ProcessNextState;
 }
 
-transition(BUSY_BLKD, PCrdGrant_PoC) {
+transition(BUSY_BLKD, {PCrdGrant, PCrdGrant_PoC}) {
   Receive_PCrdGrant;
   Pop_RespInQueue;
   ProcessNextState;
 }
+// FFUTSYM
 
 // RetryAck/PCrdGrant received during a snoop hazard may arrive in both
 // BUSY_BLKD and BUSY_INTR
@@ -1633,55 +1650,95 @@ transition({BUSY_BLKD, BUSY_INTR}, PostProcess) {
   ProcessNextState_ClearPending;
 }
 
-// SendIDR: fires in BUSY (NB), sends one ReadValue/WriteValue
-transition({BUSY_BLKD, BUSY_INTR}, SendIDR) {
+// TriageIDR and IssueIDR: fire in BUSY (NB); TriageIDR drops the next IDR
+// or passes it to IssueIDR, which sends one ReadValue/WriteValue (the only
+// one of the two that needs a hov TBE).
+transition({BUSY_BLKD, BUSY_INTR}, TriageIDR) {
   Pop_TriggerQueue;
-  SendIDR;
+  TriageIDR;
   ProcessNextState_ClearPending;
 }
 
-// SendPostNotif: fires in BUSY, sends NotifyIndIdx
-transition({BUSY_BLKD, BUSY_INTR}, SendPostNotif) {
+transition({BUSY_BLKD, BUSY_INTR}, IssueIDR) {
   Pop_TriggerQueue;
-  SendPostNotif;
+  IssueIDR;
   ProcessNextState_ClearPending;
 }
 
-// TriggerPostEvict: fires in BUSY, sends propagate evict
-transition({BUSY_BLKD, BUSY_INTR}, TriggerPostEvict) {
+// StashAndPostEvict: above the Gather Unit, stash the DAG for the index
+// line and schedule the delayed post-evict whose write-back carries it.
+transition({BUSY_BLKD, BUSY_INTR}, StashAndPostEvict) {
   Pop_TriggerQueue;
-  TriggerPostEvict;
+  StashAndPostEvict;
   ProcessNextState_ClearPending;
 }
 
-// SendHovAck: fires in BUSY, sends HovAck to gather unit
-transition({BUSY_BLKD, BUSY_INTR}, SendHovAck) {
-  Pop_TriggerQueue;
-  Send_HovAck;
-  ProcessNextState_ClearPending;
+// The target flow (docs/agents/2026-10-25-wp0/PLAN.md)
+
+// Gather Unit: the line's directory decides an injected request (3b)
+// before the stock transitions, when no transaction holds the line.
+transition({I,SC,UC,SD,UD,UD_T,RU,RSC,RSD,RUSD,SC_RSC,UC_RSC,SD_RSC,UD_RSC,UC_RU,UD_RU,UD_RSD,SD_RSD,RUSC},
+           HovFwdHeld) {
+  Hov_FwdHeld;
+  Pop_ReqRdyQueue;
 }
 
-// The hov TBE (an IDR sent by the Gather Unit) lives in HOV_PEND, keyed by
-// its hov id with no cache entry, so these transitions never touch a line.
-// Retries reuse the regular CHI actions; only the resend differs.
-transition(HOV_PEND, HovAck, I) {
-  Receive_HovAck;
-  Pop_RespInQueue;
+// Gather Unit: the Indirect Unit's own read merges into the injected
+// request still fetching the same block for it
+transition({BUSY_BLKD,BUSY_INTR}, HovMergeReq) {
+  Hov_MergeReq;
+  Pop_ReqRdyQueue;
 }
 
-transition(HOV_PEND, RetryAck) {
-  Receive_RetryAck;
-  Pop_RespInQueue;
+// Indirect Unit: an expected block (3a). Wait for it in BUSY_INTR, the
+// state of a load miss waiting for data (snoops take the stock hazard
+// path; the core's own access stalls on the line).
+transition(I, HovExpect, BUSY_INTR) {
+  Initiate_HovExpect;
+  Pop_ReqRdyQueue;
+  ProcessNextState;
 }
 
-transition(HOV_PEND, PCrdGrant) {
-  Receive_PCrdGrant;
-  Pop_RespInQueue;
+transition({SC,UC,SD,UD,UD_T}, HovExpect) {
+  Hov_ExpectPresent;
+  Pop_ReqRdyQueue;
 }
 
-transition(HOV_PEND, DoRetry) {
-  Send_Retry_Hov;
-  Pop_RetryTriggerQueue;
+transition({BUSY_BLKD,BUSY_INTR}, HovExpect) {
+  Hov_ExpectBusy;
+  Pop_ReqRdyQueue;
+}
+
+// Indirect Unit: a delivered block (5) no TBE waits for, taken on arrival
+transition(I, HovDeliver, BUSY_BLKD) {
+  Initiate_HovDeliver;
+  Receive_RespSepDataFromCompData;
+  Receive_ReqDataResp;
+  UpdateDataState_FromReqDataResp;
+  Pop_DataInQueue;
+  ProcessNextState;
+}
+
+// Indirect Unit: a delivered block it cannot take, in any state
+transition({I,SC,UC,SD,UD,UD_T,RU,RSC,RSD,RUSD,SC_RSC,UC_RSC,SD_RSC,UD_RSC,UC_RU,UD_RU,UD_RSD,SD_RSD,RUSC,
+            BUSY_BLKD,BUSY_INTR}, HovDecline) {
+  Hov_Decline;
+  Pop_DataInQueue;
+}
+
+transition({I,SC,UC,SD,UD,UD_T,RU,RSC,RSD,RUSD,SC_RSC,UC_RSC,SD_RSC,UD_RSC,UC_RU,UD_RU,UD_RSD,SD_RSD,RUSC,
+            BUSY_BLKD,BUSY_INTR}, HovDeclineCont) {
+  Hov_DeclineCont;
+  Pop_DataInQueue;
+}
+
+// Indirect Unit: a TBE waiting for an expected block gives up
+transition({BUSY_BLKD,BUSY_INTR}, HovExpectTimeout) {
+  Hov_ExpectTimeout;
+}
+
+transition({I,SC,UC,SD,UD,UD_T}, HovExpectTimeout) {
+  Hov_ExpectTimeoutStale;
 }
 // FFUTSYM
 
@@ -1870,23 +1927,55 @@ transition(DvmExtOp_Finished, Final, I) {
 }
 
 // MYSTUFF
-transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD,
-            UC_RSC, UC_RU, UD_RU, UD_RSD, UD_RSC}, UpdateDAG, BUSY_BLKD) {
+// Gather Unit: a notification carrying DAGs for a line. Initiate_Request
+// pushes ExtractDAG; PostProcess sends the IDRs. The state says whether the
+// line's current data is here, upstream (stale here, or absent with an
+// upstream copy), or absent altogether; the last two fetch it first and
+// count as gather misses.
+transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD, UC_RSC, UD_RSD,
+            UD_RSC}, UpdateDAG, BUSY_BLKD) {
     Initiate_Request;
+    Profile_GatherHit;
     Send_NotifAck;
-    Extract_Extensions;
     Pop_ReqRdyQueue;
     ProcessNextState;
 }
 
-// A notif (post-notif or Sequencer) whose index line the Gather Unit no
-// longer holds: not handled yet.
-transition({I, RU, RSC, RSD, RUSC, RUSD}, UpdateDAG) {
-    Error_UpdateDAGNoIndexLine;
+transition({UC_RU, UD_RU, RU, RSC, RSD, RUSC, RUSD}, UpdateDAG, BUSY_BLKD) {
+    Initiate_Request;
+    Initiate_FetchIndexLine_Upstream;
+    Profile_GatherMiss;
+    Send_NotifAck;
+    Pop_ReqRdyQueue;
+    ProcessNextState;
 }
 
-transition({I, SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD, UC_RSC, UC_RU, UD_RU,
-        UD_RSD, UD_RSC, RU, RSC, RSD, RUSC, RUSD}, Fwd_NotifyIndIdx, BUSY_BLKD)
+transition(I, UpdateDAG, BUSY_BLKD) {
+    Initiate_Request;
+    Initiate_FetchIndexLine_Downstream;
+    Profile_GatherMiss;
+    Send_NotifAck;
+    Pop_ReqRdyQueue;
+    ProcessNextState;
+}
+
+// Above the Gather Unit, a notification for a line this cache holds is
+// absorbed: PostProcess stashes its DAG and post-evicts the line, so the
+// write-back carries the DAG with the current data.
+// A notification above the Gather Unit is not profiled as a hit or a miss:
+// it reads no data here (the core had index[i] already, forwarded or in a
+// register); only the Gather Unit counts its lookup (Profile_Gather*).
+transition({SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD, UC_RSC, UC_RU, UD_RU,
+        UD_RSD, UD_RSC}, Fwd_NotifyIndIdx, BUSY_BLKD)
+{
+    Initiate_Request;
+    Send_NotifAck;
+    Pop_ReqRdyQueue;
+    ProcessNextState;
+}
+
+// A notification for a line this cache does not hold is forwarded.
+transition({I, RU, RSC, RSD, RUSC, RUSD}, Fwd_NotifyIndIdx, BUSY_BLKD)
 {
     Initiate_Request;
     Send_NotifAck;
@@ -1895,10 +1984,9 @@ transition({I, SC, SD, UC, UD, UD_T, SC_RSC, SD_RSC, SD_RSD, UC_RSC, UC_RU, UD_R
     ProcessNextState;
 }
 
-// NotifAck received — ack from downstream for our NotifyIndIdx
+// NotifAck received: the downstream cache accepted our NotifyIndIdx
 transition({BUSY_BLKD, BUSY_INTR}, NotifAck) {
     Receive_ReqResp;
-    Cleanup_NotifPkt;
     Pop_RespInQueue;
     ProcessNextState;
 }

@@ -96,4 +96,12 @@ class RubyController(ClockedObject):
     upstream_sequencers = VectorParam.RubySequencer(
         [], "All the sequencers that this controller is downstream to."
     )
+    # The target flow: the controllers a Gather Unit asks, on its Indirect
+    # Unit's behalf, for a data block (a shared Gather Unit at a slice names
+    # its peer slices). Empty: the Gather Unit's own downstream path, the
+    # private-L2 topology; a list is reserved for the shared Gather Unit
+    # (post-QE plan, WP13) and is refused until then.
+    value_unit_destinations = VectorParam.RubyController(
+        [], "Value Units a Gather Unit asks on the Indirect Unit's behalf"
+    )
     # FFUTSYM

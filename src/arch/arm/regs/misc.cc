@@ -6999,6 +6999,17 @@ ISA::initializeMiscRegMetadata()
     // DBGDTRTX_EL0 -> DBGDTRRXint
     // MDCR_EL3 -> SDCR, NAM D7-2108 (the latter is unimpl. in gem5)
 
+    // SIFT side-car pair registers (regs/misc.hh): user code binds a pair
+    // with msr, so EL0 may read and write them, as TPIDR_EL0.
+    for (unsigned p = 0; p < NumHovPairs; p++) {
+        for (unsigned f = 0; f < NumHovPairFields; f++) {
+            MiscRegIndex reg = hovPairReg(p, f);
+            InitReg(reg).allPrivileges();
+            miscRegNumToIdx.insert(
+                {MiscRegNum64(3, p >> 2, 11, p & 3, f), reg});
+        }
+    }
+
     // Populate the idxToMiscRegNum map
     assert(idxToMiscRegNum.empty());
     for (const auto& [key, val] : miscRegNumToIdx) {

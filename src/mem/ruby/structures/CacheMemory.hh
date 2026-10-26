@@ -267,6 +267,23 @@ class CacheMemory : public SimObject
         statistics::Scalar m_prefetch_misses;
         statistics::Formula m_prefetch_accesses;
 
+        // MYSTUFF
+        // hov accesses, kept apart from demand and prefetch: index
+        // accesses (uop0), IDRs, and the Gather Unit's lookups of the
+        // index line a notification names.
+        statistics::Scalar m_index_hits;
+        statistics::Scalar m_index_misses;
+        statistics::Formula m_index_accesses;
+
+        statistics::Scalar m_idr_hits;
+        statistics::Scalar m_idr_misses;
+        statistics::Formula m_idr_accesses;
+
+        statistics::Scalar m_gather_hits;
+        statistics::Scalar m_gather_misses;
+        statistics::Formula m_gather_accesses;
+        // FFUTSYM
+
         statistics::Vector m_accessModeType;
 
         statistics::Scalar uselessBlocksNotExplainedbyPrefetch;
@@ -280,10 +297,50 @@ class CacheMemory : public SimObject
     // lines are otherwise not sampled); rebuilt at every dump.
     std::unordered_map<std::string, statistics::Histogram*>
         residentUsefulBytes;
+    // Lines that leave without a replacement (an invalidating snoop, a
+    // back-invalidate, or a deallocation on a unique request upstream),
+    // sampled apart from usefulBytes (replacements).
+    std::unordered_map<std::string, statistics::Histogram*>
+        invalidatedUsefulBytes;
+    // Usage masks that an eviction from upstream brought to this cache
+    // while it did not hold the line, so that they did not count toward
+    // its CBU (masks are reset on insertion).
+    std::unordered_map<std::string, statistics::Histogram*>
+        droppedEvictUsefulBytes;
+    statistics::Histogram &usefulnessHistogram(
+        std::unordered_map<std::string, statistics::Histogram*> &family,
+        const std::string &family_name, const std::string &acc_name,
+        const std::string &desc);
+    // Lifetime usefulness (DataBlock::setLifetime), keyed by
+    // "<family>.<access name>": lifetimeUsefulBytes, crossCoreUsefulBytes
+    // and lifetimeShared for lines leaving the chip, and the same with a
+    // "resident" prefix for the chip-wide union of the lines still on chip
+    // at a dump (rebuilt at every dump).
+    std::unordered_map<std::string, statistics::Histogram*> lifetimeStats;
+    statistics::Histogram &lifetimeHistogram(const std::string &family,
+                                             const std::string &acc_name,
+                                             int buckets,
+                                             const std::string &desc);
+    // Every CacheMemory, so that one of them can take the chip-wide union
+    // of the resident lifetime sets once per dump.
+    static std::vector<CacheMemory *> s_lifetimeInstances;
+    static Tick s_lifetimeWalkTick;
+    void sampleResidentLifetimes();
+    void profileLifetimeMasks(const WriteMask &origin,
+                              const WriteMask &others,
+                              const std::string &acc_name, bool resident);
     std::unordered_map<std::string,
         std::unordered_map<std::string,
             std::unordered_map<MachineID, statistics::Scalar*>>>
         bytesTransferred;
+    // Hits, misses and allocated bytes per access name ("" is other),
+    // created on first use: demandHits.<name>, demandMisses.<name>,
+    // prefetchHits.<name>, prefetchMisses.<name>, the same for index,
+    // idr and gather, and bytesAllocated.<name>.
+    std::unordered_map<std::string,
+        std::unordered_map<std::string, statistics::Scalar*>> perNameStats;
+    statistics::Scalar &perNameStat(const std::string &family,
+                                    const std::string &acc_name);
     // FFUTSYM
 
     public:
@@ -295,6 +352,14 @@ class CacheMemory : public SimObject
       // each time they are called
       // TODO: Implement this function.
       void profileUsefulness(Addr line_addr, bool is_prefetched, std::string access_name, const WriteMask read_usefulness, const WriteMask write_usefulness);
+      // MYSTUFF
+      void profileInvalidationUsefulness(std::string access_name,
+                                         const WriteMask read_usefulness,
+                                         const WriteMask write_usefulness);
+      void profileDroppedEvictUsefulness(std::string access_name,
+                                         const WriteMask read_usefulness,
+                                         const WriteMask write_usefulness);
+      // FFUTSYM
       void profileUnexplainedUselessness(Addr line_addr);
       void profileDemandHit();
       void profileDemandMiss();
@@ -302,7 +367,41 @@ class CacheMemory : public SimObject
       void profilePrefetchMiss();
 
       // MYSTUFF
-      void profileTransfer(MachineID dst, std::string acc_name, int num_bytes, std::string transfer_type);
+      // The same counts, also per access name (the TBE's access_name).
+      void profileDemandHit(std::string acc_name);
+      void profileDemandMiss(std::string acc_name);
+      void profilePrefetchHit(std::string acc_name);
+      void profilePrefetchMiss(std::string acc_name);
+      // hov accesses: an index access (uop0), an IDR, and a Gather Unit
+      // lookup of a notification's index line (a miss when the line's
+      // data is upstream or absent).
+      void profileIndexHit(std::string acc_name);
+      void profileIndexMiss(std::string acc_name);
+      void profileIdrHit(std::string acc_name);
+      void profileIdrMiss(std::string acc_name);
+      // The speculated IDRs among them (also counted as IDRs).
+      void profileIdrSpecHit(std::string acc_name);
+      void profileIdrSpecMiss(std::string acc_name);
+      void profileGatherHit(std::string acc_name);
+      void profileGatherMiss(std::string acc_name);
+      // A block allocated for an access: bytesAllocated.<name> grows by
+      // the block size.
+      void profileAllocation(std::string acc_name);
+      void profileTransfer(MachineID dst, std::string acc_name,
+                           int num_bytes, std::string transfer_type);
+      // A snoop reaching this core's topmost copy of a line: false
+      // sharing when the copy never used (read or wrote) the bytes the
+      // requester accesses (`req`, the request behind the snoop), true
+      // sharing when it did; `unique` for snoops that take the line away
+      // (the requester writes). No requester (a prefetch, a back-
+      // invalidate) is counted apart.
+      void profileSnoopSharing(const DataBlock &blk, RequestPtr req,
+                               bool req_valid, bool unique,
+                               std::string acc_name);
+      // A line's lifetime set: on leaving the chip (`resident` false), or
+      // in the dump-time union of the lines still on chip (true).
+      void profileLifetime(const DataBlock &blk, std::string acc_name,
+                           bool resident);
       // FFUTSYM
 
 };

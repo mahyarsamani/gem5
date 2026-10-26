@@ -106,6 +106,11 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   int number_of_DVM_TBEs;
   int number_of_DVM_snoop_TBEs;
   int number_of_HOV_TBEs := 16;
+  // TBEs only IDRs may take (the Indirect Unit): the core's own requests
+  // and prefetches share the other number_of_TBEs - idr_reserved_tbes
+  // (storSeqTBEs); notifications from the Sequencer are outside that
+  // budget, standing in for a notification path that needs no TBE.
+  int idr_reserved_tbes := 0;
 
   // replacements use the same TBE slot as the request that triggered it
   // in this case the number_of_repl_TBEs parameter is ignored
@@ -242,6 +247,37 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
   bool profile_usefulness := "True";
   bool notify_coalesced := "True";
+
+  // Coalesce IDRs at the Gather Unit: the DAGs of one index line whose
+  // dependent accesses share a data line send one IDR (a write among them
+  // makes it a WriteValue), and an IDR whose data line has one in flight,
+  // parked in retry (lifted to a write in place) or among the last
+  // idr_recent_lines sent is dropped. A dropped IDR costs only the early
+  // fill: uop1 is a real access and fetches the line itself.
+  bool idr_coalesce := "False";
+  int idr_recent_lines := 64;
+
+  // In-line speculation at the Gather Unit: with an index line's data
+  // here, the first DAG of each (core, pair) on it makes IDRs for the
+  // line's elements after its own (1, forward) or all of them (2, line);
+  // 0 is off. Cover rows (which elements have an IDR) live for
+  // hov_spec_window cycles on at most hov_spec_lines index lines; a real
+  // DAG for a covered element is dropped. A speculated write is a read
+  // unless hov_spec_writes.
+  int hov_spec_mode := 0;
+  int hov_spec_lines := 64;
+  Cycles hov_spec_window := 4000;
+  bool hov_spec_writes := "False";
+
+  // The target flow (docs/agents/2026-10-25-wp0/PLAN.md). The Gather Unit
+  // injects a ReadShared (ReadUnique for a write, or for every access
+  // under hov_fetch_unique) on the Indirect Unit's behalf; its
+  // number_of_HOV_TBEs caps the injected requests in flight. The
+  // Indirect Unit gives up a TBE that waits for an expected block after
+  // hov_expect_timeout cycles (0: never), the safety net for a block the
+  // Gather Unit decided not to send.
+  bool hov_fetch_unique := "False";
+  Cycles hov_expect_timeout := 10000;
   // FFUTSYM
 {
 
@@ -312,13 +348,6 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     BUSY_INTR, AccessPermission:Busy, desc="Waiting for data and/or ack";
     BUSY_BLKD, AccessPermission:Busy, desc="Waiting for data and/or ack; blocks snoops";
 
-    // MYSTUFF
-    // State of a hov TBE: an IDR (ReadValue/WriteValue) the Gather Unit sent
-    // to the Indirect Unit, keyed by its hov id rather than by a line. It
-    // waits for the HovAck, or for RetryAck + PCrdGrant and then resends.
-    HOV_PEND, AccessPermission:Invalid, desc="IDR sent; waiting for HovAck or retry";
-    // FFUTSYM
-
     // Null state for debugging
     null, AccessPermission:Invalid, desc="Null state";
   }
@@ -334,6 +363,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     AllocRequest,           desc="Allocates a TBE for a request. Triggers a retry if table is full";
     AllocRequestWithCredit, desc="Allocates a TBE for a request. Always succeeds.";
     AllocSeqRequest,        desc="Allocates a TBE for a sequencer request. Stalls requests if table is full";
+    AllocSeqNotif,          desc="Allocates a TBE for a sequencer notification (NOTIFY_INDIDX), outside the core's TBE budget";
     AllocSeqDvmRequest,     desc="Allocates a TBE for a sequencer DVM request. Stalls requests if table is full";
     AllocPfRequest,         desc="Allocates a TBE for a prefetch request. Stalls requests if table is full";
     AllocSnoop,             desc="Allocates a TBE for a snoop. Stalls snoop if table is full";
@@ -602,19 +632,25 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     // MYSTUFF
     Fwd_NotifyIndIdx, in_trans="yes", desc="";
-    PostEvictIdxLine, desc="Evict a Line holding index elements in a cache upstream to gather unit.";
 
     UpdateDAG,        in_trans="yes", desc="";
-    ExtractDAG,       desc="Cache the DAGs of an index request at the Gather Unit";
-    PostProcess,      desc="Post-processing: push IDR/notif/evict actions one at a time";
-    SendIDR,          in_trans="yes", desc="Send one ReadValue/WriteValue IDR (non-blocking)";
-    SendPostNotif,    desc="Send NotifyIndIdx after all IDRs";
-    TriggerPostEvict,    desc="Trigger propagate evict for index line";
+    ExtractDAG,       desc="Cache the DAGs carried by a request's seqReq at the Gather Unit";
+    PostProcess,      desc="Post-processing: push one IDR, or stash the DAG and post-evict the index line";
+    TriageIDR,        in_trans="yes", desc="Drop the next IDR, or pass it to IssueIDR (non-blocking)";
+    IssueIDR,         in_trans="yes", desc="Inject one IDR as a request on the Indirect Unit's behalf (non-blocking; needs a tracker slot)";
+    StashAndPostEvict, desc="Above the Gather Unit: stash the DAG for the index line and schedule its post-evict";
 
     // HOV-specific events
-    HovAck,           desc="Ack from Indirect Unit for ReadValue/WriteValue acceptance";
-    SendHovAck,       desc="Send HovAck to gather unit for ReadValue/WriteValue acceptance";
     NotifAck,         desc="Ack from downstream for NotifyIndIdx";
+
+    // The target flow (docs/agents/2026-10-25-wp0/PLAN.md)
+    HovFwdHeld,       desc="Gather Unit: an injected request for a block the directory says the Indirect Unit holds; send nothing";
+    HovMergeReq,      desc="Gather Unit: the Indirect Unit's own request for a block an injected request is still fetching for it; merge";
+    HovExpect,        in_trans="yes", desc="Indirect Unit: an expected block (3a); wait for it, unless here or busy";
+    HovDeliver,       in_trans="yes", desc="Indirect Unit: a delivered block (5) with no TBE waiting for it; take it on arrival";
+    HovDecline,       desc="Indirect Unit: a delivered block it cannot take; CompAck it as declined and drop it";
+    HovDeclineCont,   desc="Indirect Unit: a later chunk of a declined delivery; drop it";
+    HovExpectTimeout, desc="Indirect Unit: a TBE waiting for an expected block gives up";
 
     // FFUTSYM
     // This is triggered once a transaction doesn't have
@@ -674,6 +710,10 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     bool receiveData(CHIDataType);
     bool receivedDataType(CHIDataType);
     bool receivedRespType(CHIResponseType);
+    // MYSTUFF: a data message of this type would be taken (the target
+    // flow routes a delivery to a TBE that still waits for it)
+    bool expectsData(CHIDataType);
+    // FFUTSYM
   }
 
   // Tracks a pending retry
@@ -681,12 +721,6 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     Addr addr,           desc="Line address";
     bool usesTxnId,      desc="Uses a transaction ID instead of a memory address";
     MachineID retryDest, desc="Retry destination";
-    // MYSTUFF: this entry is all that survives from RetryAck to PCrdGrant.
-    // An IDR is a line request here but a hov transaction at the Gather
-    // Unit, so the PCrdGrant must carry its hov id (txnId) and type back.
-    Addr txnId,          desc="Transaction ID of the retried request";
-    CHIRequestType secondType, desc="ReadValue/WriteValue for an IDR, null otherwise";
-    // FFUTSYM
   }
 
   // Queue for event triggers. Used to specify a list of actions that need
@@ -704,7 +738,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     void pushFrontNB(Event);
     void pop();
     // For the retry queue
-    void emplace(Addr,bool,MachineID,Addr,CHIRequestType);
+    void emplace(Addr,bool,MachineID);
     RetryQueueEntry next(); //SLICC won't allow to reuse front()
   }
 
@@ -838,6 +872,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     // MYSTUFF:
     Addr alias,                     default="0", desc="Alias";
+    bool hov_spec,                  default="false", desc="An IDR the Gather Unit speculated";
 
     MachineID indirect_unit_id,      desc="MachineID of the indirect unit for an indirect request";
     MachineID value_unit_id,         desc="MachineID of the value unit for an indirect request";
@@ -850,8 +885,27 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     std::string access_name,       desc="Name of the access from high level program.";
 
-    bool postNotifSent,            default="false", desc="PostNotif has been sent during post-processing";
-    bool postEvictSent,            default="false", desc="PostEvict has been sent during post-processing";
+    bool postEvictSent,            default="false", desc="StashAndPostEvict has run for this transaction";
+
+    // The target flow (docs/agents/2026-10-25-wp0/PLAN.md).
+    // Gather Unit: hov_fwd marks a request injected on the Indirect Unit's
+    // behalf, holding tracker slot hov_slot (AbstractController's tracker
+    // keeps when it was made); the index data of a transaction carries an
+    // expect (hov_expect_*) when hov_expect_pending is set at SendCompData.
+    // Indirect Unit: hov_recv marks a TBE no Sequencer request is behind,
+    // 1 waiting for an expected block, 2 taking a delivery on arrival.
+    bool hov_fwd,                  default="false", desc="Injected on the Indirect Unit's behalf";
+    int hov_slot,                  default="-1",    desc="Tracker slot of an injected request";
+    int hov_recv,                  default="0",     desc="Indirect Unit: 1 expect, 2 delivery on arrival";
+    bool hov_declined,             default="false", desc="Gather Unit: the Indirect Unit declined the delivery";
+    bool hov_data_sent,            default="false", desc="Gather Unit: the delivery's CompData has been set up";
+    bool hov_merged,               default="false", desc="Gather Unit: the Indirect Unit's own request was merged into this one";
+    bool hov_expect_pending,       default="false", desc="The next index data message carries the expect";
+    Addr hov_expect_addr,          default="0",     desc="Data line the expect names";
+    bool hov_expect_unique,        default="false", desc="The expected block comes writable";
+    std::string hov_expect_name,   desc="Access name of the expected block";
+    int hov_lane_mask,             default="0",     desc="Lanes of a register (vector form)";
+    Addr hov_reg_id,               default="0",     desc="Register of the lanes (vector form)";
     // FFUTSYM:
   }
 
@@ -890,6 +944,11 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   // Tracks unique lines locked after a store miss
   TimerTable useTimerTable;
 
+  // MYSTUFF: Indirect Unit lines whose TBE waits for an expected block
+  // (hov_expect_timeout)
+  TimerTable hovExpectTimers;
+  // FFUTSYM
+
   // Multiplies sc_lock_base_latency to obtain the lock timeout.
   // This is incremented at Profile_Eviction and decays on
   // store miss completion
@@ -900,6 +959,10 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   // Main TBE table used for incoming requests
   TBETable TBEs,      template="<Cache_TBE>", constructor="m_number_of_TBEs";
   TBEStorage storTBEs, constructor="this, m_number_of_TBEs";
+  // MYSTUFF: the core's budget within storTBEs (idr_reserved_tbes), counted
+  // by reservations only: a Sequencer or prefetch request reserves one when
+  // it is accepted and releases it when its TBE is deallocated.
+  TBEStorage storSeqTBEs, constructor="this, m_number_of_TBEs - m_idr_reserved_tbes";
 
   // TBE table for WriteBack/Evict requests generated by a replacement
   // Notice storTBEs will be used when unify_repl_TBEs is set
@@ -918,12 +981,11 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   TBETable dvmSnpTBEs,      template="<Cache_TBE>", constructor="m_number_of_DVM_snoop_TBEs";
   TBEStorage storDvmSnpTBEs, constructor="this, m_number_of_DVM_snoop_TBEs";
 
-  // TBE table for outgoing HOV ReadValue/WriteValue requests (Gather Unit).
-  // Keyed by the hov id (makeHovId: line aligned, above any physical
-  // address), never by a line, so a hov transition can never touch a cache
-  // or directory entry. tbe.addr holds the data line and tbe.txnId the key.
-  TBETable hovTBEs,      template="<Cache_TBE>", constructor="m_number_of_HOV_TBEs";
+  // MYSTUFF: the Gather Unit's tracker of the requests it injected on the
+  // Indirect Unit's behalf (one slot per request, freed when the
+  // transaction ends); its capacity caps the injected requests in flight.
   TBEStorage storHovTBEs, constructor="this, m_number_of_HOV_TBEs";
+  // FFUTSYM
 
   // Interface to prefetchers
   RubyPrefetcherProxy pfProxy, constructor="this, m_prefetcher_ptr, m_prefetchQueue_ptr";
@@ -950,12 +1012,6 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     MachineID retryDest;
     bool usesTxnId;
     Addr txnId;
-
-    // MYSTUFF
-    // ReadValue/WriteValue when the message concerns an IDR, null otherwise.
-    // With DoRetry, txnId is then the hov id (see hovTBEs).
-    CHIRequestType secondType, default="CHIRequestType_null";
-    // FFUTSYM
 
     bool functionalRead(Packet *pkt) { return false; }
     bool functionalRead(Packet *pkt, WriteMask &mask) { return false; }
