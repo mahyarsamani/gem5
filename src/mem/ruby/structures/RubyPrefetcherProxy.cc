@@ -250,12 +250,11 @@ RubyPrefetcherProxy::readLineFunctional(Addr paddr, uint8_t *data,
              "%s: functional line read of %d bytes at %#x crosses a line",
              name(), size, paddr);
 
-    AccessPermission perm = cacheCntrl->getAccessPermission(line_addr);
-    if (perm != AccessPermission_Read_Only &&
-        perm != AccessPermission_Read_Write) {
-        return false;
-    }
-
+    // NOTE: No getAccessPermission() here: it asserts that a line with a
+    // TBE is Busy, which fails when the prefetcher runs inside the line's
+    // own transaction (a hit's Profile_Hit). The controller's
+    // functionalRead reads its TBE's data when valid, else a readable
+    // cache entry, and marks what it read in the mask.
     RequestPtr req = std::make_shared<Request>(paddr, size, 0,
                                                Request::funcRequestorId);
     Packet pkt(req, MemCmd::ReadReq);
