@@ -237,14 +237,29 @@ MemCmd::commandInfo[] =
     { {IsRead, IsResponse}, InvalidCmd, "HTMReqResp" },
     { {IsRead, IsRequest}, InvalidCmd, "HTMAbort" },
     { {IsRequest}, InvalidCmd, "TlbiExtSync" },
-    { {IsRead, IsIndirect, IsRequest, NeedsResponse}, ReadIndResp, "ReadIndReq"},
-    { {IsRead, IsIndirect, IsResponse, HasData}, InvalidCmd, "ReadIndResp"},
-    { {IsWrite, IsIndirect, IsRequest, NeedsResponse, HasData}, WriteIndResp, "WriteIndReq"},
-    { {IsWrite, IsIndirect, IsResponse}, InvalidCmd, "WriteIndResp"},
-    { {IsRead, IsIndirect, IsCompact, IsRequest, NeedsResponse}, ReadIndCompResp, "ReadIndCompReq"},
-    { {IsRead, IsIndirect, IsCompact, IsResponse, HasData}, InvalidCmd, "ReadIndCompResp"},
-    { {IsWrite, IsIndirect, IsCompact, IsRequest, NeedsResponse, HasData}, WriteIndCompResp, "WriteIndCompReq"},
-    { {IsWrite, IsIndirect, IsCompact, IsResponse}, InvalidCmd, "WriteIndCompResp"}
+    { {IsRead, IsIndirectIdx, IsRequest, NeedsResponse}, ReadIdxResp,
+      "ReadIdxReq"},
+    { {IsRead, IsIndirectIdx, IsResponse, HasData}, InvalidCmd,
+      "ReadIdxResp"},
+    // ReadReq and WriteReq, marked as an indirect access's value access
+    { {IsRead, IsIndirectVal, IsRequest, NeedsResponse}, ReadValResp,
+      "ReadValReq"},
+    { {IsRead, IsIndirectVal, IsResponse, HasData}, InvalidCmd,
+      "ReadValResp"},
+    { {IsWrite, IsIndirectVal, NeedsWritable, IsRequest, NeedsResponse,
+       HasData}, WriteValResp, "WriteValReq"},
+    { {IsWrite, IsIndirectVal, IsResponse}, InvalidCmd, "WriteValResp"},
+    { {IsIndirectIdx, IsRequest, NeedsResponse}, NotifyIndIdxResp,
+      "NotifyIndIdxReq"},
+    { {IsIndirectIdx, IsResponse}, InvalidCmd, "NotifyIndIdxResp"},
+    { {IsRead, IsIndirectIdx, IsCompact, IsRequest, NeedsResponse},
+      ReadIndCompResp, "ReadIndCompReq"},
+    { {IsRead, IsIndirectIdx, IsCompact, IsResponse, HasData}, InvalidCmd,
+      "ReadIndCompResp"},
+    { {IsWrite, IsIndirectIdx, IsCompact, IsRequest, NeedsResponse,
+       HasData}, WriteIndCompResp, "WriteIndCompReq"},
+    { {IsWrite, IsIndirectIdx, IsCompact, IsResponse}, InvalidCmd,
+      "WriteIndCompResp"}
 };
 
 AddrRange

@@ -99,6 +99,13 @@ structure(DataBlock, external = "yes", desc="..."){
 
   void setAccessName(std::string name, bool can_override, std::string obj_name, Addr addr);
   std::string getAccessName(std::string, Addr);
+
+  // Lifetime usefulness (travels with the data; see DataBlock.hh)
+  void mergeLifetime(DataBlock);
+  void mergeLifetimeMasks(int, WriteMask, WriteMask);
+  int getLifeOrigin();
+  WriteMask getLifeOriginMask();
+  WriteMask getLifeOthersMask();
   // FFUTSYM:
 
   int numAtomicLogEntries();
@@ -215,8 +222,9 @@ enumeration(RubyRequestType, desc="...", default="RubyRequestType_NULL") {
   TLBI_EXT_SYNC,      desc="TLB Invalidation Sync operation - External Sync has been requested";
   TLBI_EXT_SYNC_COMP, desc="TLB Invalidation Sync operation - External Sync has been completed";
   hasNoAddr,        desc="Request for timing purposes in VIPERSequencer hitCallback and processReadCallback but reads no address";
-  LDIND,             desc="Indirect Load";
-  STIND,            desc="Indirect Store";
+  LDIDX,         desc="Index access of an ldind or stind (uop0): reads index[i], carries the DAG";
+  LDVAL,         desc="Value access of an ldind (uop1): a load that carries the alias";
+  STVAL,         desc="Value access of an stind (uop1): a store that carries the alias";
   VLDIND,        desc="Vector Indirect Load";
   VSTIND,        desc="Vector Indirect Store";
   NOTIFY_INDIDX, desc="";

@@ -1288,20 +1288,119 @@ output decoder {{
 namespace Aarch64
 {
 
+    // SIFT ldind/stind (bits 29:27 = 001, bit 25 = 0, bit 24 = 1):
+    //   size[31:30] | 001 | FP[26] | 0 | 1 | 1[23] | L[22] | idx[21] |
+    //   Ra[20:16] | V[15] | Rt2[14:10] | pair[9:5] | Rt[4:0]
+    // size = log2(data bytes); FP = Rt is an FP register (S or D, 32- or
+    // 64-bit data only: with size 0x and bit 26 = 1 the word is an
+    // Advanced SIMD single-structure load/store); L = 1 for stind; idx =
+    // 1 for 64-bit indices; V = vector (reserved, not implemented).
+    // Ra = i, Rt2 = index[i] out (XZR discards it), pair = the side-car
+    // entry holding base_data, base_index, base_alias and count
+    // (regs/misc.hh, hovPairReg), Rt = value.
+    StaticInstPtr
+    decodeIndirectMem(ExtMachInst machInst)
+    {
+        RegIndex rt = makeZero((RegIndex)(uint32_t)bits(machInst, 4, 0));
+        const uint32_t pair = bits(machInst, 9, 5);
+        RegIndex rt2 = makeZero((RegIndex)(uint32_t)bits(machInst, 14, 10));
+        RegIndex ra = makeZero((RegIndex)(uint32_t)bits(machInst, 20, 16));
+        const bool is_fp = bits(machInst, 26);
+        const bool is_store = bits(machInst, 22);
+        const bool idx64 = bits(machInst, 21);
+        const unsigned size = bits(machInst, 31, 30);
+        // Bit 23 clear: the register form, index[i] supplied in Rt2 (the
+        // uop0 reads no memory and only delivers its descriptor).
+        const bool index_in_reg = bits(machInst, 23) == 0;
+
+        if (bits(machInst, 15) || (is_fp && size < 2))
+            return new Unknown64(machInst);
+        // An FP Rt is a vector register number, never Zero.
+        if (is_fp)
+            rt = (RegIndex)(uint32_t)bits(machInst, 4, 0);
+
+        if (!is_store) {
+            if (!idx64) {
+                switch (size) {
+                  case 0:
+                    return new LDINDB_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                  case 1:
+                    return new LDINDH_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                  case 2:
+                    return new LDINDW_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                  case 3:
+                    return new LDINDX_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                }
+            } else {
+                switch (size) {
+                  case 0:
+                    return new LDINDB_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                  case 1:
+                    return new LDINDH_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                  case 2:
+                    return new LDINDW_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                  case 3:
+                    return new LDINDX_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                }
+            }
+        } else {
+            if (!idx64) {
+                switch (size) {
+                  case 0:
+                    return new STINDB_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                  case 1:
+                    return new STINDH_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                  case 2:
+                    return new STINDW_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                  case 3:
+                    return new STINDX_W(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                }
+            } else {
+                switch (size) {
+                  case 0:
+                    return new STINDB_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                  case 1:
+                    return new STINDH_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                  case 2:
+                    return new STINDW_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                  case 3:
+                    return new STINDX_X(machInst, rt, rt2, pair, ra,
+                                        is_fp, index_in_reg);
+                }
+            }
+        }
+        return new Unknown64(machInst);
+    }
+
     StaticInstPtr
     decodeLoadsStores(ExtMachInst machInst)
     {
         // bit 27,25=10
         switch (bits(machInst, 29, 28)) {
           case 0x0:
+            // SIFT ldind/stind live where bit 24 = 1, except bit 26 = 1
+            // with 8- or 16-bit data (bit 31 = 0), which is Advanced SIMD.
+            if (bits(machInst, 24) == 1 &&
+                (bits(machInst, 26) == 0 || bits(machInst, 31) == 1)) {
+                return decodeIndirectMem(machInst);
+            }
             if (bits(machInst, 26) == 0) {
-                // Custom LDIND (opc=0x8) and STIND (opc=0xC) use bit 24
-                // for indexer element size (0=32-bit, 1=64-bit), so we
-                // must not reject bit24=1 for those opcodes.
-                uint8_t opc_pre = (bits(machInst, 15) << 0) |
-                                  (bits(machInst, 23, 21) << 1);
-                if (bits(machInst, 24) != 0
-                    && opc_pre != 0x8 && opc_pre != 0xC)
+                if (bits(machInst, 24) != 0)
                     return new Unknown64(machInst);
                 RegIndex rt = (RegIndex)(uint8_t)bits(machInst, 4, 0);
                 RegIndex rn = (RegIndex)(uint8_t)bits(machInst, 9, 5);
@@ -1418,47 +1517,6 @@ namespace Aarch64
                       default:
                         GEM5_UNREACHABLE;
                     }
-                  case 0x8:
-                    {
-                        // Custom Load Indirect (Use Bit 24 for Indexer Size)
-                        // Rt (4:0) = Dest
-                        // Rn (9:5) = Base Indexee
-                        // Rm (20:16) = Base Indexer
-                        // Ra (14:10) = Index (reusing Rt2 field)
-                        // Size (31:30) = Indexee Element Size
-                        // Bit 24 = Indexer Element Size (0=32, 1=64)
-
-                        RegIndex rt = (RegIndex)(uint32_t)bits(machInst, 4, 0);       // Dest Value
-                        // Rt+1 is Implicit Alias/EA. Handled in instruction class.
-                        RegIndex rn = (RegIndex)(uint32_t)bits(machInst, 9, 5);       // Base Data
-                        RegIndex rm = (RegIndex)(uint32_t)bits(machInst, 20, 16);     // Base Indexer
-                        RegIndex ra = (RegIndex)(uint32_t)bits(machInst, 14, 10);     // Index
-
-                        uint32_t size_data_enc = bits(machInst, 31, 30);
-                        uint32_t size_idx_enc = bits(machInst, 24);
-
-                        // Map to Instruction Class
-                        // Check naming convention in mem_ind.isa: LDIND(size_data)_(size_idx)
-                        // Suffixes: b, h, w, x / w, x
-                        // Example: LDINDW_X
-
-                        if (size_idx_enc == 0) { // Indexer 32-bit (w)
-                            switch (size_data_enc) {
-                              case 0: return new LDINDB_W(machInst, rt, rt+1, rn, rm, ra);
-                              case 1: return new LDINDH_W(machInst, rt, rt+1, rn, rm, ra);
-                              case 2: return new LDINDW_W(machInst, rt, rt+1, rn, rm, ra);
-                              case 3: return new LDINDX_W(machInst, rt, rt+1, rn, rm, ra);
-                            }
-                        } else { // Indexer 64-bit (x)
-                            switch (size_data_enc) {
-                              case 0: return new LDINDB_X(machInst, rt, rt+1, rn, rm, ra);
-                              case 1: return new LDINDH_X(machInst, rt, rt+1, rn, rm, ra);
-                              case 2: return new LDINDW_X(machInst, rt, rt+1, rn, rm, ra);
-                              case 3: return new LDINDX_X(machInst, rt, rt+1, rn, rm, ra);
-                            }
-                        }
-                        return new Unknown64(machInst);
-                    }
                   case 0x9:
                     switch (size) {
                       case 0x0:
@@ -1497,34 +1555,6 @@ namespace Aarch64
                         return new CASL64(machInst, rt, rnsp, rs);
                       default:
                         GEM5_UNREACHABLE;
-                    }
-                  case 0xC:
-                    {
-                        // Custom Store Indirect (Use Bit 24 for Indexer Size)
-                        RegIndex rt = (RegIndex)(uint32_t)bits(machInst, 4, 0);       // Source Value
-                        RegIndex rn = (RegIndex)(uint32_t)bits(machInst, 9, 5);       // Base Data
-                        RegIndex rm = (RegIndex)(uint32_t)bits(machInst, 20, 16);     // Base Indexer
-                        RegIndex ra = (RegIndex)(uint32_t)bits(machInst, 14, 10);     // Index
-
-                        uint32_t size_data_enc = bits(machInst, 31, 30);
-                        uint32_t size_idx_enc = bits(machInst, 24);
-
-                        if (size_idx_enc == 0) { // Indexer 32-bit (w)
-                            switch (size_data_enc) {
-                              case 0: return new STINDB_W(machInst, rt, rt+1, rn, rm, ra);
-                              case 1: return new STINDH_W(machInst, rt, rt+1, rn, rm, ra);
-                              case 2: return new STINDW_W(machInst, rt, rt+1, rn, rm, ra);
-                              case 3: return new STINDX_W(machInst, rt, rt+1, rn, rm, ra);
-                            }
-                        } else { // Indexer 64-bit (x)
-                            switch (size_data_enc) {
-                              case 0: return new STINDB_X(machInst, rt, rt+1, rn, rm, ra);
-                              case 1: return new STINDH_X(machInst, rt, rt+1, rn, rm, ra);
-                              case 2: return new STINDW_X(machInst, rt, rt+1, rn, rm, ra);
-                              case 3: return new STINDX_X(machInst, rt, rt+1, rn, rm, ra);
-                            }
-                        }
-                        return new Unknown64(machInst);
                     }
                   case 0xd:
                     switch (size) {

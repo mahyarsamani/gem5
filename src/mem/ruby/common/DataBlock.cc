@@ -70,6 +70,9 @@ DataBlock::DataBlock(const DataBlock &cp)
     memcpy(m_data, cp.m_data, m_block_size);
     readUsefulness = new WriteMask(m_block_size);
     writeUsefulness = new WriteMask(m_block_size);
+    lifeOriginMask = new WriteMask(m_block_size);
+    lifeOthersMask = new WriteMask(m_block_size);
+    copyLifetimeFrom(cp);
     isPrefetched = cp.isPrefetched;
     m_alloc = true;
     // If this data block is involved in an atomic operation, the effect
@@ -95,6 +98,8 @@ DataBlock::~DataBlock()
 
     delete readUsefulness;
     delete writeUsefulness;
+    delete lifeOriginMask;
+    delete lifeOthersMask;
 }
 
 void
@@ -109,6 +114,10 @@ DataBlock::alloc()
     m_data = new uint8_t[m_block_size];
     readUsefulness = new WriteMask(m_block_size);
     writeUsefulness = new WriteMask(m_block_size);
+    delete lifeOriginMask;
+    delete lifeOthersMask;
+    lifeOriginMask = new WriteMask(m_block_size);
+    lifeOthersMask = new WriteMask(m_block_size);
     isPrefetched = false;
     m_alloc = true;
     clear();
@@ -137,6 +146,7 @@ DataBlock::clear()
     memset(m_data, 0, m_block_size);
     readUsefulness->clear();
     writeUsefulness->clear();
+    clearLifetime();
 }
 
 bool
@@ -356,6 +366,90 @@ DataBlock::clearUsefulness()
     }
     readUsefulness->clear();
     writeUsefulness->clear();
+    clearLifetime();
+}
+
+void
+DataBlock::copyLifetimeFrom(const DataBlock &other)
+{
+    if (!lifeOriginMask || !other.lifeOriginMask ||
+        lifeOriginMask->getBlockSize() !=
+            other.lifeOriginMask->getBlockSize()) {
+        return;
+    }
+    lifeOrigin = other.lifeOrigin;
+    *lifeOriginMask = *other.lifeOriginMask;
+    *lifeOthersMask = *other.lifeOthersMask;
+}
+
+void
+DataBlock::setLifetime(int offset, int len, int core)
+{
+    if (!lifeOriginMask) {
+        return;
+    }
+    if (lifeOrigin < 0) {
+        lifeOrigin = core;
+    }
+    WriteMask &mask = core == lifeOrigin ? *lifeOriginMask : *lifeOthersMask;
+    mask.setMask(offset, len);
+}
+
+void
+DataBlock::mergeLifetimeMasks(int origin, const WriteMask &origin_mask,
+                              const WriteMask &others_mask)
+{
+    // A set from a message that carried none (an empty WriteMask), or an
+    // empty set, adds nothing.
+    if (!lifeOriginMask || origin < 0 ||
+        origin_mask.getBlockSize() != lifeOriginMask->getBlockSize() ||
+        others_mask.getBlockSize() != lifeOriginMask->getBlockSize()) {
+        return;
+    }
+    if (lifeOrigin < 0) {
+        lifeOrigin = origin;
+    }
+    if (origin == lifeOrigin) {
+        lifeOriginMask->orMask(origin_mask);
+    } else {
+        // Copies of one lifetime share their origin; a set with another
+        // origin (a lifetime restarted by a stats reset) counts as other
+        // cores' use.
+        lifeOthersMask->orMask(origin_mask);
+    }
+    lifeOthersMask->orMask(others_mask);
+}
+
+void
+DataBlock::mergeLifetime(const DataBlock &other)
+{
+    if (!other.lifeOriginMask) {
+        return;
+    }
+    mergeLifetimeMasks(other.lifeOrigin, *other.lifeOriginMask,
+                       *other.lifeOthersMask);
+}
+
+void
+DataBlock::clearLifetime()
+{
+    lifeOrigin = -1;
+    if (lifeOriginMask) {
+        lifeOriginMask->clear();
+        lifeOthersMask->clear();
+    }
+}
+
+WriteMask
+DataBlock::getLifeOriginMask() const
+{
+    return lifeOriginMask ? *lifeOriginMask : WriteMask();
+}
+
+WriteMask
+DataBlock::getLifeOthersMask() const
+{
+    return lifeOthersMask ? *lifeOthersMask : WriteMask();
 }
 
 WriteMask
@@ -418,6 +512,10 @@ DataBlock::operator=(const DataBlock & obj)
         memcpy(block_update, obj.m_atomicLog[i], block_bytes);
         m_atomicLog.push_back(block_update);
     }
+    // MYSTUFF: the lifetime set travels with the data (the per-residency
+    // masks do not)
+    copyLifetimeFrom(obj);
+    // FFUTSYM
     return *this;
 }
 

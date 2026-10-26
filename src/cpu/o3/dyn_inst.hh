@@ -110,6 +110,17 @@ class DynInst : public ExecContext, public RefCounted
     bool hasLabel() const { return _hasLabel; }
     void setLabel(std::string label) { _label = label;}
     std::string label() const { return _label; }
+    // The LSQ attaches the label to the request it builds (lsq.cc).
+    void setAccessName(const std::string &name) override
+    {
+        _hasLabel = true;
+        _label = name;
+    }
+    std::string
+    hovAccessName(unsigned pair, bool is_index) const override
+    {
+        return cpu->hovEntryName(pair, is_index);
+    }
     // FFUTSYM
 
   private:

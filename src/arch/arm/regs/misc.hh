@@ -1185,6 +1185,13 @@ namespace ArmISA
         MISCREG_MPAMVPM6_EL2,
         MISCREG_MPAMVPM7_EL2,
 
+        // SIFT side-car pair registers: 32 entries of {base_data,
+        // base_index, base_alias, count}, the implementation-defined
+        // system registers S3_<p >> 2>_C11_C<p & 3>_<field> (see
+        // hovPairReg below and insts/mem64.hh, MicroIndIdx).
+        MISCREG_HOV_PAIR_BASE,
+        MISCREG_HOV_PAIR_LAST = MISCREG_HOV_PAIR_BASE + 32 * 4 - 1,
+
         // NUM_PHYS_MISCREGS specifies the number of actual physical
         // registers, not considering the following pseudo-registers
         // (dummy registers), like MISCREG_UNKNOWN, MISCREG_IMPDEF_UNIMPL.
@@ -1222,6 +1229,25 @@ namespace ArmISA
         // Total number of Misc Registers: Physical + Dummy
         NUM_MISCREGS
     };
+
+    // SIFT side-car pair registers (MISCREG_HOV_PAIR_BASE ...).
+    constexpr unsigned NumHovPairs = 32;
+    constexpr unsigned NumHovPairFields = 4;
+    enum HovPairField
+    {
+        HOV_PAIR_DATA = 0,   // virtual address of data[0]
+        HOV_PAIR_INDEX = 1,  // virtual address of index[0]
+        HOV_PAIR_ALIAS = 2,  // base_alias: alias(i) = base_alias + i * size
+        HOV_PAIR_COUNT = 3   // elements in the pair
+    };
+
+    inline MiscRegIndex
+    hovPairReg(unsigned pair, unsigned field)
+    {
+        assert(pair < NumHovPairs && field < NumHovPairFields);
+        return static_cast<MiscRegIndex>(
+            MISCREG_HOV_PAIR_BASE + pair * NumHovPairFields + field);
+    }
 
     enum MiscRegInfo
     {
@@ -2932,6 +2958,23 @@ namespace ArmISA
         "mpamvpm5_el2",
         "mpamvpm6_el2",
         "mpamvpm7_el2",
+
+        // SIFT side-car pair registers
+#define HOV_PAIR_NAMES(p) \
+        "hov_pair" #p "_data", "hov_pair" #p "_index", \
+        "hov_pair" #p "_alias", "hov_pair" #p "_count",
+        HOV_PAIR_NAMES(0)  HOV_PAIR_NAMES(1)  HOV_PAIR_NAMES(2)
+        HOV_PAIR_NAMES(3)  HOV_PAIR_NAMES(4)  HOV_PAIR_NAMES(5)
+        HOV_PAIR_NAMES(6)  HOV_PAIR_NAMES(7)  HOV_PAIR_NAMES(8)
+        HOV_PAIR_NAMES(9)  HOV_PAIR_NAMES(10) HOV_PAIR_NAMES(11)
+        HOV_PAIR_NAMES(12) HOV_PAIR_NAMES(13) HOV_PAIR_NAMES(14)
+        HOV_PAIR_NAMES(15) HOV_PAIR_NAMES(16) HOV_PAIR_NAMES(17)
+        HOV_PAIR_NAMES(18) HOV_PAIR_NAMES(19) HOV_PAIR_NAMES(20)
+        HOV_PAIR_NAMES(21) HOV_PAIR_NAMES(22) HOV_PAIR_NAMES(23)
+        HOV_PAIR_NAMES(24) HOV_PAIR_NAMES(25) HOV_PAIR_NAMES(26)
+        HOV_PAIR_NAMES(27) HOV_PAIR_NAMES(28) HOV_PAIR_NAMES(29)
+        HOV_PAIR_NAMES(30) HOV_PAIR_NAMES(31)
+#undef HOV_PAIR_NAMES
 
         "num_phys_regs",
 

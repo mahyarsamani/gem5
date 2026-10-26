@@ -12,10 +12,12 @@ namespace ArmISA
 
 ARMDependentAccessGen::ARMDependentAccessGen(
     AccessIntent intent, size_t index_size,
-    Addr index_addr, Addr base_addr, size_t data_size, Addr alias)
+    Addr index_addr, Addr base_addr, size_t data_size, Addr alias,
+    unsigned pair, std::string data_name)
     : DependentAccessGen(index_size)
 {
-    addDescriptor(intent, index_addr, base_addr, data_size, alias);
+    addDescriptor(intent, index_addr, base_addr, data_size, alias, nullptr,
+                  pair, std::move(data_name));
 }
 
 std::unique_ptr<ExtensionBase>
@@ -57,7 +59,8 @@ ARMDependentAccessGen::unwrap() const
     for (const auto& desc : _descriptors) {
         auto single = std::make_unique<ARMDependentAccessGen>(
             desc.intent, _indexSize,
-            desc.indexAddr, desc.baseAddr, desc.dataSize, desc.alias);
+            desc.indexAddr, desc.baseAddr, desc.dataSize, desc.alias,
+            desc.pair, desc.dataName);
         if (desc.translateFn)
             single->setTranslator(desc.translateFn);
         single->setRequestorId(_requestorId);

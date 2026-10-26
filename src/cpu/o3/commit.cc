@@ -1398,6 +1398,11 @@ Commit::updateComInstStats(const DynInstPtr &inst)
                 cpu->commitStats[tid]->numHovStind++;
             }
         }
+        // Per access name, for labelled loads and stores
+        if (inst->hasLabel() && (inst->isLoad() || inst->isStore())) {
+            cpu->commitStats[tid]->countNamedAccess(inst->label(),
+                                                    inst->isLoad());
+        }
         // FFUTSYM
     }
 

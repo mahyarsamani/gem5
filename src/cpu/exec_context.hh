@@ -43,7 +43,9 @@
 #define __CPU_EXEC_CONTEXT_HH__
 
 #include <memory>
+#include <string>
 
+#include "base/cprintf.hh"
 #include "base/types.hh"
 #include "cpu/base.hh"
 #include "cpu/reg_class.hh"
@@ -118,6 +120,19 @@ class ExecContext
 
     virtual void setIAAExt(std::shared_ptr<IndirectAccessAlias> iaa) {}
     virtual void setDAGExt(std::shared_ptr<DependentAccessGen> dag) {}
+    /** Name this instruction's memory access (a MemAccessName label, as a
+     *  labelled instruction of an insights snippet carries). Must be
+     *  called before the access is initiated. */
+    virtual void setAccessName(const std::string &name) {}
+    /** The access name of side-car entry `pair`'s index or data array:
+     *  the name the core was told (O3's addHovEntryNames, from the
+     *  checkpoint manifest's hov_entries), else hov<pair>_index or
+     *  hov<pair>_data. */
+    virtual std::string
+    hovAccessName(unsigned pair, bool is_index) const
+    {
+        return csprintf("hov%u_%s", pair, is_index ? "index" : "data");
+    }
 
     virtual std::shared_ptr<IndirectAccessAlias> getIAAExt() const { return nullptr; }
     virtual std::shared_ptr<DependentAccessGen> getDAGExt() const { return nullptr; }

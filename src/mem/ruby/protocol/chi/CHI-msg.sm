@@ -98,15 +98,16 @@ enumeration(CHIRequestType, desc="") {
   DvmOpSync;
 
   // MYSTUFF:
-  ReadIndirect;
-  WriteIndirect;
+  // The index access of an ldind or stind (uop0, the Sequencer's LDIDX);
+  // its read or write intent is in the DAG.
+  ReadIndex;
 
+  // A value access: an IDR from the Gather Unit, or the core's own uop1
+  // (the Sequencer's LDVAL/STVAL), told apart by requestor (isIdr).
   ReadValue;
   WriteValue;
 
   NotifyIndIdx;
-
-  ProcessNotif;
 
   PropagateEvict;
   // FFUTSYM
@@ -158,6 +159,13 @@ structure(CHIRequestMsg, desc="", interface="Message") {
   WriteMask write_usefulness,    desc="Mask denoting bytes that were useful for write.";
 
   std::string access_name,       desc="Name of the access from high level program.";
+
+  bool hov_spec,                 default="false", desc="An IDR the Gather Unit speculated";
+
+  // Lifetime usefulness (DataBlock::setLifetime) for dataless evictions.
+  int life_origin,               default="-1", desc="Lifetime origin core (-1: none)";
+  WriteMask life_origin_mask,    desc="Lifetime bytes the origin core used";
+  WriteMask life_others_mask,    desc="Lifetime bytes other cores used";
   // FFUTSYM:
 }
 
@@ -208,6 +216,13 @@ structure(CHIResponseMsg, desc="", interface="Message") {
   Addr txnId,           desc="Transaction ID", default="0";
   Addr dbid,            desc="Data Buffer ID", default="0";
   //NOTE: not in CHI and for debuging only
+
+  // MYSTUFF: lifetime usefulness (DataBlock::setLifetime) for dataless
+  // snoop responses.
+  int life_origin,               default="-1", desc="Lifetime origin core (-1: none)";
+  WriteMask life_origin_mask,    desc="Lifetime bytes the origin core used";
+  WriteMask life_others_mask,    desc="Lifetime bytes other cores used";
+  // FFUTSYM
 
   MessageSizeType MessageSize, default="MessageSizeType_Control";
 

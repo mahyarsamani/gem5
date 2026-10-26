@@ -154,7 +154,8 @@ bool inMissQueue(Addr txnId, bool is_secure) {
 }
 
 void notifyCoalesced(Addr txnId, RubyRequestType type, RequestPtr req,
-                     DataBlock data_blk, bool was_miss) {
+                     DataBlock data_blk, bool was_miss,
+                     std::string access_name) {
   DPRINTF(RubySlicc, "Unused notifyCoalesced(txnId=%#x, type=%s, was_miss=%d)\n",
                       txnId, type, was_miss);
 }

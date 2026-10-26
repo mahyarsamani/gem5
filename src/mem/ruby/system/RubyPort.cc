@@ -624,9 +624,11 @@ RubyPort::MemResponsePort::hitCallback(PacketPtr pkt)
         }
     }
 
-    // Flush, acquire, release requests don't access physical memory
+    // Flush, acquire, release requests don't access physical memory;
+    // neither does a forwarded uop0's notification (it carries no data).
     if (pkt->isFlush() || pkt->cmd == MemCmd::MemSyncReq
-        || pkt->cmd == MemCmd::WriteCompleteResp || pkt->req->hasNoAddr()) {
+        || pkt->cmd == MemCmd::WriteCompleteResp || pkt->req->hasNoAddr()
+        || pkt->cmd == MemCmd::NotifyIndIdxReq) {
         accessPhysMem = false;
     }
 

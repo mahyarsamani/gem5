@@ -97,6 +97,9 @@ class Sequencer : public RubyPort
     Sequencer(const Params &);
     ~Sequencer();
 
+    // MYSTUFF: resolves hov_gather_unit (every SimObject exists by now).
+    void init() override;
+
     /**
      * Proxy function to writeCallback that first
      * invalidates the line address in the local monitor.
@@ -143,12 +146,16 @@ class Sequencer : public RubyPort
                       const Cycles firstResponseTime = Cycles(0));
 
     // MYSTUFF
-    // Look up the notif ID for a given RequestPtr (the dummy_req).
-    // Called by the protocol to set txnId on CHIRequestMsg.
-    uint64_t getNotifId(const RequestPtr& req) const;
+    // Deliver a DAG for an index line without a request of its own: a uop0
+    // whose index value the LSQ forwarded, or a cache's orphaned stash.
+    // With a request outstanding for the line it joins the merged
+    // notification sent at the drain; otherwise a NOTIFY_INDIDX goes now.
+    void deliverDAG(Addr line_addr, const DependentAccessGen &dag);
+    // The same for a request that carries the DAG (called from SLICC).
+    void deliverDAGReq(Addr line_addr, RequestPtr req);
 
-    // Delete the dummy_pkt tracked by notifId when NotifAck arrives.
-    void cleanupNotifPkt(uint64_t notifId);
+    // Enqueue a NOTIFY_INDIDX carrying `dag` for the line.
+    void sendDAGNotif(Addr address, std::shared_ptr<DependentAccessGen> dag);
 
     // Send the DAGs merged into m_IndirectDAGTable for `address` (if any)
     // to the Gather Unit as a NOTIFY_INDIDX. Called whenever the line's
@@ -280,13 +287,6 @@ class Sequencer : public RubyPort
     // their descriptors are merged into this DAG.
     std::unordered_map<Addr,
         std::shared_ptr<DependentAccessGen>> m_IndirectDAGTable;
-
-    // Notif ID generator and tracking for dummy_pkt cleanup.
-    // When NOTIFY_INDIDX is sent, we assign a unique ID and track the
-    // dummy_pkt so it can be deleted when the NotifAck comes back.
-    uint64_t m_nextNotifId = 0;
-    std::unordered_map<uint64_t, PacketPtr> m_NotifPktTable;
-    std::unordered_map<RequestPtr, uint64_t> m_NotifIdTable;
     // FFUTSYM
     // UnadressedRequestTable contains "unaddressed" requests,
     // guaranteed not to alias each other
@@ -319,23 +319,79 @@ class Sequencer : public RubyPort
     std::unordered_map<RequestPtr, std::tuple<Tick, std::vector<std::tuple<std::string, int>>>> consExitTimes;
     std::unordered_map<std::string, std::unordered_map<int, Tick>> indExitTimes;
 
-    std::unordered_map<std::string, statistics::Histogram*> indRelProdAccLat;
-    std::unordered_map<std::string, statistics::Histogram*> indRelConsAccLat;
-    std::unordered_map<std::string, statistics::Histogram*> indRelAccLat;
+    // Latencies in cycles, in fixed buckets (LATENCY_BUCKETS of
+    // LATENCY_BUCKET_CYCLES; longer samples land in the overflow count),
+    // so a few outliers cannot widen the buckets, as gem5's Histogram
+    // would.
+    static constexpr unsigned LATENCY_MAX_CYCLES = 2048;
+    static constexpr unsigned LATENCY_BUCKET_CYCLES = 8;
+    std::unordered_map<std::string, statistics::Distribution*>
+        indRelProdAccLat;
+    std::unordered_map<std::string, statistics::Distribution*>
+        indRelConsAccLat;
+    std::unordered_map<std::string, statistics::Distribution*> indRelAccLat;
+
+    statistics::Distribution *latencyDistribution(const std::string &name,
+                                                  const char *desc);
+    std::string accessNameOf(RequestPtr req) const;
 
     void handleIndExit(PacketPtr pkt);
     void handleIndArrival(PacketPtr pkt);
 
     // LDIND end-to-end latency: uop0 (index fetch) issue -> uop1 value
     // arrival, in cycles. Keyed by the data element's PA, since the two
-    // uops carry different aliases.
+    // uops carry different aliases. Each pending uop0 records how its DAG
+    // travelled to the Gather Unit: on its own LDIDX (leader), merged
+    // into the drain-time notification of a line already in flight
+    // (merged), or as a NotifyIndIdxReq, the LSQ-forwarded or register
+    // form (notified).
+    enum class HovDagKind : uint8_t { Leader, Merged, Notified };
+    struct HovPending
+    {
+        Cycles issue;
+        HovDagKind kind;
+    };
     void hovRecordLdindIndex(SequencerRequest *srequest,
-                             const DataBlock &data);
+                             const DataBlock &data, bool merged);
     void hovSampleLdindValue(SequencerRequest *srequest);
-    std::unordered_map<Addr, std::deque<Cycles>> m_hovLdindPending;
-    statistics::Histogram *hovLdindE2ELatency;
+    std::unordered_map<Addr, std::deque<HovPending>> m_hovLdindPending;
+    statistics::Distribution *hovLdindE2ELatency;
+    statistics::Distribution *hovLdindE2ELatencyLeader;
+    statistics::Distribution *hovLdindE2ELatencyMerged;
+    statistics::Distribution *hovLdindE2ELatencyNotified;
     statistics::Scalar *hovLdindUnmatched;
     statistics::Scalar *hovLdindStale;
+
+    // Sequencer-side suppression (hov_gather_unit): a DAG whose element a
+    // live cover row of the Gather Unit holds is not sent, whether it
+    // would merge onto a line in flight (aliased), go as a NotifyIndIdxReq
+    // (notify), or leave in a line's drain notification (pruned; a
+    // notification left empty is not sent at all).
+    AbstractController *m_hovGatherUnit = nullptr;
+    std::string m_hovGatherUnitPath;  // resolved in init()
+    bool hovCovered(const DependentAccessGen::DepDescriptor &desc,
+                    size_t index_size, RequestorID rid);
+    bool hovCovered(const DependentAccessGen &dag);
+    statistics::Vector *hovDagsSuppressed;
+    statistics::Scalar *hovDagsPrunedAtDrain;
+    statistics::Scalar *hovNotifsElided;
+
+    // Functional checks of hov values (hov_check_period): every Nth
+    // LDIND value and every Nth index value the core supplied is compared
+    // with a functional read of memory. A read that finds no complete
+    // copy of the bytes counts as unchecked.
+    unsigned m_hovCheckPeriod;
+    uint64_t m_hovValueSeen = 0;
+    uint64_t m_hovIndexSeen = 0;
+    // True (and `buf` filled) if a functional read found every byte.
+    bool hovFunctionalRead(Addr paddr, unsigned size, uint8_t *buf);
+    void hovCheckValue(PacketPtr pkt, const DataBlock &data);
+    void hovCheckIndex(PacketPtr pkt, const DependentAccessGen &dag);
+    statistics::Scalar *hovValueChecks;
+    statistics::Scalar *hovValueMismatches;
+    statistics::Scalar *hovIndexChecks;
+    statistics::Scalar *hovIndexMismatches;
+    statistics::Scalar *hovChecksUnchecked;
     // FFUTSYM
 
     SequencerType m_sequencer_type;
