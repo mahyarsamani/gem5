@@ -233,6 +233,25 @@ Queued::notify(const CacheAccessProbeArg &acc, const PrefetchInfo &pfi)
             DPRINTF(HWPrefetch, "Ignoring page crossing prefetch.\n");
         }
     }
+
+    // Page-crossing candidates wait on pfqMissingTranslation, and
+    // getPacket() is the only other place that starts their translation;
+    // the Ruby proxy calls it only when nextPrefetchReadyTime() is finite,
+    // which looks at pfq alone. Start them now, so a prefetcher whose
+    // candidates all cross pages (IMP) still issues. Without an MMU the
+    // queue is always empty.
+    if (mmu != nullptr && !pfqMissingTranslation.empty()) {
+        translatePending();
+    }
+}
+
+void
+Queued::translatePending()
+{
+    // translationComplete() tells the cache about each prefetch it queues.
+    if (pfq.size() < queueSize) {
+        processMissingTranslations(queueSize - pfq.size());
+    }
 }
 
 PacketPtr
@@ -333,6 +352,12 @@ Queued::translationComplete(DeferredPacket *dp, bool failed,
             it->createPkt(target_paddr, blkSize, requestorId, tagPrefetch,
                           pf_time);
             addToQueue(pfq, *it);
+            // A translation may finish outside notify() (FS, a walk), when
+            // the cache would not look at the queue again until its next
+            // access.
+            if (prefetchReady) {
+                prefetchReady();
+            }
         }
     } else {
         DPRINTF(HWPrefetch, "%s Translation of vaddr %#x failed, dropping "

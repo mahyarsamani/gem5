@@ -59,6 +59,14 @@ Multi::setParentInfo(System *sys, ProbeManager *pm, unsigned blk_size)
         pf->setParentInfo(sys, pm, blk_size);
 }
 
+void
+Multi::setPrefetchReadyCallback(std::function<void()> cb)
+{
+    Base::setPrefetchReadyCallback(cb);
+    for (auto pf : prefetchers)
+        pf->setPrefetchReadyCallback(cb);
+}
+
 Tick
 Multi::nextPrefetchReadyTime() const
 {

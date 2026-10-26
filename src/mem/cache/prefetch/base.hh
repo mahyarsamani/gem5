@@ -47,6 +47,7 @@
 #define __MEM_CACHE_PREFETCH_BASE_HH__
 
 #include <cstdint>
+#include <functional>
 
 #include "arch/generic/tlb.hh"
 #include "base/compiler.hh"
@@ -376,12 +377,31 @@ class Base : public ClockedObject
     /** Registered mmu for address translations */
     BaseMMU * mmu;
 
+    /**
+     * Tells the cache that a prefetch became ready outside notify() (a
+     * translation that finished later, a prefetcher's own event); empty
+     * unless the cache registered one.
+     */
+    std::function<void()> prefetchReady;
+
   public:
     Base(const BasePrefetcherParams &p);
     virtual ~Base() = default;
 
     virtual void
     setParentInfo(System *sys, ProbeManager *pm, unsigned blk_size);
+
+    /**
+     * Register the cache's "a prefetch is ready" hook. The Ruby proxy polls
+     * nextPrefetchReadyTime() only after a notification, so a prefetch
+     * that becomes ready later must call this hook or wait for the next
+     * access. Multi forwards it to its children.
+     */
+    virtual void
+    setPrefetchReadyCallback(std::function<void()> cb)
+    {
+        prefetchReady = std::move(cb);
+    }
 
     /**
      * Notify prefetcher of cache access (may be any access or just

@@ -68,6 +68,10 @@ RubyPrefetcherProxy::RubyPrefetcherProxy(AbstractController* _parent,
             cacheCntrl->params().system,
             cacheCntrl->getProbeManager(),
             cacheCntrl->m_ruby_system->getBlockSizeBytes());
+        // A prefetch that becomes ready outside a notification (a
+        // translation that finished later) schedules the issue event.
+        prefetcher->setPrefetchReadyCallback(
+            [this]{ scheduleNextPrefetch(); });
     }
 }
 

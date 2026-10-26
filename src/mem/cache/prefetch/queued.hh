@@ -191,6 +191,15 @@ class Queued : public Base
          *  so prefetchers without an MMU print nothing new. */
         statistics::Scalar pfTranslationFailed;
     } statsQueued;
+
+    /**
+     * Start the translations of the prefetches waiting for one, as many as
+     * the ready queue has room for, and tell the cache (prefetchReady) if
+     * any became ready. With a timing MMU that completes at once (SE) they
+     * are in the ready queue on return.
+     */
+    void translatePending();
+
   public:
     using AddrPriority = std::pair<Addr, int32_t>;
 
