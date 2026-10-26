@@ -99,12 +99,20 @@ class IndirectMemory : public Queued
          * indirectCounter, the counter is decremented.
          */
         bool increasedIndirectCounter;
+        /**
+         * Virtual address of the last index element whose target has been
+         * queued (the frontier rule): the next trigger continues after it.
+         */
+        Addr frontier;
+        /** Whether frontier holds a position of the current stream */
+        bool frontierValid;
 
         PrefetchTableEntry(unsigned indirect_counter_bits, TagExtractor ext)
             : TaggedEntry(), address(0), secure(false), streamCounter(0),
               enabled(false), index(0), baseAddr(0), shift(0),
               indirectCounter(indirect_counter_bits),
-              increasedIndirectCounter(false)
+              increasedIndirectCounter(false), frontier(0),
+              frontierValid(false)
         {
             registerTagExtractor(ext);
         }
@@ -122,6 +130,8 @@ class IndirectMemory : public Queued
             shift = 0;
             indirectCounter.reset();
             increasedIndirectCounter = false;
+            frontier = 0;
+            frontierValid = false;
         }
     };
     /** Prefetch table */
@@ -144,13 +154,20 @@ class IndirectMemory : public Queued
          * elements in the shiftValues array.
          */
         std::vector<std::vector<Addr>> baseAddr;
+        /**
+         * The PT entry this entry detects a pattern for. The entry's key is
+         * the same pointer, but recovering it from getTag() is only right
+         * while the IPD's tag extractor does not shift the key.
+         */
+        PrefetchTableEntry *ptEntry;
 
         IndirectPatternDetectorEntry(unsigned int num_addresses,
                                      unsigned int num_shifts,
                                      TagExtractor ext)
           : TaggedEntry(), idx1(0), idx2(0), secondIndexSet(false),
             numMisses(0),
-            baseAddr(num_addresses, std::vector<Addr>(num_shifts))
+            baseAddr(num_addresses, std::vector<Addr>(num_shifts)),
+            ptEntry(nullptr)
         {
             registerTagExtractor(ext);
         }
@@ -163,6 +180,7 @@ class IndirectMemory : public Queued
             idx2 = 0;
             secondIndexSet = false;
             numMisses = 0;
+            ptEntry = nullptr;
         }
     };
     /** Indirect Pattern Detector (IPD) table */
@@ -179,8 +197,37 @@ class IndirectMemory : public Queued
      * @param pt_entry Pointer to the associated page table entry
      * @param index Detected first index value
      */
-    void allocateOrUpdateIPDEntry(const PrefetchTableEntry *pt_entry,
+    void allocateOrUpdateIPDEntry(PrefetchTableEntry *pt_entry,
                                   int64_t index);
+
+    /**
+     * Invalidate the IPD entries of a PT entry that is being replaced, so
+     * that they never enable a pattern on the entry's next owner.
+     */
+    void releaseIPDEntriesOf(const PrefetchTableEntry *pt_entry);
+
+    /**
+     * The address of element `index` of an array at `base` with elements
+     * of 2^shift bytes; a negative shift divides (shift -3: a bit vector,
+     * one bit per index).
+     */
+    static Addr targetAddr(Addr base, int64_t index, int shift);
+
+    /**
+     * The frontier rule: queue the targets A[B[j]] of the index positions
+     * after the PT entry's frontier, up to `distance` elements past the
+     * trigger, reading B[j] from this cache's copy of the index lines;
+     * stop at the trigger's page end or at the first line not held here.
+     * @param pt_entry the enabled entry of the trigger's PC
+     * @param pfi the trigger, an index read of a hit
+     * @param distance prefetch distance, in elements
+     * @param addresses candidates are appended here
+     * @param cache accessor of the cache this prefetcher is attached to
+     */
+    void walkFrontier(PrefetchTableEntry *pt_entry, const PrefetchInfo &pfi,
+                      unsigned distance,
+                      std::vector<AddrPriority> &addresses,
+                      const CacheAccessor &cache);
     /**
      * Update an IPD entry with a detected miss address, when the first index
      * is being tracked

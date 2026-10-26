@@ -210,8 +210,8 @@ IndirectMemory::calculatePrefetch(const PrefetchInfo &pfi,
                             unsigned distance = maxPrefetchDistance *
                                 pt_entry->indirectCounter.calcSaturation();
                             for (int delta = 1; delta < distance; delta += 1) {
-                                Addr pf_addr = pt_entry->baseAddr +
-                                    (pt_entry->index << pt_entry->shift);
+                                Addr pf_addr = targetAddr(pt_entry->baseAddr,
+                                    pt_entry->index, pt_entry->shift);
                                 addresses.push_back(AddrPriority(pf_addr, 0));
                                 impStats.indirectCandidates++;
                             }
@@ -220,11 +220,24 @@ IndirectMemory::calculatePrefetch(const PrefetchInfo &pfi,
                 }
             }
         } else {
+            // findVictim() invalidates the victim, so count the enabled
+            // patterns around it to see whether it held one.
+            auto count_enabled = [this]() {
+                int n = 0;
+                for (const auto &entry : prefetchTable) {
+                    n += entry.enabled ? 1 : 0;
+                }
+                return n;
+            };
+            const int enabled_before = count_enabled();
             pt_entry = prefetchTable.findVictim(key);
             assert(pt_entry != nullptr);
-            if (pt_entry->isValid() && pt_entry->enabled) {
+            if (count_enabled() < enabled_before) {
                 impStats.patternsReplaced++;
             }
+            // The victim's IPD entries must not enable a pattern on the
+            // entry's new owner.
+            releaseIPDEntriesOf(pt_entry);
             prefetchTable.insertEntry(key, pt_entry);
             pt_entry->address = addr;
             pt_entry->secure = is_secure;
@@ -232,9 +245,33 @@ IndirectMemory::calculatePrefetch(const PrefetchInfo &pfi,
     }
 }
 
+Addr
+IndirectMemory::targetAddr(Addr base, int64_t index, int shift)
+{
+    // Shifting by a negative amount is undefined in C++; the paper's -3
+    // means one bit per index (a bit vector), a division by 8.
+    if (shift >= 0) {
+        return base + (Addr)(index << shift);
+    }
+    return base + (Addr)(index >> -shift);
+}
+
+void
+IndirectMemory::releaseIPDEntriesOf(const PrefetchTableEntry *pt_entry)
+{
+    for (auto &ipd_entry : ipd) {
+        if (ipd_entry.isValid() && ipd_entry.ptEntry == pt_entry) {
+            if (ipdEntryTrackingMisses == &ipd_entry) {
+                ipdEntryTrackingMisses = nullptr;
+            }
+            ipd.invalidate(&ipd_entry);
+        }
+    }
+}
+
 void
 IndirectMemory::allocateOrUpdateIPDEntry(
-    const PrefetchTableEntry *pt_entry, int64_t index)
+    PrefetchTableEntry *pt_entry, int64_t index)
 {
     // The address of the pt_entry is used to index the IPD
     Addr ipd_entry_addr = (Addr) pt_entry;
@@ -259,14 +296,15 @@ IndirectMemory::allocateOrUpdateIPDEntry(
             impStats.ipdReleases++;
         }
     } else {
+        // Any entry still tracking misses stops here, the victim included.
+        if (ipdEntryTrackingMisses != nullptr) {
+            impStats.ipdStolen++;
+        }
         ipd_entry = ipd.findVictim(key);
         assert(ipd_entry != nullptr);
         ipd.insertEntry(key, ipd_entry);
         ipd_entry->idx1 = index;
-        if (ipdEntryTrackingMisses != nullptr &&
-            ipdEntryTrackingMisses != ipd_entry) {
-            impStats.ipdStolen++;
-        }
+        ipd_entry->ptEntry = pt_entry;
         ipdEntryTrackingMisses = ipd_entry;
         impStats.ipdAllocs++;
     }
@@ -282,7 +320,7 @@ IndirectMemory::trackMissIndex1(Addr miss_addr)
     std::vector<Addr> &ba_array = entry->baseAddr[entry->numMisses];
     int idx = 0;
     for (int shift : shiftValues) {
-        ba_array[idx] = miss_addr - (entry->idx1 << shift);
+        ba_array[idx] = miss_addr - targetAddr(0, entry->idx1, shift);
         idx += 1;
     }
     entry->numMisses += 1;
@@ -304,15 +342,17 @@ IndirectMemory::trackMissIndex2(Addr miss_addr)
         std::vector<Addr> &ba_array = entry->baseAddr[midx];
         int idx = 0;
         for (int shift : shiftValues) {
-            if (ba_array[idx] == (miss_addr - (entry->idx2 << shift))) {
+            if (ba_array[idx] ==
+                    miss_addr - targetAddr(0, entry->idx2, shift)) {
                 // Match found!
                 // Fill the corresponding pt_entry
-                PrefetchTableEntry *pt_entry =
-                    (PrefetchTableEntry *) entry->getTag();
+                PrefetchTableEntry *pt_entry = entry->ptEntry;
+                assert(pt_entry != nullptr);
                 pt_entry->baseAddr = ba_array[idx];
                 pt_entry->shift = shift;
                 pt_entry->enabled = true;
                 pt_entry->indirectCounter.reset();
+                pt_entry->frontierValid = false;
                 impStats.patternsEnabled[idx]++;
                 // Release the current IPD Entry
                 ipd.invalidate(entry);
@@ -330,8 +370,8 @@ IndirectMemory::checkAccessMatchOnActiveEntries(Addr addr)
 {
     for (auto &pt_entry : prefetchTable) {
         if (pt_entry.enabled) {
-            if (addr == pt_entry.baseAddr +
-                       (pt_entry.index << pt_entry.shift)) {
+            if (addr == targetAddr(pt_entry.baseAddr, pt_entry.index,
+                                   pt_entry.shift)) {
                 pt_entry.indirectCounter++;
                 pt_entry.increasedIndirectCounter = true;
                 impStats.confidenceHits++;
