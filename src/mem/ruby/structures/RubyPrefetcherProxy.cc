@@ -38,6 +38,7 @@
 #include "mem/ruby/structures/RubyPrefetcherProxy.hh"
 
 #include "debug/HWPrefetch.hh"
+#include "mem/ruby/common/WriteMask.hh"
 #include "mem/ruby/system/RubySystem.hh"
 
 namespace gem5
@@ -233,6 +234,32 @@ RubyPrefetcherProxy::regProbePoints()
     ppDataUpdate =
         new ProbePointArg<CacheDataUpdateProbeArg>(
             cacheCntrl->getProbeManager(), "Data Update");
+}
+
+bool
+RubyPrefetcherProxy::readLineFunctional(Addr paddr, uint8_t *data,
+                                        unsigned size) const
+{
+    const unsigned blk_size = cacheCntrl->m_ruby_system->getBlockSizeBytes();
+    const Addr line_addr = makeLineAddress(paddr);
+    panic_if(getOffset(paddr) + size > blk_size,
+             "%s: functional line read of %d bytes at %#x crosses a line",
+             name(), size, paddr);
+
+    AccessPermission perm = cacheCntrl->getAccessPermission(line_addr);
+    if (perm != AccessPermission_Read_Only &&
+        perm != AccessPermission_Read_Write) {
+        return false;
+    }
+
+    RequestPtr req = std::make_shared<Request>(paddr, size, 0,
+                                               Request::funcRequestorId);
+    Packet pkt(req, MemCmd::ReadReq);
+    pkt.dataStatic(data);
+    WriteMask mask;
+    mask.setBlockSize(blk_size);
+    cacheCntrl->functionalRead(line_addr, &pkt, mask);
+    return mask.getMask(getOffset(paddr), size);
 }
 
 Addr
