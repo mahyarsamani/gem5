@@ -293,6 +293,7 @@ structure(CHIDataMsg, desc="", interface="Message") {
   // data of an ldind/stind names the data block the Indirect Unit should
   // expect (3a, hov_expect*). Lane mask and register id: vector form.
   bool hov_fwd,                  default="false", desc="CompData of a request injected on the Indirect Unit's behalf";
+  bool hov_merged,               default="false", desc="The delivery also answers the Indirect Unit's own request, merged at the Gather Unit";
   bool hov_expect,               default="false", desc="Index data that names a data block to expect";
   Addr hov_expect_addr,          default="0",     desc="Line address of the data block to expect";
   bool hov_expect_unique,        default="false", desc="The expected block comes writable (stind)";

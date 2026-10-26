@@ -3022,6 +3022,9 @@ action(Send_CompData, desc="") {
                             (tbe.snd_msgType == CHIDataType:CompData_SD_PD);
 
   tbe.snd_destination := tbe.requestor;
+  // MYSTUFF: no request merges into an injected one after this point
+  tbe.hov_data_sent := true;
+  // FFUTSYM
   setupPendingSend(tbe);
   printTBEState(tbe);
 }
@@ -3357,6 +3360,7 @@ action(Send_Data, desc="") {
     if (is_comp_data && (tbe.snd_destination == tbe.requestor)) {
       if (tbe.hov_fwd) {
         out_msg.hov_fwd := true;
+        out_msg.hov_merged := tbe.hov_merged;
         out_msg.hov_lane_mask := tbe.hov_lane_mask;
         out_msg.hov_reg_id := tbe.hov_reg_id;
         out_msg.hov_access_name := tbe.access_name;
@@ -4961,6 +4965,25 @@ action(Hov_FwdHeld, desc="Gather Unit: drop an injected request for a block the 
   processRetryQueue();
 }
 
+// Gather Unit, reqRdyPort: the Indirect Unit's own read of a block that a
+// request injected for it is still fetching (hovCanMerge). The injected
+// transaction's CompData answers both (Send_Data marks it hov_merged, and
+// the Indirect Unit's waiting TBE takes it as its own response and sends
+// the one CompAck the transaction waits for); this request is consumed.
+action(Hov_MergeReq, desc="Gather Unit: merge the Indirect Unit's own request into the injected one") {
+  assert(gather_unit);
+  assert(is_valid(tbe) && tbe.hov_fwd);
+  peek(reqRdyPort, CHIRequestMsg) {
+    DPRINTF(IndirectAccess,
+        "%s for %#x from %s merged into the injected request (slot %d).\n",
+        in_msg.type, address, in_msg.requestor, tbe.hov_slot);
+  }
+  tbe.hov_merged := true;
+  countHovFwd(5);
+  storTBEs.decrementReserved();
+  processRetryQueue();
+}
+
 // Indirect Unit: the index data names a data block to expect (3a). Queue
 // it for that line on reqRdy, with a TBE reserved for it; with no TBE free,
 // the expect is dropped (the delivery is then taken on arrival).
@@ -5073,13 +5096,17 @@ action(Initiate_HovDeliver, desc="Indirect Unit: allocate a TBE for a delivered 
 
 // Indirect Unit, stock CompData transition: count a delivery the TBE of
 // its expect takes
-action(Hov_CountDelivery, desc="Indirect Unit: count a delivery its expect takes") {
+action(Hov_CountDelivery, desc="Indirect Unit: count a delivery its expect or a merged request takes") {
   if (indirect_unit) {
     peek(datInPort, CHIDataMsg) {
-      if (in_msg.hov_fwd && (tbe.hov_recv == 1) &&
-          (tbe.dataBlkValid.count() == 0)) {
-        countHovDeliver(0);
-        DPRINTF(IndirectAccess, "5: data block %#x delivered into its expect.\n", address);
+      if (in_msg.hov_fwd && (tbe.dataBlkValid.count() == 0)) {
+        if (in_msg.hov_merged) {
+          countHovDeliver(3);
+          DPRINTF(IndirectAccess, "5: data block %#x delivered; it answers the request merged into it.\n", address);
+        } else if (tbe.hov_recv == 1) {
+          countHovDeliver(0);
+          DPRINTF(IndirectAccess, "5: data block %#x delivered into its expect.\n", address);
+        }
       }
     }
   }

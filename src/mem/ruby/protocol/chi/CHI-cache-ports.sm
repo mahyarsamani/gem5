@@ -126,7 +126,12 @@ in_port(datInPort, CHIDataMsg, datIn, rank=9,
       // when the line is absent and idle, else it is declined: a TBE of
       // the core's own request sees that request through. Never recycled:
       // the Gather Unit's transaction waits for this cache's CompAck.
-      if (indirect_unit && in_msg.hov_fwd) {
+      if (indirect_unit && in_msg.hov_fwd && in_msg.hov_merged) {
+        // the delivery also answers this cache's own request, which the
+        // Gather Unit merged into it: the stock response path
+        trigger(dataToEvent(in_msg.type), in_msg.addr,
+                getCacheEntry(in_msg.addr), getCurrentActiveTBE(in_msg.addr));
+      } else if (indirect_unit && in_msg.hov_fwd) {
         TBE tbe := getCurrentActiveTBE(in_msg.addr);
         CacheEntry cache_entry := getCacheEntry(in_msg.addr);
         if (hovDeclining(in_msg.addr)) {
@@ -366,6 +371,13 @@ in_port(reqRdyPort, CHIRequestMsg, reqRdy, rank=3,
         if (gather_unit && is_invalid(tbe) && in_msg.hov_fwd &&
             hovIUHolds(dir_entry, in_msg.requestor)) {
           trigger(Event:HovFwdHeld, in_msg.addr, cache_entry, tbe);
+        }
+        // The Indirect Unit's own read of a block an injected request is
+        // still fetching for it is merged into that request: the delivery
+        // (marked hov_merged) answers both, and only that marking lets the
+        // Indirect Unit take a delivery as its own request's data.
+        if (hovCanMerge(in_msg, tbe)) {
+          trigger(Event:HovMergeReq, in_msg.addr, cache_entry, tbe);
         }
         // FFUTSYM
 

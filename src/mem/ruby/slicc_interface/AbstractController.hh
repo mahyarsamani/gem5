@@ -800,11 +800,13 @@ class AbstractController : public ClockedObject, public Consumer
         //! The target flow (docs/agents/2026-10-25-wp0/PLAN.md). Gather
         //! Unit: requests injected on the Indirect Unit's behalf by
         //! outcome (issued, skippedHeld, completed, declined,
-        //! droppedNoTarget), cycles from injection to the CompAck, and
-        //! index data that named a block to expect. Indirect Unit: expects
-        //! by outcome (allocated, present, droppedNoTBE, afterData, busy,
-        //! timedOut) and deliveries by outcome (intoExpect, onArrival,
-        //! declined).
+        //! droppedNoTarget; mergedCoreRequest: the Indirect Unit's own
+        //! request merged into one, also counted in completed), cycles
+        //! from injection to the CompAck, and index data that named a
+        //! block to expect. Indirect Unit: expects by outcome (allocated,
+        //! present, droppedNoTBE, afterData, busy, timedOut) and
+        //! deliveries by outcome (intoExpect, onArrival, declined,
+        //! intoCoreRequest: taken by the core's own merged request).
         statistics::Vector hovFwd;
         statistics::Histogram hovFwdLatency;
         statistics::Scalar hovExpectSent;

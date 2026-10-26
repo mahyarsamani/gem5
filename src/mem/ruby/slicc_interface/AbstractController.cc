@@ -1401,12 +1401,13 @@ ControllerStats::ControllerStats(statistics::Group *parent)
     idrIntentLost
         .flags(statistics::nozero);
     hovFwd
-        .init(5)
+        .init(6)
         .subname(0, "issued")
         .subname(1, "skippedHeld")
         .subname(2, "completed")
         .subname(3, "declined")
         .subname(4, "droppedNoTarget")
+        .subname(5, "mergedCoreRequest")
         .flags(statistics::nozero);
     hovFwdLatency
         .init(16)
@@ -1423,10 +1424,11 @@ ControllerStats::ControllerStats(statistics::Group *parent)
         .subname(5, "timedOut")
         .flags(statistics::nozero);
     hovDeliver
-        .init(3)
+        .init(4)
         .subname(0, "intoExpect")
         .subname(1, "onArrival")
         .subname(2, "declined")
+        .subname(3, "intoCoreRequest")
         .flags(statistics::nozero);
     hovStashOrphaned
         .flags(statistics::nozero);

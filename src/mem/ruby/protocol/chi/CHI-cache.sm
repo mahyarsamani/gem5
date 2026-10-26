@@ -645,6 +645,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     // The target flow (docs/agents/2026-10-25-wp0/PLAN.md)
     HovFwdHeld,       desc="Gather Unit: an injected request for a block the directory says the Indirect Unit holds; send nothing";
+    HovMergeReq,      desc="Gather Unit: the Indirect Unit's own request for a block an injected request is still fetching for it; merge";
     HovExpect,        in_trans="yes", desc="Indirect Unit: an expected block (3a); wait for it, unless here or busy";
     HovDeliver,       in_trans="yes", desc="Indirect Unit: a delivered block (5) with no TBE waiting for it; take it on arrival";
     HovDecline,       desc="Indirect Unit: a delivered block it cannot take; CompAck it as declined and drop it";
@@ -897,6 +898,8 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     int hov_slot,                  default="-1",    desc="Tracker slot of an injected request";
     int hov_recv,                  default="0",     desc="Indirect Unit: 1 expect, 2 delivery on arrival";
     bool hov_declined,             default="false", desc="Gather Unit: the Indirect Unit declined the delivery";
+    bool hov_data_sent,            default="false", desc="Gather Unit: the delivery's CompData has been set up";
+    bool hov_merged,               default="false", desc="Gather Unit: the Indirect Unit's own request was merged into this one";
     bool hov_expect_pending,       default="false", desc="The next index data message carries the expect";
     Addr hov_expect_addr,          default="0",     desc="Data line the expect names";
     bool hov_expect_unique,        default="false", desc="The expected block comes writable";

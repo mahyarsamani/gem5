@@ -1244,6 +1244,27 @@ bool hovIUHolds(DirEntry dir_entry, MachineID iu) {
   return false;
 }
 
+// Gather Unit: an upstream cache's own read for a line on which a request
+// injected for that same cache is still fetching (its CompData not set up
+// yet), with the permission the read asks for: the delivery can answer
+// both (HovMergeReq). A ReadUnique needs an injected ReadUnique.
+bool hovCanMerge(CHIRequestMsg msg, TBE tbe) {
+  if ((gather_unit == false) || msg.hov_fwd || is_invalid(tbe)) {
+    return false;
+  }
+  if ((tbe.is_req_tbe == false) || (tbe.hov_fwd == false) ||
+      tbe.hov_data_sent || tbe.hov_merged ||
+      (tbe.requestor != msg.requestor)) {
+    return false;
+  }
+  if ((msg.type == CHIRequestType:ReadShared) ||
+      (msg.type == CHIRequestType:ReadNotSharedDirty)) {
+    return true;
+  }
+  return (msg.type == CHIRequestType:ReadUnique) &&
+         (tbe.reqType == CHIRequestType:ReadUnique);
+}
+
 // FFUTSYM
 
 void deallocateReqTBE(TBE tbe) {

@@ -1683,6 +1683,13 @@ transition({I,SC,UC,SD,UD,UD_T,RU,RSC,RSD,RUSD,SC_RSC,UC_RSC,SD_RSC,UD_RSC,UC_RU
   Pop_ReqRdyQueue;
 }
 
+// Gather Unit: the Indirect Unit's own read merges into the injected
+// request still fetching the same block for it
+transition({BUSY_BLKD,BUSY_INTR}, HovMergeReq) {
+  Hov_MergeReq;
+  Pop_ReqRdyQueue;
+}
+
 // Indirect Unit: an expected block (3a). Wait for it in BUSY_INTR, the
 // state of a load miss waiting for data (snoops take the stock hazard
 // path; the core's own access stalls on the line).
