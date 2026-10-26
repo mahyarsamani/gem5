@@ -2179,4 +2179,12 @@ bool needsPostProcess(Addr address, TBE tbe) {
   State toBeState := makeFinalState(tbe, getCacheEntry(address), getDirEntry(address));
   return idxLineAboveGU(tbe, toBeState) && (tbe.postEvictSent == false);
 }
+
+// Gather Unit: the pool a run-ahead IDR needs is short (idr_drop_when_full
+// drops the run-ahead entry at TriageIDR then). The one resource test of
+// the drop: the hov TBEs today, the cap on injected requests after the
+// target flow replaces them.
+bool hovRaPoolShort() {
+  return storHovTBEs.areNSlotsAvailable(1 + hov_ra_gu_reserve) == false;
+}
 // FFUTSYM

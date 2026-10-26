@@ -93,6 +93,8 @@ AbstractController::init()
 {
     stats.delayHistogram.init(10);
     stats.idrCoalesceGroupSize.init(8);
+    stats.hovRaAccuracy.init(10);
+    stats.hovRaDistance.init(16);
     uint32_t size = Network::getNumberOfVirtualNetworks();
     for (uint32_t i = 0; i < size; i++) {
         stats.delayVCHistogram.push_back(new statistics::Histogram(this));
@@ -607,6 +609,10 @@ AbstractController::getDependentReq(Addr line_addr, DataBlock &index_data)
             "line_addr %#x.", line_addr);
 
     const auto& desc = dag->descriptor(0);
+    // IssueIDR sends this entry now: a run-ahead IDR counts for its pair.
+    if (entry.spec) {
+        hovRaIssue(dag->requestorId(), desc.pair);
+    }
     // The IDR's intent: a write, or the DAG's own when nothing coalesced.
     bool read = !entry.write;
     int offset;
@@ -665,6 +671,9 @@ AbstractController::extractExtensions(Addr line_addr, RequestPtr req,
 
         bool write = shared->descriptor(0).intent ==
                      DependentAccessGen::AccessIntent::Write;
+
+        // The core's position on the pair's index, covered or not.
+        hovRaDemand(*shared);
 
         // A speculated IDR already stands for this element: drop the DAG,
         // but the Gather Unit read its index element for it.
@@ -791,6 +800,172 @@ AbstractController::countSpecIdr(int what)
     }
 }
 
+void
+AbstractController::hovRaConfigure(int spec_mode, int streams, int conf,
+                                   int seq_window, int epoch, int acc_low)
+{
+    m_hovRa = HovRaParams{spec_mode, streams, conf, seq_window, epoch,
+                          acc_low};
+}
+
+bool
+AbstractController::peekDependentDroppable(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
+             "peekDependentDroppable: no cached entries for line_addr %#x.",
+             line_addr);
+    const auto &front = it->second.entries.front();
+    return front.spec && front.absorbed == 0;
+}
+
+void
+AbstractController::dropRunAheadReq(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
+             "dropRunAheadReq: no cached entries for line_addr %#x.",
+             line_addr);
+    auto &entries = it->second.entries;
+    const auto &front = entries.front();
+    panic_if(!front.spec || front.absorbed != 0,
+             "dropRunAheadReq: the next entry of line_addr %#x is not a "
+             "run-ahead one.", line_addr);
+    const auto &d = front.dag->descriptor(0);
+    RequestorID rid = front.dag->requestorId();
+    int elem = getOffset(d.indexAddr) / front.dag->indexSize();
+    // Uncover the element, so a real DAG for it is sent rather than
+    // dropped as covered by an IDR that never left.
+    auto cover = m_hovCover.find(line_addr);
+    if (cover != m_hovCover.end() && elem < 64) {
+        uint64_t bit = uint64_t(1) << elem;
+        for (auto &row : cover->second) {
+            if (row.rid == rid && row.pair == d.pair) {
+                row.covered &= ~bit;
+                row.writes &= ~bit;
+                row.raBits &= ~bit;
+            }
+        }
+    }
+    stats.hovSpecIdrsDropped[2]++;
+    entries.erase(entries.begin());
+}
+
+AbstractController::HovStream *
+AbstractController::findStream(RequestorID rid, unsigned pair)
+{
+    for (auto &row : m_hovStreams) {
+        if (row.rid == rid && row.pair == pair) {
+            return &row;
+        }
+    }
+    return nullptr;
+}
+
+void
+AbstractController::hovRaDemand(const DependentAccessGen &dag)
+{
+    if (m_hovRa.specMode <= 0) {
+        return;
+    }
+    const auto &d = dag.descriptor(0);
+    if (d.pair < hovPairs) {
+        stats.hovRaDemands[d.pair]++;
+    }
+    if (m_hovRa.streams <= 0) {
+        return;
+    }
+    RequestorID rid = dag.requestorId();
+    Addr q = d.indexAddr;
+    Cycles now = curCycle();
+    HovStream *row = findStream(rid, d.pair);
+    if (!row) {
+        // A new walk: the least recently used row gives way when full.
+        if ((int)m_hovStreams.size() < m_hovRa.streams) {
+            m_hovStreams.emplace_back();
+            row = &m_hovStreams.back();
+        } else {
+            row = &*std::min_element(m_hovStreams.begin(),
+                                     m_hovStreams.end(),
+                                     [](const HovStream &a,
+                                        const HovStream &b) {
+                                         return a.lastUse < b.lastUse;
+                                     });
+            stats.hovRaRowsReplaced++;
+        }
+        *row = HovStream();
+        row->rid = rid;
+        row->pair = d.pair;
+        row->demand = q;
+        row->frontier = q;
+        row->lastUse = now;
+        stats.hovRaRowsAllocated++;
+        return;
+    }
+    row->lastUse = now;
+    Addr span = (Addr)m_hovRa.seqWindow * dag.indexSize();
+    if (q > row->demand && q - row->demand <= span) {
+        // A forward step: the core walks the index.
+        if (row->conf < 3) {
+            row->conf++;
+        }
+        row->demand = q;
+    } else if (q <= row->demand && row->demand - q <= span) {
+        // A DAG of an element just behind: a merged uop0's notification
+        // arrives after the next line's index request. Nothing changes.
+    } else {
+        row->conf = 0;
+        row->demand = q;
+        row->frontier = q;
+        stats.hovRaRebases++;
+    }
+    if (row->offFor > 0) {
+        row->offFor--;
+    }
+}
+
+bool
+AbstractController::hovRaGate(RequestorID rid, unsigned pair)
+{
+    if (m_hovRa.streams <= 0) {
+        return true;
+    }
+    HovStream *row = findStream(rid, pair);
+    return row && row->conf >= m_hovRa.conf && row->offFor == 0;
+}
+
+void
+AbstractController::hovRaIssue(RequestorID rid, unsigned pair)
+{
+    if (pair < hovPairs) {
+        stats.hovRaIssued[pair]++;
+    }
+    HovStream *row = findStream(rid, pair);
+    if (!row) {
+        return;
+    }
+    row->issued++;
+    if (m_hovRa.epoch <= 0 || row->issued < (uint32_t)m_hovRa.epoch) {
+        return;
+    }
+    // The epoch ends: below hov_ra_acc_low the row backs off for
+    // `backoff` demands and the next back-off doubles (at most 4096);
+    // otherwise the back-off returns to 256.
+    uint32_t accuracy = row->hits * 100 / row->issued;
+    stats.hovRaAccuracy.sample(accuracy);
+    if (m_hovRa.accLow > 0 && accuracy < (uint32_t)m_hovRa.accLow) {
+        row->offFor = row->backoff;
+        row->backoff = std::min<uint32_t>(2 * row->backoff, 4096);
+        if (pair < hovPairs) {
+            stats.hovRaThrottled[pair]++;
+        }
+    } else {
+        row->backoff = 256;
+    }
+    row->issued = 0;
+    row->hits = 0;
+}
+
 AbstractController::HovCover *
 AbstractController::findCover(Addr line_addr, RequestorID rid,
                               unsigned pair, Cycles now)
@@ -851,7 +1026,19 @@ AbstractController::hovCovers(Addr line_addr, RequestorID rid,
         return false;
     }
     uint64_t bit = uint64_t(1) << elem;
-    return (row->covered & bit) && (!write || (row->writes & bit));
+    bool covers = (row->covered & bit) && (!write || (row->writes & bit));
+    // A real DAG covered by a run-ahead IDR: a hit for the pair, counted
+    // once per run-ahead IDR.
+    if (covers && (row->raBits & bit)) {
+        row->raBits &= ~bit;
+        if (pair < hovPairs) {
+            stats.hovRaHits[pair]++;
+        }
+        if (HovStream *stream = findStream(rid, pair)) {
+            stream->hits++;
+        }
+    }
+    return covers;
 }
 
 void
@@ -882,6 +1069,16 @@ AbstractController::speculateLine(Addr line_addr, DataBlock &index_data,
         unsigned pair = ld.pair;
         if (findCover(line_addr, rid, pair, now)) {
             continue;  // this pair is already speculated on this line
+        }
+        // The stream row's gate (hov_ra_streams): a pair that does not
+        // walk its index forward, or whose run-ahead went unused, makes
+        // neither entries nor a cover row; its next real DAG on the line
+        // is a leader again.
+        if (!hovRaGate(rid, pair)) {
+            if (pair < hovPairs) {
+                stats.hovRaGated[pair]++;
+            }
+            continue;
         }
         int index_size = leader.indexSize();
         int elems = std::min(block_size / index_size, 64);
@@ -927,10 +1124,18 @@ AbstractController::speculateLine(Addr line_addr, DataBlock &index_data,
             }
             made.push_back({std::move(spec), write, 0, true});
             row.covered |= bit;
+            row.raBits |= bit;
             if (write) {
                 row.writes |= bit;
             }
             stats.hovSpecEntries++;
+            if (k > k_leader) {
+                stats.hovRaDistance.sample(k - k_leader);
+            }
+            if (HovStream *stream = findStream(rid, pair)) {
+                stream->frontier = std::max(stream->frontier,
+                                            line_addr + k * index_size);
+            }
         }
         if (mode == 1) {
             stats.hovSpecLinesForward++;
@@ -1223,7 +1428,33 @@ ControllerStats::ControllerStats(statistics::Group *parent)
                "(hov_spec_writes off)"),
       ADD_STAT(hovSpecCoalesced,
                "speculated entries absorbed into another IDR to the same "
-               "data line (one index line)")
+               "data line (one index line)"),
+      ADD_STAT(hovSpecIdrsDroppedAtIU,
+               "run-ahead IDRs the Indirect Unit dropped with HovAck for "
+               "want of a TBE (hov_ra_iu_drop)"),
+      ADD_STAT(hovSpecIdrsRetriedAtIU,
+               "run-ahead IDRs the Indirect Unit refused with RetryAck"),
+      ADD_STAT(hovRaRowsAllocated, "run-ahead stream rows allocated"),
+      ADD_STAT(hovRaRowsReplaced,
+               "run-ahead stream rows replaced (least recently used)"),
+      ADD_STAT(hovRaRebases,
+               "real DAGs off their stream row's forward walk (re-based)"),
+      ADD_STAT(hovRaDemands,
+               "real DAGs seen at the Gather Unit, per pair entry"),
+      ADD_STAT(hovRaIssued, "run-ahead IDRs sent, per pair entry"),
+      ADD_STAT(hovRaHits,
+               "real DAGs a run-ahead IDR covered, per pair entry"),
+      ADD_STAT(hovRaGated,
+               "leaders the stream rows kept from running ahead, per pair "
+               "entry"),
+      ADD_STAT(hovRaThrottled,
+               "accuracy epochs that backed a stream row off, per pair "
+               "entry"),
+      ADD_STAT(hovRaAccuracy,
+               "run-ahead accuracy per stream row epoch (percent)"),
+      ADD_STAT(hovRaDistance,
+               "lead of each run-ahead entry made ahead of its leader "
+               "(index elements)")
 {
     fullyBusyCycles
         .flags(statistics::nozero);
@@ -1256,14 +1487,26 @@ ControllerStats::ControllerStats(statistics::Group *parent)
     hovSpecLinesLine.flags(statistics::nozero);
     hovSpecIdrsSent.flags(statistics::nozero);
     hovSpecIdrsDropped
-        .init(2)
+        .init(3)
         .subname(0, "unmapped")
         .subname(1, "coalesced")
+        .subname(2, "full")
         .flags(statistics::nozero);
     hovDagsCoveredAtGU.flags(statistics::nozero);
     hovCoverReplaced.flags(statistics::nozero);
     hovSpecWritesDemoted.flags(statistics::nozero);
     hovSpecCoalesced.flags(statistics::nozero);
+    hovSpecIdrsDroppedAtIU.flags(statistics::nozero);
+    hovSpecIdrsRetriedAtIU.flags(statistics::nozero);
+    hovRaRowsAllocated.flags(statistics::nozero);
+    hovRaRowsReplaced.flags(statistics::nozero);
+    hovRaRebases.flags(statistics::nozero);
+    for (auto *per_pair : {&hovRaDemands, &hovRaIssued, &hovRaHits,
+                           &hovRaGated, &hovRaThrottled}) {
+        per_pair->init(hovPairs).flags(statistics::nozero);
+    }
+    hovRaAccuracy.flags(statistics::nozero);
+    hovRaDistance.flags(statistics::nozero);
 }
 
 } // namespace ruby

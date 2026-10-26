@@ -52,6 +52,13 @@ bool hasDependentWork(Addr);
 void speculateLine(Addr, DataBlock, int, bool, int, Cycles);
 bool peekDependentIsSpec(Addr);
 void countSpecIdr(int);
+// Run-ahead gated and dropped when pools are full (hovRaConfigure,
+// dropRunAheadReq; the Indirect Unit's drops and refusals of run-ahead IDRs)
+void hovRaConfigure(int, int, int, int, int, int);
+bool peekDependentDroppable(Addr);
+void dropRunAheadReq(Addr);
+void countSpecIdrDroppedAtIU();
+void countSpecIdrRetriedAtIU();
 void clearExtensions(Addr);
 
 Addr peekDependentAddr(Addr, DataBlock);

@@ -268,6 +268,30 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   int hov_spec_lines := 64;
   Cycles hov_spec_window := 4000;
   bool hov_spec_writes := "False";
+
+  // Run-ahead dropped when pools are full and gated per (core, pair). A
+  // run-ahead IDR is a fill and never changes what a load observes, so
+  // dropping one costs at most the early fill; real IDRs keep their path.
+  // At the Gather Unit, idr_drop_when_full drops a run-ahead entry at
+  // TriageIDR when fewer than 1 + hov_ra_gu_reserve hov TBEs are free
+  // (and clears its cover bit, so the core's own DAG is sent). At the
+  // Indirect Unit, hov_ra_iu_drop answers a run-ahead IDR that finds fewer
+  // than 1 + hov_ra_iu_reserve free TBEs with HovAck instead of RetryAck.
+  // hov_ra_streams stream rows (0: no gate) learn per (core, pair)
+  // whether the core walks the index forward (a confidence, raised by a
+  // step of at most hov_ra_seq_window elements) and how many run-ahead
+  // IDRs it uses (per epoch of hov_ra_epoch IDRs); a leader runs ahead
+  // only with confidence at least hov_ra_conf and no back-off, which an
+  // epoch below hov_ra_acc_low percent accuracy starts.
+  bool idr_drop_when_full := "False";
+  int hov_ra_gu_reserve := 0;
+  bool hov_ra_iu_drop := "False";
+  int hov_ra_iu_reserve := 0;
+  int hov_ra_streams := 0;
+  int hov_ra_conf := 2;
+  int hov_ra_seq_window := 32;
+  int hov_ra_epoch := 64;
+  int hov_ra_acc_low := 40;
   // FFUTSYM
 {
 
