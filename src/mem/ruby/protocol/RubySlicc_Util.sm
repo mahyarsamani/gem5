@@ -71,5 +71,4 @@ int getSize(RequestPtr req);
 bool isDepReadReq(RequestPtr req);
 std::string getReqAccessName(RequestPtr req);
 Addr getIndirectAlias(RequestPtr req);
-Addr makeHovId(int slot, int block_size);
 // FFUTSYM:

@@ -63,14 +63,29 @@ void countStashOrphaned();
 void countDAGCarrier(int, RequestPtr);
 
 // IDR coalescing at the Gather Unit (AbstractController::coalesceExtensions
-// and idrVerdict: 0 send, 1 drop, 2 lift the parked IDR to a write)
+// and idrVerdict: 0 send, 1 drop)
 void coalesceExtensions(Addr, DataBlock);
 int idrVerdict(Addr, bool);
-Addr parkedIdrHovId(Addr);
 void noteIdrSent(Addr, Addr, bool, int);
 void noteIdrAcked(Addr);
-void noteIdrParked(Addr);
-void noteIdrResent(Addr);
+
+// The target flow (AbstractController; docs/agents/2026-10-25-wp0/PLAN.md)
+bool hovMarkExpect(Addr, DataBlock, bool);
+Addr hovExpectAddr(Addr);
+bool hovExpectWrite(Addr);
+std::string hovExpectName(Addr);
+bool peekDependentHasExpect(Addr);
+void hovTrackerOpen(int, Addr, bool, bool, bool);
+void hovTrackerClose(int, int, bool);
+void countHovFwd(int);
+void countHovExpect(int);
+void countHovDeliver(int);
+void countHovDupDropped();
+void hovNoteDeliveredNoExpect(Addr);
+bool hovTakeDeliveredNoExpect(Addr);
+void hovDeclineBegin(Addr, int);
+bool hovDeclining(Addr);
+void hovDeclineChunk(Addr);
 
 // Index DAGs stashed above the Gather Unit until the line's write-back
 bool hasDAG(RequestPtr);

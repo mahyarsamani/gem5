@@ -71,6 +71,17 @@ in_port(useTimerTable_in, Addr, useTimerTable, rank=11) {
   }
 }
 
+// MYSTUFF: an Indirect Unit TBE that waits for an expected block gives up
+// (hov_expect_timeout)
+in_port(hovExpectTimer_in, Addr, hovExpectTimers, rank=12) {
+  if (hovExpectTimer_in.isReady(clockEdge())) {
+      Addr readyAddress := hovExpectTimers.nextAddress();
+      trigger(Event:HovExpectTimeout, readyAddress,
+              getCacheEntry(readyAddress), getCurrentActiveTBE(readyAddress));
+  }
+}
+// FFUTSYM
+
 
 // Response
 in_port(rspInPort, CHIResponseMsg, rspIn, rank=10,
@@ -85,21 +96,6 @@ in_port(rspInPort, CHIResponseMsg, rspIn, rank=10,
         TBE tbe := getDvmTBE(in_msg.txnId);
         trigger(respToEvent(in_msg.type, tbe), in_msg.txnId,
                 nullCacheEntry(), tbe);
-      } else if (gather_unit &&
-                 (in_msg.secondType != CHIRequestType:null) &&
-                 ((in_msg.type == CHIResponseType:HovAck) ||
-                  (in_msg.type == CHIResponseType:RetryAck) ||
-                  (in_msg.type == CHIResponseType:PCrdGrant))) {
-        // MYSTUFF
-        // A response to an IDR (secondType is set only for those). The hov
-        // TBE is a transaction keyed by the hov id the IDR carried as
-        // txnId, never by the data line, and it has no cache entry:
-        // setState then only touches the hov TBE.
-        TBE tbe := hovTBEs[in_msg.txnId];
-        assert(is_valid(tbe));
-        trigger(hovRespToEvent(in_msg.type), in_msg.txnId,
-                nullCacheEntry(), tbe);
-        // FFUTSYM
       } else {
         TBE tbe := getCurrentActiveTBE(in_msg.addr);
         trigger(respToEvent(in_msg.type, tbe), in_msg.addr,
@@ -123,6 +119,28 @@ in_port(datInPort, CHIDataMsg, datIn, rank=9,
       // We don't have any transactions that use data requests
       assert(!in_msg.usesTxnId);
       assert((in_msg.bitMask.count() <= data_channel_size) && (in_msg.bitMask.count() > 0));
+      // MYSTUFF: the target flow. A block the Gather Unit delivered to this
+      // Indirect Unit (hov_fwd) goes to a TBE that still waits for data of
+      // its type (an expect's, or the core's own miss: the stock CompData
+      // transitions), else into a TBE allocated on arrival when the line is
+      // absent and idle, else it is declined. Never recycled: the Gather
+      // Unit's transaction waits for this cache's CompAck.
+      if (indirect_unit && in_msg.hov_fwd) {
+        TBE tbe := getCurrentActiveTBE(in_msg.addr);
+        CacheEntry cache_entry := getCacheEntry(in_msg.addr);
+        if (hovDeclining(in_msg.addr)) {
+          trigger(Event:HovDeclineCont, in_msg.addr, cache_entry, tbe);
+        } else if (is_valid(tbe) && tbe.is_req_tbe &&
+                   tbe.expected_req_resp.expectsData(in_msg.type)) {
+          trigger(dataToEvent(in_msg.type), in_msg.addr, cache_entry, tbe);
+        } else if (is_invalid(tbe) && is_invalid(cache_entry) &&
+                   storTBEs.areNSlotsAvailable(1)) {
+          trigger(Event:HovDeliver, in_msg.addr, cache_entry, tbe);
+        } else {
+          trigger(Event:HovDecline, in_msg.addr, cache_entry, tbe);
+        }
+      }
+      // FFUTSYM
       trigger(dataToEvent(in_msg.type), in_msg.addr,
               getCacheEntry(in_msg.addr), getCurrentActiveTBE(in_msg.addr));
     }
@@ -224,13 +242,6 @@ in_port(retryTriggerInPort, RetryTriggerMsg, retryTriggerQueue, rank=6,
         CacheEntry entry := nullCacheEntry();
         assert(is_valid(tbe));
         trigger(ev, in_msg.addr, entry, tbe);
-      } else if ((ev == Event:DoRetry) &&
-                 (in_msg.secondType != CHIRequestType:null)) {
-        // MYSTUFF: DoRetry for an IDR; txnId is the hov id (see hovTBEs).
-        TBE tbe := hovTBEs[in_msg.txnId];
-        assert(is_valid(tbe));
-        trigger(ev, in_msg.txnId, nullCacheEntry(), tbe);
-        // FFUTSYM
       } else {
         TBE tbe := getCurrentActiveTBE(in_msg.addr);
         CacheEntry entry := getCacheEntry(in_msg.addr);
@@ -346,6 +357,21 @@ in_port(reqRdyPort, CHIRequestMsg, reqRdy, rank=3,
         TBE tbe := getCurrentActiveTBE(in_msg.addr);
 
         DirEntry dir_entry := getDirEntry(in_msg.addr);
+
+        // MYSTUFF: the target flow at the Gather Unit, decided by the line's
+        // directory when no transaction holds the line (a busy line stalls
+        // the request, which is decided again when woken). An injected
+        // request for a block the Indirect Unit holds sends nothing; the
+        // Indirect Unit's own request for a block a delivery already gave
+        // it is dropped.
+        if (gather_unit && is_invalid(tbe)) {
+          if (in_msg.hov_fwd && hovIUHolds(dir_entry, in_msg.requestor)) {
+            trigger(Event:HovFwdHeld, in_msg.addr, cache_entry, tbe);
+          } else if (isHovDup(in_msg, dir_entry)) {
+            trigger(Event:HovDupDrop, in_msg.addr, cache_entry, tbe);
+          }
+        }
+        // FFUTSYM
 
         // Special case for possibly stale writebacks or evicts
         if (in_msg.type == CHIRequestType:WriteBackFull) {

@@ -102,12 +102,17 @@ enumeration(CHIRequestType, desc="") {
   // its read or write intent is in the DAG.
   ReadIndex;
 
-  // A value access: an IDR from the Gather Unit, or the core's own uop1
-  // (the Sequencer's LDVAL/STVAL), told apart by requestor (isIdr).
+  // A value access: the core's own uop1 (the Sequencer's LDVAL/STVAL);
+  // as a secondType, also the intent of a request the Gather Unit injects
+  // on the Indirect Unit's behalf (hov_fwd).
   ReadValue;
   WriteValue;
 
   NotifyIndIdx;
+
+  // Internal to the Indirect Unit: the expect a Gather Unit's index data
+  // carried (3a), queued on reqRdy for the data line it names.
+  HovExpect;
 
   PropagateEvict;
   // FFUTSYM
@@ -162,6 +167,15 @@ structure(CHIRequestMsg, desc="", interface="Message") {
 
   bool hov_spec,                 default="false", desc="An IDR the Gather Unit speculated";
 
+  // The target flow (3b): a request the Gather Unit injects into its own
+  // request path with the Indirect Unit as requestor, and the tracker
+  // slot it holds. Lane mask and register id are 0 for the scalar form
+  // (the vector form sets them).
+  bool hov_fwd,                  default="false", desc="Injected by the Gather Unit on the Indirect Unit's behalf";
+  int  hov_slot,                 default="-1",    desc="Gather Unit tracker slot of an injected request";
+  int  hov_lane_mask,            default="0",     desc="Lanes of a register this block serves (vector form)";
+  Addr hov_reg_id,               default="0",     desc="Register the lanes belong to (vector form; 0: scalar)";
+
   // Lifetime usefulness (DataBlock::setLifetime) for dataless evictions.
   int life_origin,               default="-1", desc="Lifetime origin core (-1: none)";
   WriteMask life_origin_mask,    desc="Lifetime bytes the origin core used";
@@ -196,9 +210,6 @@ enumeration(CHIResponseType, desc="...") {
   RetryAck;
   PCrdGrant;
 
-  // HOV-specific ack for ReadValue/WriteValue acceptance
-  HovAck;
-
   // HOV-specific ack for NotifyIndIdx
   NotifAck;
 
@@ -208,7 +219,6 @@ enumeration(CHIResponseType, desc="...") {
 structure(CHIResponseMsg, desc="", interface="Message") {
   Addr addr,            desc="Line address";
   CHIResponseType type, desc="Response type";
-  CHIRequestType secondType, desc="Original request type (for HOV dispatch)", default="CHIRequestType_null";
   MachineID responder,  desc="Responder ID";
   NetDest Destination,  desc="Response destination";
   bool stale,           desc="Response to a stale request";
@@ -222,6 +232,11 @@ structure(CHIResponseMsg, desc="", interface="Message") {
   int life_origin,               default="-1", desc="Lifetime origin core (-1: none)";
   WriteMask life_origin_mask,    desc="Lifetime bytes the origin core used";
   WriteMask life_others_mask,    desc="Lifetime bytes other cores used";
+
+  // The target flow: a CompAck with which the Indirect Unit declines a
+  // delivery it cannot take; the Gather Unit then keeps the block and
+  // leaves its directory as it was.
+  bool hov_declined,             default="false", desc="CompAck for a delivery the Indirect Unit dropped";
   // FFUTSYM
 
   MessageSizeType MessageSize, default="MessageSizeType_Control";
@@ -272,6 +287,19 @@ structure(CHIDataMsg, desc="", interface="Message") {
   WriteMask bitMask,    desc="Which bytes in the data block are valid";
   bool usesTxnId,       desc="True if using a Transaction ID", default="false";
   Addr txnId,           desc="Transaction ID", default="0";
+
+  // MYSTUFF: the target flow. A delivery (5) is the CompData of a request
+  // the Gather Unit injected for the Indirect Unit (hov_fwd); the index
+  // data of an ldind/stind names the data block the Indirect Unit should
+  // expect (3a, hov_expect*). Lane mask and register id: vector form.
+  bool hov_fwd,                  default="false", desc="CompData of a request injected on the Indirect Unit's behalf";
+  bool hov_expect,               default="false", desc="Index data that names a data block to expect";
+  Addr hov_expect_addr,          default="0",     desc="Line address of the data block to expect";
+  bool hov_expect_unique,        default="false", desc="The expected block comes writable (stind)";
+  int  hov_lane_mask,            default="0",     desc="Lanes of a register this block serves (vector form)";
+  Addr hov_reg_id,               default="0",     desc="Register the lanes belong to (vector form; 0: scalar)";
+  std::string hov_access_name,   desc="Access name of the delivered or expected block";
+  // FFUTSYM
 
   MessageSizeType MessageSize, default="MessageSizeType_Data";
 

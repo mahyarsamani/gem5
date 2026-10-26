@@ -104,22 +104,15 @@ State getState(TBE tbe, CacheEntry cache_entry, Addr addr) {
 }
 
 void setState(TBE tbe, CacheEntry cache_entry, Addr addr, State state) {
-  // MYSTUFF: a hov TBE (an IDR the Gather Unit sent, state HOV_PEND) is a
-  // transaction keyed by its hov id, not a line; its state never belongs
-  // to a cache or directory entry.
-  bool is_hov := is_valid(tbe) && (tbe.state == State:HOV_PEND);
-  // FFUTSYM
   if (is_valid(tbe)) {
     tbe.state := state;
   }
-  if (is_hov == false) {
-    if (is_valid(cache_entry)) {
-      cache_entry.state := state;
-    }
-    DirEntry dir_entry := getDirEntry(addr);
-    if (is_valid(dir_entry)) {
-      dir_entry.state := state;
-    }
+  if (is_valid(cache_entry)) {
+    cache_entry.state := state;
+  }
+  DirEntry dir_entry := getDirEntry(addr);
+  if (is_valid(dir_entry)) {
+    dir_entry.state := state;
   }
 }
 
@@ -228,7 +221,8 @@ bool isIndirectIdx(CHIRequestType type, CHIRequestType second_type) {
 }
 
 // A value access (ReadValue/WriteValue), whatever type it was mapped to
-// locally: an IDR, or the core's own uop1 (LDVAL/STVAL).
+// locally: the core's own uop1 (LDVAL/STVAL), or a request the Gather
+// Unit injected on the Indirect Unit's behalf.
 bool isIndirectVal(CHIRequestType type, CHIRequestType second_type)
 {
     return (
@@ -237,14 +231,14 @@ bool isIndirectVal(CHIRequestType type, CHIRequestType second_type)
     );
 }
 
-// An IDR: a value access another controller (the Gather Unit) sent here.
-// The core's own uop1 (LDVAL/STVAL) is a value access whose requestor is
-// this controller; it is a normal load or store here (TBE id,
-// Sequencer callback, demand stats) and an IDR's HovAck is not its.
-bool isIdr(CHIRequestType type, CHIRequestType second_type,
-           MachineID requestor)
+// An IDR's transaction (the target flow): at the Gather Unit, the request
+// it injected on the Indirect Unit's behalf (hov_fwd); at the Indirect
+// Unit, a TBE that waits for or takes a delivered block (hov_recv). No
+// Sequencer request is behind either, and their hit and miss counts are
+// the idr* counters, apart from the core's own uop1.
+bool isHovIdr(TBE tbe)
 {
-    return isIndirectVal(type, second_type) && (requestor != machineID);
+    return tbe.hov_fwd || (tbe.hov_recv != 0);
 }
 // FFUTSYM
 
@@ -480,58 +474,6 @@ void initializeTBE(TBE tbe, Addr addr, int storSlot) {
   tbe.is_stale := false;
 }
 
-// Initialize a HOV TBE with all fields needed for retry tracking.
-// Unlike initializeTBE, this populates the pendReq* fields so that
-// prepareRequestRetry produces valid messages if the request is retried.
-// The table key is hov_id (tbe.txnId); tbe.addr is the data line, which is
-// what prepareRequestRetry puts on the wire. HOV_PEND is the only state a
-// hov TBE ever has, and is what identifies it as one.
-void initializeHovTBE(TBE hovTbe, Addr hov_id, Addr acc_addr, int storSlot,
-                      CHIRequestType reqType, RequestPtr depReq,
-                      NetDest dest, TBE parentTbe) {
-  // Base initialization
-  initializeTBE(hovTbe, makeLineAddress(acc_addr), storSlot);
-
-  hovTbe.txnId := hov_id;
-  hovTbe.state := State:HOV_PEND;
-  hovTbe.requestor := machineID;
-  // The IDR carries no secondType on the wire; its type is pendReqType.
-  hovTbe.secondType := CHIRequestType:null;
-
-  // A HOV TBE only waits for the HovAck from the Indirect Unit.
-  // RetryAck/PCrdGrant are tracked by rcvdRetryAck/rcvdRetryCredit,
-  // as for regular requests, and are not counted here.
-  hovTbe.expected_req_resp.addExpectedRespType(CHIResponseType:HovAck);
-  hovTbe.expected_req_resp.setExpectedCount(1);
-
-  // hovTbe never goes through set_tbe(), so its NetDest fields have no
-  // RubySystem. Size dir_sharers from dest and clear it so debug prints
-  // (printTBEState) don't assert.
-  hovTbe.dir_sharers := dest;
-  hovTbe.dir_sharers.clear();
-
-  // Retry fields — read by prepareRequestRetry
-  hovTbe.pendReqAllowRetry := true;
-  hovTbe.rcvdRetryAck := false;
-  hovTbe.rcvdRetryCredit := false;
-  hovTbe.pendReqType := reqType;
-  hovTbe.pendReqAccAddr := acc_addr;
-  hovTbe.pendReqAccSize := getSize(depReq);
-  hovTbe.pendReqDest := dest;
-
-  // Request pointer for the retry message
-  hovTbe.seqReq := depReq;
-  hovTbe.isSeqReqValid := true;
-
-  // Propagate HOV designation IDs from parent TBE
-  hovTbe.indirect_unit_id := parentTbe.indirect_unit_id;
-  hovTbe.value_unit_id := parentTbe.value_unit_id;
-  hovTbe.gather_unit_id := parentTbe.gather_unit_id;
-  // The alias comes from the IDR's own descriptor, not the parent TBE
-  // (a merged DAG carries several aliases).
-  hovTbe.alias := getIndirectAlias(depReq);
-}
-
 TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes" {
   // We must have reserved resources for this allocation
   storTBEs.decrementReserved();
@@ -541,16 +483,12 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   TBE tbe := TBEs[addr];
 
   initializeTBE(tbe, addr, storTBEs.addEntryToNewSlot());
-  // MYSTUFF: an IDR becomes a Load/Store here (manipulateType) but keeps
-  // the hov id the Gather Unit gave it as txnId; Send_HovAck returns it.
-  if (fromSequencer(in_msg.type) &&
-      (isIdr(in_msg.type, in_msg.secondType, in_msg.requestor) == false)) {
+  if (fromSequencer(in_msg.type)) {
     assert(in_msg.txnId == max_outstanding_transactions);
     tbe.txnId := static_cast(Addr, "value", tbe.storSlot);
   } else {
     tbe.txnId := in_msg.txnId;
   }
-  // FFUTSYM
   tbe.ns := in_msg.ns;
 
   assert(tbe.is_snp_tbe == false);
@@ -594,6 +532,13 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   DPRINTF(Usefulness, "Setting access_name for tbe for addr: %#lx from %s to %s.\n", addr, tbe.access_name, in_msg.access_name);
   tbe.access_name := in_msg.access_name;
 
+  // The target flow: an injected request and its tracker slot
+  tbe.hov_fwd := in_msg.hov_fwd;
+  tbe.hov_slot := in_msg.hov_slot;
+  tbe.hov_lane_mask := in_msg.hov_lane_mask;
+  tbe.hov_reg_id := in_msg.hov_reg_id;
+  tbe.hov_recv := 0;
+  tbe.hov_expect_pending := false;
   // FFUTSYM
   return tbe;
 }
@@ -921,12 +866,6 @@ void enqueueDoRetry(TBE tbe) {
       out_msg.addr := tbe.addr;
       out_msg.usesTxnId := tbe.is_dvm_tbe || tbe.is_dvm_snp_tbe;
       out_msg.event := Event:DoRetry;
-      // MYSTUFF: a hov TBE is found by its hov id, not by the data line
-      if (tbe.state == State:HOV_PEND) {
-        out_msg.txnId := tbe.txnId;
-        out_msg.secondType := tbe.pendReqType;
-      }
-      // FFUTSYM
     }
     destsWaitingRetry.removeNetDest(tbe.pendReqDest);
   }
@@ -946,10 +885,6 @@ void processRetryQueue() {
       out_msg.usesTxnId := e.usesTxnId;
       out_msg.retryDest := e.retryDest;
       out_msg.event := Event:SendPCrdGrant;
-      // MYSTUFF: so the PCrdGrant for an IDR reaches its hov TBE
-      out_msg.txnId := e.txnId;
-      out_msg.secondType := e.secondType;
-      // FFUTSYM
     }
   }
 }
@@ -1230,6 +1165,104 @@ void copyCacheAndDirTBEs(TBE src, TBE dst) {
   // FFUTSYM
   printTBEState(dst);
 }
+
+// MYSTUFF: the target flow at the Indirect Unit. A TBE no Sequencer
+// request is behind: it waits for an expected block (kind 1) or takes a
+// delivered one on arrival (kind 2), shaped as a load miss whose
+// ReadShared (ReadUnique for a write) someone else sent. Its requestor is
+// the Gather Unit, so it is neither in the core's budget (storSeqTBEs) nor
+// called back to the Sequencer (isHovIdr).
+TBE allocateHovRecvTBE(Addr addr, MachineID requestor, bool unique,
+                       std::string access_name), return_by_pointer="yes" {
+  assert(storTBEs.areNSlotsAvailable(1));
+  TBEs.allocate(addr);
+  TBE tbe := TBEs[addr];
+  initializeTBE(tbe, addr, storTBEs.addEntryToNewSlot());
+  tbe.txnId := static_cast(Addr, "value", tbe.storSlot);
+  tbe.is_req_tbe := true;
+  tbe.accAddr := addr;
+  tbe.accSize := blockSize;
+  tbe.requestor := requestor;
+  tbe.fwdRequestor := requestor;
+  if (unique) {
+    tbe.reqType := CHIRequestType:Store;
+    tbe.secondType := CHIRequestType:WriteValue;
+  } else {
+    tbe.reqType := CHIRequestType:Load;
+    tbe.secondType := CHIRequestType:ReadValue;
+  }
+  tbe.isSeqReqValid := false;
+  tbe.is_local_pf := false;
+  tbe.is_remote_pf := false;
+  tbe.atomic_op.clear();
+  tbe.atomic_to_be_done := false;
+  tbe.atomic_to_be_wb := false;
+  tbe.use_DMT := false;
+  tbe.use_DCT := false;
+  tbe.hasUseTimeout := false;
+  tbe.access_name := access_name;
+  tbe.hov_fwd := false;
+  return tbe;
+}
+
+void hovSetupRecvTBE(TBE tbe, CacheEntry cache_entry, State initial, int kind) {
+  assert(indirect_unit);
+  assert(is_invalid(cache_entry));
+  copyCacheAndDir(cache_entry, getDirEntry(tbe.addr), tbe, initial);
+  tbe.hov_recv := kind;
+  tbe.indirect_unit_id := machineID;
+  bool alloc_entry := needCacheEntry(tbe.reqType, tbe.secondType,
+                                     cache_entry, getDirEntry(tbe.addr),
+                                     false);
+  tbe.dataToBeInvalid := (alloc_entry == false);
+  tbe.doCacheFill := alloc_entry;
+  // Any CompData completes it: a store that finds the line shared
+  // upgrades it afterwards, as it does today.
+  clearExpectedReqResp(tbe);
+  tbe.expected_req_resp.addExpectedDataType(CHIDataType:DataSepResp_UC);
+  tbe.expected_req_resp.addExpectedDataType(CHIDataType:CompData_UC);
+  tbe.expected_req_resp.addExpectedDataType(CHIDataType:CompData_UD_PD);
+  tbe.expected_req_resp.addExpectedDataType(CHIDataType:CompData_SC);
+  tbe.expected_req_resp.addExpectedDataType(CHIDataType:CompData_SD_PD);
+  // the first CompData counts as RespSepData, as for Send_ReadShared
+  tbe.expected_req_resp.addExpectedRespType(CHIResponseType:RespSepData);
+  tbe.expected_req_resp.setExpectedCount(2);
+  tbe.dataBlkValid.clear();
+  // the tag check, then the fill once the data is here
+  tbe.actions.pushNB(Event:TagArrayRead);
+  tbe.actions.push(Event:CheckCacheFill);
+  tbe.actions.push(Event:TagArrayWrite);
+}
+
+// Gather Unit: the directory lists the Indirect Unit as holding the line,
+// so an injected request for it sends nothing (any copy counts, also for
+// a write: the core's store upgrades a shared copy as today).
+bool hovIUHolds(DirEntry dir_entry, MachineID iu) {
+  if (is_valid(dir_entry)) {
+    return dir_entry.sharers.isElement(iu);
+  }
+  return false;
+}
+
+// Gather Unit: an upstream cache's own read for a line the directory lists
+// it as holding with the permission it asks for. A cache never re-requests
+// such a line in this protocol (a clean eviction sends Evict first), except
+// when its TBE took a delivery as this request's data: nothing is owed.
+bool isHovDup(CHIRequestMsg msg, DirEntry dir_entry) {
+  if ((gather_unit == false) || msg.hov_fwd || is_invalid(dir_entry)) {
+    return false;
+  }
+  if ((msg.type == CHIRequestType:ReadShared) ||
+      (msg.type == CHIRequestType:ReadNotSharedDirty)) {
+    return dir_entry.sharers.isElement(msg.requestor);
+  }
+  if (msg.type == CHIRequestType:ReadUnique) {
+    return dir_entry.ownerExists && dir_entry.ownerIsExcl &&
+           (dir_entry.owner == msg.requestor);
+  }
+  return false;
+}
+// FFUTSYM
 
 void deallocateReqTBE(TBE tbe) {
   assert(is_valid(tbe));
@@ -1588,6 +1621,10 @@ Event reqToEvent(CHIRequestType type, bool is_prefetch) {
     } else {
       return Event:Fwd_NotifyIndIdx;
     }
+  } else if (type == CHIRequestType:HovExpect) {
+    // MYSTUFF: the target flow, internal to the Indirect Unit
+    assert(indirect_unit);
+    return Event:HovExpect;
   } else {
     error("Invalid CHIRequestType");
   }
@@ -1667,22 +1704,6 @@ Event respToEvent (CHIResponseType type, TBE tbe) {
     error("Invalid CHIResponseType");
   }
 }
-
-// MYSTUFF
-// Responses to an IDR, handled on the hov TBE (state HOV_PEND). No PoC or
-// hazard variants: a hov TBE is neither a home node transaction nor a line.
-Event hovRespToEvent(CHIResponseType type) {
-  if (type == CHIResponseType:HovAck) {
-    return Event:HovAck;
-  } else if (type == CHIResponseType:RetryAck) {
-    return Event:RetryAck;
-  } else if (type == CHIResponseType:PCrdGrant) {
-    return Event:PCrdGrant;
-  } else {
-    error("Invalid CHIResponseType for a hov TBE");
-  }
-}
-// FFUTSYM
 
 Event dataToEvent (CHIDataType type) {
   if (type == CHIDataType:CompData_I) {
@@ -1968,15 +1989,15 @@ void populateFromSeqReqMsg(CHIRequestMsg &out_msg, RubyRequest in_msg) {
       } else {
         out_msg.type := CHIRequestType:Store;
       }
-    // MYSTUFF: the two uops of an ldind or stind. Like an IDR arriving
-    // from the Gather Unit, each becomes a Load or Store here with its kind
-    // kept as secondType (manipulateType, manipulateSecondType), so the
-    // levels below see an index access (ReadIndex) or a value access
-    // (ReadValue/WriteValue: allocation by alloc_for_*_value, no training
-    // of the Gather Unit's prefetcher). Unmarked, a uop1 miss would reach
-    // the Gather Unit as a plain load sharing the ldind's PC with uop0,
-    // and its random data lines would keep the stride table from learning
-    // the index stream. IDRs stay apart from uop1 by requestor (isIdr).
+    // MYSTUFF: the two uops of an ldind or stind. Each becomes a Load or
+    // Store here with its kind kept as secondType (manipulateType,
+    // manipulateSecondType), so the levels below see an index access
+    // (ReadIndex) or a value access (ReadValue/WriteValue: allocation by
+    // alloc_for_*_value, no training of the Gather Unit's prefetcher).
+    // Unmarked, a uop1 miss would reach the Gather Unit as a plain load
+    // sharing the ldind's PC with uop0, and its random data lines would
+    // keep the stride table from learning the index stream. The Gather
+    // Unit's injected requests stay apart from uop1 by hov_fwd.
     } else if (in_msg.Type == RubyRequestType:LDIDX) {
       out_msg.type := CHIRequestType:ReadIndex;
     } else if (in_msg.Type == RubyRequestType:LDVAL) {
@@ -2040,42 +2061,6 @@ void replicateRequestMsg(CHIRequestMsg &out_msg, CHIRequestMsg in_msg)
     out_msg.hov_spec := in_msg.hov_spec;
 }
 
-
-void indirectDependentBoilerPlate(CHIRequestMsg &out_msg)
-{
-    out_msg.requestor := machineID;
-
-    out_msg.dataToFwdRequestor := false;
-    // NOTE: I don't know what to set for this right now. Might be able to set
-    // this to true later if we have compaction. I am starting to believe that
-    // I really need a HOVHelper SimObject at this point.
-    // out_msg.fwdRequestor :=
-
-    // NOTE: allowRetry is set explicitly by the caller (e.g. from hovTbe)
-    out_msg.isSeqReqValid := false;
-    // NOTE: Defaults to nullptr.
-    // out_msg.seqReq := null;
-    out_msg.is_local_pf := false;
-    out_msg.is_remote_pf := false;
-
-    // NOTE: Maybe able to use this for access id;
-    // NOTE: Defaults to false;
-    // out_msg.usesTxnId := false;
-    // NOTE: Defaults to 0;
-    out_msg.txnId := max_outstanding_transactions;
-
-
-    out_msg.secondType := CHIRequestType:null;
-}
-
-void fillInMsgFromReq(CHIRequestMsg &out_msg, RequestPtr req)
-{
-    out_msg.seqReq := req;
-    out_msg.isSeqReqValid := true;
-    out_msg.accAddr := getAddr(req);
-    out_msg.addr := makeLineAddress(getAddr(req));
-    out_msg.accSize := getSize(req);
-}
 
 bool cachedHere(State state)
 {

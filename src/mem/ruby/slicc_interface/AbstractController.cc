@@ -132,6 +132,14 @@ AbstractController::init()
     for (auto abs_cntrl : params().upstream_destinations) {
         upstreamDestinations.add(abs_cntrl->getMachineID());
     }
+
+    // MYSTUFF: the target flow asks the Gather Unit's own downstream path
+    // for a data block; naming other Value Units is the shared Gather
+    // Unit's extension (post-QE plan, WP13), not implemented yet.
+    fatal_if(!params().value_unit_destinations.empty(),
+             "%s: value_unit_destinations is not implemented yet (the "
+             "shared Gather Unit, WP13); leave it empty.", name());
+    // FFUTSYM
 }
 
 void
@@ -979,11 +987,6 @@ AbstractController::idrVerdict(Addr data_line, bool write)
     auto in_flight = m_idrInFlight.find(data_line);
     if (in_flight != m_idrInFlight.end()) {
         if (write && !in_flight->second.write) {
-            if (in_flight->second.parked) {
-                in_flight->second.write = true;
-                stats.idrUpgradedInRetry++;
-                return IDR_UPGRADE;
-            }
             stats.idrIntentLost++;
         }
         stats.idrDroppedInFlight++;
@@ -1000,23 +1003,19 @@ AbstractController::idrVerdict(Addr data_line, bool write)
     return IDR_SEND;
 }
 
-Addr
-AbstractController::parkedIdrHovId(Addr data_line)
-{
-    auto it = m_idrInFlight.find(data_line);
-    panic_if(it == m_idrInFlight.end() || !it->second.parked,
-             "parkedIdrHovId: no parked IDR to data line %#x.", data_line);
-    return it->second.hovId;
-}
-
 void
 AbstractController::noteIdrSent(Addr data_line, Addr hov_id, bool write,
                                 int recent_lines)
 {
-    auto inserted = m_idrInFlight.emplace(data_line,
-                                          IdrInFlight{hov_id, write});
-    panic_if(!inserted.second, "noteIdrSent: an IDR to data line %#x is "
-             "already in flight.", data_line);
+    // More than one in flight to a line only when the Indirect Unit
+    // expects each (an expect-named entry is never coalesced away).
+    auto in_flight = m_idrInFlight.find(data_line);
+    if (in_flight != m_idrInFlight.end()) {
+        in_flight->second.count++;
+        in_flight->second.write |= write;
+    } else {
+        m_idrInFlight.emplace(data_line, IdrInFlight{hov_id, write});
+    }
     if (recent_lines <= 0) {
         return;
     }
@@ -1034,26 +1033,177 @@ AbstractController::noteIdrSent(Addr data_line, Addr hov_id, bool write,
 void
 AbstractController::noteIdrAcked(Addr data_line)
 {
-    panic_if(m_idrInFlight.erase(data_line) == 0,
-             "noteIdrAcked: no IDR in flight to data line %#x.", data_line);
-}
-
-void
-AbstractController::noteIdrParked(Addr data_line)
-{
     auto it = m_idrInFlight.find(data_line);
     panic_if(it == m_idrInFlight.end(),
-             "noteIdrParked: no IDR in flight to data line %#x.", data_line);
-    it->second.parked = true;
+             "noteIdrAcked: no IDR in flight to data line %#x.", data_line);
+    if (--it->second.count == 0) {
+        m_idrInFlight.erase(it);
+    }
+}
+
+bool
+AbstractController::hovMarkExpect(Addr line_addr, DataBlock &index_data,
+                                  bool coalesce)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    if (it == m_cachedEntries.end()) {
+        return false;
+    }
+    for (auto &entry : it->second.entries) {
+        if (entry.spec) {
+            continue;
+        }
+        // The uop0's own entry: its data line, read without marking the
+        // index element (TriageIDR reads it when it handles the entry).
+        int offset;
+        size_t index_size;
+        uint64_t index_value =
+            indexValue(*entry.dag, index_data, offset, index_size);
+        Addr data_line = makeLineAddress(entry.dag->genAddress(index_value));
+        if (!isMappedDownstream(data_line)) {
+            return false;
+        }
+        if (coalesce && (m_idrInFlight.count(data_line) ||
+                         m_idrRecent.count(data_line))) {
+            return false;
+        }
+        entry.expect = true;
+        entry.expectLine = data_line;
+        stats.hovExpectSent++;
+        return true;
+    }
+    return false;
+}
+
+const AbstractController::DependentEntry &
+AbstractController::expectEntry(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end(),
+             "expectEntry: no entries for index line %#x.", line_addr);
+    for (const auto &entry : it->second.entries) {
+        if (entry.expect) {
+            return entry;
+        }
+    }
+    panic("expectEntry: no expect on index line %#x.", line_addr);
+}
+
+Addr
+AbstractController::hovExpectAddr(Addr line_addr)
+{
+    return expectEntry(line_addr).expectLine;
+}
+
+bool
+AbstractController::hovExpectWrite(Addr line_addr)
+{
+    return expectEntry(line_addr).write;
+}
+
+std::string
+AbstractController::hovExpectName(Addr line_addr)
+{
+    // As getDependentReq names the IDR: the array's name, else hov<p>_data
+    const auto &desc = expectEntry(line_addr).dag->descriptor(0);
+    return desc.dataName.empty() ? csprintf("hov%u_data", desc.pair)
+                                 : desc.dataName;
+}
+
+bool
+AbstractController::peekDependentHasExpect(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
+             "peekDependentHasExpect: no cached entries for line_addr %#x.",
+             line_addr);
+    return it->second.entries.front().expect;
 }
 
 void
-AbstractController::noteIdrResent(Addr data_line)
+AbstractController::hovTrackerOpen(int slot, Addr data_line, bool write,
+                                   bool spec, bool expect)
 {
-    auto it = m_idrInFlight.find(data_line);
-    panic_if(it == m_idrInFlight.end() || !it->second.parked,
-             "noteIdrResent: no parked IDR to data line %#x.", data_line);
-    it->second.parked = false;
+    auto inserted = m_hovTracker.emplace(
+        slot, HovTrack{data_line, write, spec, expect, curCycle()});
+    panic_if(!inserted.second, "hovTrackerOpen: tracker slot %d is in use.",
+             slot);
+    stats.hovFwd[0]++;
+}
+
+void
+AbstractController::hovTrackerClose(int slot, int outcome, bool coalesce)
+{
+    auto it = m_hovTracker.find(slot);
+    panic_if(it == m_hovTracker.end(),
+             "hovTrackerClose: tracker slot %d is free.", slot);
+    switch (outcome) {
+      case 0:
+        stats.hovFwd[2]++;
+        stats.hovFwdLatency.sample(curCycle() - it->second.made);
+        break;
+      case 1:
+        stats.hovFwd[3]++;
+        stats.hovFwdLatency.sample(curCycle() - it->second.made);
+        break;
+      case 2:
+        stats.hovFwd[1]++;
+        break;
+      default:
+        panic("hovTrackerClose: unknown outcome %d.", outcome);
+    }
+    if (coalesce) {
+        noteIdrAcked(it->second.dataLine);
+    }
+    m_hovTracker.erase(it);
+}
+
+void
+AbstractController::hovNoteDeliveredNoExpect(Addr line_addr)
+{
+    m_hovDeliveredFifo.push_back(line_addr);
+    while (m_hovDeliveredFifo.size() > 64) {
+        m_hovDeliveredFifo.pop_front();
+    }
+}
+
+bool
+AbstractController::hovTakeDeliveredNoExpect(Addr line_addr)
+{
+    auto it = std::find(m_hovDeliveredFifo.begin(), m_hovDeliveredFifo.end(),
+                        line_addr);
+    if (it == m_hovDeliveredFifo.end()) {
+        return false;
+    }
+    m_hovDeliveredFifo.erase(it);
+    return true;
+}
+
+void
+AbstractController::hovDeclineBegin(Addr line_addr, int more_chunks)
+{
+    panic_if(m_hovDeclining.count(line_addr),
+             "hovDeclineBegin: %#x is already being declined.", line_addr);
+    if (more_chunks > 0) {
+        m_hovDeclining[line_addr] = more_chunks;
+    }
+}
+
+bool
+AbstractController::hovDeclining(Addr line_addr)
+{
+    return m_hovDeclining.count(line_addr) != 0;
+}
+
+void
+AbstractController::hovDeclineChunk(Addr line_addr)
+{
+    auto it = m_hovDeclining.find(line_addr);
+    panic_if(it == m_hovDeclining.end(),
+             "hovDeclineChunk: %#x is not being declined.", line_addr);
+    if (--it->second == 0) {
+        m_hovDeclining.erase(it);
+    }
 }
 
 void
@@ -1196,9 +1346,21 @@ ControllerStats::ControllerStats(statistics::Group *parent)
       ADD_STAT(idrIntentLost,
                "write IDRs dropped over a read IDR to the same data line "
                "(uop1's store upgrades the line)"),
-      ADD_STAT(idrUpgradedInRetry,
-               "read IDRs parked in retry lifted to WriteValue by a later "
-               "write"),
+      ADD_STAT(hovFwd,
+               "Gather Unit: requests injected on the Indirect Unit's "
+               "behalf, by outcome"),
+      ADD_STAT(hovFwdLatency,
+               "Gather Unit: cycles from injecting a request to the "
+               "Indirect Unit's CompAck"),
+      ADD_STAT(hovExpectSent,
+               "Gather Unit: index data that named a data block to expect"),
+      ADD_STAT(hovDupDropped,
+               "Gather Unit: requests of an upstream cache dropped because "
+               "a delivery already served them"),
+      ADD_STAT(hovExpect,
+               "Indirect Unit: expected data blocks, by outcome"),
+      ADD_STAT(hovDeliver,
+               "Indirect Unit: delivered data blocks, by outcome"),
       ADD_STAT(hovStashOrphaned,
                "post-evict stashes turned into notifications because the "
                "line left without a replacement"),
@@ -1241,7 +1403,36 @@ ControllerStats::ControllerStats(statistics::Group *parent)
         .flags(statistics::nozero);
     idrIntentLost
         .flags(statistics::nozero);
-    idrUpgradedInRetry
+    hovFwd
+        .init(5)
+        .subname(0, "issued")
+        .subname(1, "skippedHeld")
+        .subname(2, "completed")
+        .subname(3, "declined")
+        .subname(4, "droppedNoTarget")
+        .flags(statistics::nozero);
+    hovFwdLatency
+        .init(16)
+        .flags(statistics::nozero);
+    hovExpectSent
+        .flags(statistics::nozero);
+    hovDupDropped
+        .flags(statistics::nozero);
+    hovExpect
+        .init(6)
+        .subname(0, "allocated")
+        .subname(1, "present")
+        .subname(2, "droppedNoTBE")
+        .subname(3, "afterData")
+        .subname(4, "busy")
+        .subname(5, "timedOut")
+        .flags(statistics::nozero);
+    hovDeliver
+        .init(4)
+        .subname(0, "intoExpect")
+        .subname(1, "onArrival")
+        .subname(2, "absorbed")
+        .subname(3, "declined")
         .flags(statistics::nozero);
     hovStashOrphaned
         .flags(statistics::nozero);

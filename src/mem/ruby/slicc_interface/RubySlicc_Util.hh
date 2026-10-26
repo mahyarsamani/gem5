@@ -377,17 +377,6 @@ getIndirectAlias(RequestPtr req)
     return iaa->alias();
 }
 
-// Key of a hov TBE (an IDR sent by the Gather Unit): line aligned, so the
-// protocol's directory lookups on it are legal, and above any physical
-// address, so it never matches a real line. Same rule the alias space
-// will follow.
-inline Addr
-makeHovId(int slot, int block_size)
-{
-    assert(slot >= 0);
-    return (Addr(1) << 62) | (Addr(slot) * Addr(block_size));
-}
-
 // FFUTSYM
 
 } // namespace ruby

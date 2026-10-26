@@ -1083,6 +1083,7 @@ transition({BUSY_BLKD, BUSY_INTR}, SendCompData, BUSY_BLKD) {
   Pop_TriggerQueue;
   Send_CompData;
   ScheduleIDRs;
+  Hov_AttachExpect;
   ProcessNextState_ClearPending;
 }
 
@@ -1479,9 +1480,11 @@ transition({BUSY_BLKD,BUSY_INTR}, DataSepResp_UC, BUSY_BLKD) {
 transition({BUSY_BLKD,BUSY_INTR},
             {CompData_I,CompData_SC,CompData_SD_PD,CompData_UC,CompData_UD_PD},
             BUSY_BLKD) {
+  Hov_CountDelivery;
   Receive_RespSepDataFromCompData;
   Receive_ReqDataResp;
   UpdateDataState_FromReqDataResp;
+  Hov_RecvExpect;
   Callback_Miss;
   Profile_OutgoingEnd_DataResp;
   Pop_DataInQueue;
@@ -1670,35 +1673,71 @@ transition({BUSY_BLKD, BUSY_INTR}, StashAndPostEvict) {
   ProcessNextState_ClearPending;
 }
 
-// SendHovAck: fires in BUSY, sends HovAck to gather unit
-transition({BUSY_BLKD, BUSY_INTR}, SendHovAck) {
-  Pop_TriggerQueue;
-  Send_HovAck;
-  ProcessNextState_ClearPending;
+// The target flow (docs/agents/2026-10-25-wp0/PLAN.md)
+
+// Gather Unit: the line's directory decides an injected request (3b)
+// before the stock transitions, when no transaction holds the line.
+transition({I,SC,UC,SD,UD,UD_T,RU,RSC,RSD,RUSD,SC_RSC,UC_RSC,SD_RSC,UD_RSC,UC_RU,UD_RU,UD_RSD,SD_RSD,RUSC},
+           HovFwdHeld) {
+  Hov_FwdHeld;
+  Pop_ReqRdyQueue;
 }
 
-// The hov TBE (an IDR sent by the Gather Unit) lives in HOV_PEND, keyed by
-// its hov id with no cache entry, so these transitions never touch a line.
-// Retries reuse the regular CHI actions; only the resend differs.
-transition(HOV_PEND, HovAck, I) {
-  Receive_HovAck;
-  Pop_RespInQueue;
+transition({I,SC,UC,SD,UD,UD_T,RU,RSC,RSD,RUSD,SC_RSC,UC_RSC,SD_RSC,UD_RSC,UC_RU,UD_RU,UD_RSD,SD_RSD,RUSC},
+           HovDupDrop) {
+  Hov_DupDrop;
+  Pop_ReqRdyQueue;
 }
 
-transition(HOV_PEND, RetryAck) {
-  Receive_RetryAck;
-  Note_IdrParked;
-  Pop_RespInQueue;
+// Indirect Unit: an expected block (3a). Wait for it in BUSY_INTR, the
+// state of a load miss waiting for data (snoops take the stock hazard
+// path; the core's own access stalls on the line).
+transition(I, HovExpect, BUSY_INTR) {
+  Initiate_HovExpect;
+  Pop_ReqRdyQueue;
+  ProcessNextState;
 }
 
-transition(HOV_PEND, PCrdGrant) {
-  Receive_PCrdGrant;
-  Pop_RespInQueue;
+transition({SC,UC,SD,UD,UD_T}, HovExpect) {
+  Hov_ExpectPresent;
+  Pop_ReqRdyQueue;
 }
 
-transition(HOV_PEND, DoRetry) {
-  Send_Retry_Hov;
-  Pop_RetryTriggerQueue;
+transition({BUSY_BLKD,BUSY_INTR}, HovExpect) {
+  Hov_ExpectBusy;
+  Pop_ReqRdyQueue;
+}
+
+// Indirect Unit: a delivered block (5) no TBE waits for, taken on arrival
+transition(I, HovDeliver, BUSY_BLKD) {
+  Initiate_HovDeliver;
+  Receive_RespSepDataFromCompData;
+  Receive_ReqDataResp;
+  UpdateDataState_FromReqDataResp;
+  Pop_DataInQueue;
+  ProcessNextState;
+}
+
+// Indirect Unit: a delivered block it cannot take, in any state
+transition({I,SC,UC,SD,UD,UD_T,RU,RSC,RSD,RUSD,SC_RSC,UC_RSC,SD_RSC,UD_RSC,UC_RU,UD_RU,UD_RSD,SD_RSD,RUSC,
+            BUSY_BLKD,BUSY_INTR}, HovDecline) {
+  Hov_Decline;
+  Pop_DataInQueue;
+}
+
+transition({I,SC,UC,SD,UD,UD_T,RU,RSC,RSD,RUSD,SC_RSC,UC_RSC,SD_RSC,UD_RSC,UC_RU,UD_RU,UD_RSD,SD_RSD,RUSC,
+            BUSY_BLKD,BUSY_INTR}, HovDeclineCont) {
+  Hov_DeclineCont;
+  Pop_DataInQueue;
+}
+
+// Indirect Unit: a TBE waiting for an expected block gives up
+transition({BUSY_BLKD,BUSY_INTR}, HovExpectTimeout) {
+  Hov_ExpectTimeout;
+}
+
+transition({I,SC,UC,SD,UD,UD_T}, HovExpectTimeout) {
+  Hov_ExpectTimeoutStale;
 }
 // FFUTSYM
 

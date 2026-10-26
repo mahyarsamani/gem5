@@ -51,10 +51,6 @@ action(AllocateTBE_Request, desc="") {
         assert(in_msg.addr == address);
         assert(in_msg.is_local_pf == false);
         out_msg := in_msg;
-        // MYSTUFF
-        out_msg.secondType := manipulateSecondType(in_msg);
-        out_msg.type := manipulateType(in_msg);
-        // MYSTUFF
       }
     }
 
@@ -68,16 +64,7 @@ action(AllocateTBE_Request, desc="") {
         out_msg.event := Event:SendRetryAck;
         out_msg.retryDest := in_msg.requestor;
         out_msg.txnId := in_msg.txnId;
-        // MYSTUFF: for an IDR, its type and txnId (its hov id) travel with
-        // RetryAck and, through the retry queue, with PCrdGrant, so the
-        // Gather Unit finds the hov TBE. secondType stays null otherwise.
-        if ((in_msg.type == CHIRequestType:ReadValue) ||
-            (in_msg.type == CHIRequestType:WriteValue)) {
-          out_msg.secondType := in_msg.type;
-        }
-        retryQueue.emplace(in_msg.addr, false, in_msg.requestor,
-                           in_msg.txnId, out_msg.secondType);
-        // FFUTSYM
+        retryQueue.emplace(in_msg.addr, false, in_msg.requestor);
       }
     }
   }
@@ -93,10 +80,6 @@ action(AllocateTBE_Request_WithCredit, desc="") {
     enqueue(reqRdyOutPort, CHIRequestMsg, allocation_latency) {
       assert(in_msg.addr == address);
       out_msg := in_msg;
-      // MYSTUFF: a retried IDR must be mapped like a first attempt
-      out_msg.secondType := manipulateSecondType(in_msg);
-      out_msg.type := manipulateType(in_msg);
-      // FFUTSYM
     }
   }
   reqInPort.dequeue(clockEdge());
@@ -397,11 +380,6 @@ action(Initiate_Request, desc="") {
     tbe.use_DCT := false;
   }
   // FFUTSYM
-
-  // Schedule HovAck before tag read so the gather unit knows we accepted
-  if (indirect_unit && isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
-    tbe.actions.pushNB(Event:SendHovAck);
-  }
 
   // Gather Unit: every DAG that reaches it rides seqReq, whatever the
   // carrier (an index request, a notification, a post-evict write-back
@@ -2754,6 +2732,21 @@ action(UpdateDataState_FromSnpDataResp, desc="") {
 
 action(UpdateDirState_FromReqResp, desc="") {
   peek(rspInPort, CHIResponseMsg) {
+    // MYSTUFF: the Indirect Unit declined a delivery (the target flow): it
+    // holds nothing, so the directory stays as it was and this cache keeps
+    // the block it fetched (the CheckCacheFill queued after WaitCompAck
+    // fills it), so neither it nor the Value Unit loses track of a copy.
+    if ((in_msg.type == CHIResponseType:CompAck) && in_msg.hov_declined) {
+      assert(tbe.hov_fwd);
+      assert(tbe.requestor == in_msg.responder);
+      tbe.hov_declined := true;
+      tbe.requestorToBeOwner := false;
+      tbe.requestorToBeExclusiveOwner := false;
+      tbe.dataMaybeDirtyUpstream := tbe.dir_ownerExists;
+      tbe.dataToBeInvalid := false;
+      tbe.doCacheFill := true;
+    } else
+    // FFUTSYM
     if ((in_msg.type == CHIResponseType:CompAck) && tbe.updateDirOnCompAck) {
       assert(tbe.requestor == in_msg.responder);
 
@@ -2916,36 +2909,6 @@ action(Send_Retry, desc="") {
     prepareRequestRetry(tbe, out_msg);
   }
 }
-
-// MYSTUFF
-action(Send_Retry_Hov, desc="Resend an IDR after RetryAck + PCrdGrant") {
-  assert(tbe.pendReqAllowRetry);
-  assert(tbe.rcvdRetryCredit);
-  assert(tbe.rcvdRetryAck);
-  enqueue(reqOutPort, CHIRequestMsg, request_latency) {
-    prepareRequestRetry(tbe, out_msg);
-    // prepareRequestRetry fills what a line request needs; the IDR also
-    // carries its hov id and alias, and no secondType (see IssueIDR).
-    out_msg.txnId := tbe.txnId;
-    out_msg.alias := tbe.alias;
-    out_msg.secondType := CHIRequestType:null;
-    out_msg.hov_spec := tbe.hov_spec;
-    DPRINTF(IndirectAccess, "IDR retry: hov_id=%#x data_line=%#x type=%s\n",
-            tbe.txnId, out_msg.addr, out_msg.type);
-  }
-  if (idr_coalesce) {
-    // Sent again: a later write can no longer lift it.
-    noteIdrResent(tbe.addr);
-  }
-}
-
-action(Note_IdrParked,
-       desc="A RetryAck holds the IDR here; a later write to its data line lifts it") {
-  if (idr_coalesce) {
-    noteIdrParked(tbe.addr);
-  }
-}
-// FFUTSYM
 
 action(Send_Retry_DVM, desc="") {
   assert(tbe.pendReqAllowRetry);
@@ -3364,6 +3327,35 @@ action(Send_Data, desc="") {
 
     out_msg.Destination.add(tbe.snd_destination);
 
+    // MYSTUFF: the target flow. The CompData of an injected request is a
+    // delivery (5); the first message of an index CompData names the data
+    // block to expect (3a, Hov_AttachExpect).
+    bool is_comp_data := (tbe.snd_msgType == CHIDataType:CompData_I) ||
+                         (tbe.snd_msgType == CHIDataType:CompData_UC) ||
+                         (tbe.snd_msgType == CHIDataType:CompData_SC) ||
+                         (tbe.snd_msgType == CHIDataType:CompData_UD_PD) ||
+                         (tbe.snd_msgType == CHIDataType:CompData_SD_PD);
+    if (is_comp_data && (tbe.snd_destination == tbe.requestor)) {
+      if (tbe.hov_fwd) {
+        out_msg.hov_fwd := true;
+        out_msg.hov_lane_mask := tbe.hov_lane_mask;
+        out_msg.hov_reg_id := tbe.hov_reg_id;
+        out_msg.hov_access_name := tbe.access_name;
+      }
+      if (tbe.hov_expect_pending) {
+        tbe.hov_expect_pending := false;
+        out_msg.hov_expect := true;
+        out_msg.hov_expect_addr := tbe.hov_expect_addr;
+        out_msg.hov_expect_unique := tbe.hov_expect_unique;
+        out_msg.hov_access_name := tbe.hov_expect_name;
+        DPRINTF(IndirectAccess,
+            "3a: index data %#x to %s names data block %#x (unique %d)\n",
+            tbe.addr, tbe.snd_destination, tbe.hov_expect_addr,
+            tbe.hov_expect_unique);
+      }
+    }
+    // FFUTSYM
+
     dest_machine := tbe.snd_destination;
     num_bytes := range;
     access_name := tbe.access_name;
@@ -3601,7 +3593,6 @@ action(Send_RetryAck, desc="") {
       out_msg.addr := in_msg.addr;
       out_msg.usesTxnId := in_msg.usesTxnId;
       out_msg.type := CHIResponseType:RetryAck;
-      out_msg.secondType := in_msg.secondType;
       out_msg.responder := machineID;
       out_msg.Destination.add(in_msg.retryDest);
       out_msg.txnId := in_msg.txnId;
@@ -3615,10 +3606,6 @@ action(Send_PCrdGrant, desc="") {
       out_msg.addr := in_msg.addr;
       out_msg.usesTxnId := in_msg.usesTxnId;
       out_msg.type := CHIResponseType:PCrdGrant;
-      // MYSTUFF: an IDR's PCrdGrant is matched by its hov id at the Gather Unit
-      out_msg.secondType := in_msg.secondType;
-      out_msg.txnId := in_msg.txnId;
-      // FFUTSYM
       out_msg.responder := machineID;
       out_msg.Destination.add(in_msg.retryDest);
     }
@@ -3867,6 +3854,21 @@ action(Finalize_DeallocateRequest, desc="") {
       cache.profileLifetime(tbe.dataBlk, tbe.access_name, false);
     }
   }
+
+  // The target flow: an injected request's tracker slot is free once the
+  // block reached the Indirect Unit (or was declined); a TBE that waited
+  // for an expected block no longer needs its timer.
+  if (tbe.is_req_tbe && tbe.hov_fwd) {
+    storHovTBEs.removeEntryFromSlot(tbe.hov_slot);
+    if (tbe.hov_declined) {
+      hovTrackerClose(tbe.hov_slot, 1, idr_coalesce);
+    } else {
+      hovTrackerClose(tbe.hov_slot, 0, idr_coalesce);
+    }
+  }
+  if (tbe.is_req_tbe && (tbe.hov_recv == 1) && hovExpectTimers.isSet(address)) {
+    hovExpectTimers.unset(address);
+  }
   // FFUTSYM
 
   if (tbe.is_req_tbe) {
@@ -3976,11 +3978,10 @@ action(Callback_LoadHit, desc="") {
   // MYSTUFF
   // Two-uop model: only the index access (uop0, ReadIndex) calls back;
   // the CPU extracts index[i] from the line and writes it to Rd+1.
-  // IDRs (ReadValue/WriteValue, sent by the Gather Unit) never call back:
-  // they only bring the line to the Indirect Unit, and the core's own
-  // value access (uop1) is a Load/Store that calls back as any other.
-  if (isIndirectIdx(tbe.reqType, tbe.secondType) ||
-      isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
+  // An IDR's transaction (isHovIdr) never calls back: it only brings the
+  // line to the Indirect Unit, and the core's own value access (uop1) is
+  // a Load/Store that calls back as any other.
+  if (isIndirectIdx(tbe.reqType, tbe.secondType) || isHovIdr(tbe)) {
     if (tbe.dataValid && (tbe.reqType == CHIRequestType:Load)) {
         DPRINTF(IndirectAccess, "Finished servicing a hit for a load to addr %#lx.\n", tbe.addr);
         if (tbe.secondType == CHIRequestType:ReadIndex) {
@@ -4001,11 +4002,11 @@ action(Callback_StoreHit, desc="") {
   assert((tbe.reqType == CHIRequestType:StoreLine) ||
          (tbe.reqType == CHIRequestType:Store));
   // MYSTUFF
-  // A WriteValue (sent by the Gather Unit for stind) only obtains unique
-  // permission at the Indirect Unit: no callback and no data written. The
-  // core's own value store (uop1) is a normal store that writes the data.
-  if (isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
-    DPRINTF(IndirectAccess, "WriteValue to addr %#lx hit. No callback.\n", tbe.addr);
+  // An IDR's transaction only brings the line (writable for stind): no
+  // callback and no data written. The core's own value store (uop1) is a
+  // normal store that writes the data.
+  if (isHovIdr(tbe)) {
+    DPRINTF(IndirectAccess, "IDR store hit at %#lx. No callback.\n", tbe.addr);
   // FFUTSYM
   } else if (tbe.is_local_pf == false) {
     assert(tbe.dataValid);
@@ -4055,10 +4056,9 @@ action(Callback_Miss, desc="") {
   assert(is_valid(tbe));
   // MYSTUFF
   // Two-uop model: only the index access (uop0, ReadIndex) calls back.
-  // IDRs (ReadValue/WriteValue from the Gather Unit) never call back; see
-  // Callback_LoadHit.
-  if (isIndirectIdx(tbe.reqType, tbe.secondType) ||
-      isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
+  // An IDR's transaction (isHovIdr: a waiting or delivered block at the
+  // Indirect Unit) never calls back; see Callback_LoadHit.
+  if (isIndirectIdx(tbe.reqType, tbe.secondType) || isHovIdr(tbe)) {
     if (tbe.dataValid && (tbe.reqType == CHIRequestType:Load)) {
         DPRINTF(IndirectAccess, "Finished servicing a miss for a load to addr %#lx.\n", tbe.addr);
         if (tbe.secondType == CHIRequestType:ReadIndex) {
@@ -4166,7 +4166,7 @@ action(Profile_Miss, desc="") {
   if (is_demand == false) {
     assert(use_prefetcher || tbe.is_remote_pf);
     cache.profilePrefetchMiss(tbe.access_name);
-  } else if (isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
+  } else if (isHovIdr(tbe)) {
     cache.profileIdrMiss(tbe.access_name);
     if (tbe.hov_spec) {
       cache.profileIdrSpecMiss(tbe.access_name);
@@ -4204,7 +4204,7 @@ action(Profile_Hit, desc="") {
   if (is_demand == false) {
     assert(use_prefetcher || tbe.is_remote_pf);
     cache.profilePrefetchHit(tbe.access_name);
-  } else if (isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
+  } else if (isHovIdr(tbe)) {
     cache.profileIdrHit(tbe.access_name);
     if (tbe.hov_spec) {
       cache.profileIdrSpecHit(tbe.access_name);
@@ -4295,9 +4295,11 @@ action(Profile_OutgoingStart, desc="") {
 action(Profile_OutgoingEnd_DataResp, desc="") {
   assert(is_valid(tbe));
   // completes once all data is received
-  if (tbe.expected_req_resp.hasReceivedData()) {
+  // MYSTUFF: a TBE that waited for or took a delivered block sent nothing
+  if (tbe.expected_req_resp.hasReceivedData() && (tbe.hov_recv == 0)) {
     outgoingTransactionEnd(address, tbe.rcvdRetryAck);
   }
+  // FFUTSYM
 }
 
 action(Profile_OutgoingEnd_DatalessResp, desc="") {
@@ -4618,12 +4620,34 @@ action(ScheduleIDRs, desc="Gather Unit: send the IDRs once the index data leaves
     }
 }
 
+// The target flow (3a): the index data of an ldind/stind names the data
+// block its own access will bring to the Indirect Unit, so the Indirect
+// Unit can wait for it. Runs in the SendCompData transition, after
+// ScheduleIDRs and before TX_Data builds the message. Only the line's
+// first real entry gets one, and only when it will be injected (mapped,
+// and not coalesced away); hovMarkExpect keeps TriageIDR from dropping it.
+action(Hov_AttachExpect, desc="Gather Unit: name the data block to expect on the index data")
+{
+    if (gather_unit && hasDependentWork(address) &&
+        (isInvalid(tbe.indirect_unit_id) == false) &&
+        (tbe.requestor == tbe.indirect_unit_id)) {
+        assert(tbe.dataValid);
+        if (hovMarkExpect(address, tbe.dataBlk, idr_coalesce)) {
+            tbe.hov_expect_pending := true;
+            tbe.hov_expect_addr := hovExpectAddr(address);
+            tbe.hov_expect_unique := hovExpectWrite(address) || hov_fetch_unique;
+            tbe.hov_expect_name := hovExpectName(address);
+        }
+    }
+}
+
 // The IDRs of an index line go one at a time, in two steps, so that only
-// sending needs a hov TBE: SLICC checks a transition's resources before
-// any of its actions run, so a full hov TBE pool would stall even an IDR
-// that is then dropped. TriageIDR drops the next IDR or passes it to
-// IssueIDR, and IssueIDR (which needs a hov TBE) sends it; either pushes
-// the next TriageIDR at once (a non-blocking trigger) while work remains.
+// injecting needs a tracker slot: SLICC checks a transition's resources
+// before any of its actions run, so a full tracker would stall even an
+// IDR that is then dropped. TriageIDR drops the next IDR or passes it to
+// IssueIDR, and IssueIDR (which needs a tracker slot and a TBE) injects
+// it; either pushes the next TriageIDR at once (a non-blocking trigger)
+// while work remains.
 action(TriageIDR,
        desc="Gather Unit: drop the next IDR, or pass it to IssueIDR")
 {
@@ -4641,6 +4665,8 @@ action(TriageIDR,
     Addr next_addr := peekDependentAddr(address, tbe.dataBlk);
     bool is_spec := peekDependentIsSpec(address);
     if (isMappedDownstream(makeLineAddress(next_addr)) == false) {
+        // Hov_AttachExpect never names an unmapped block
+        assert(peekDependentHasExpect(address) == false);
         DPRINTF(IndirectAccess,
             "IDR from index line %#x to unmapped address %#x dropped.\n",
             address, next_addr);
@@ -4649,35 +4675,21 @@ action(TriageIDR,
         if (is_spec) {
             countSpecIdr(1);
         }
-    } else {
+    } else if (idr_coalesce && (peekDependentHasExpect(address) == false) &&
+               (idrVerdict(makeLineAddress(next_addr),
+                           peekDependentIsWrite(address)) != 0)) {
         // Coalescing across index lines: an IDR to a data line with one
-        // in flight or sent recently is dropped; a write to a line whose
-        // read IDR is parked in retry lifts that IDR instead.
-        Addr data_line := makeLineAddress(next_addr);
-        bool is_write := peekDependentIsWrite(address);
-        int verdict := 0;
-        if (idr_coalesce) {
-            verdict := idrVerdict(data_line, is_write);
+        // in flight or sent recently is dropped. An IDR whose block the
+        // Indirect Unit expects is always injected.
+        DPRINTF(IndirectAccess,
+            "IDR from index line %#x to data line %#x dropped: one is in flight or recent.\n",
+            address, makeLineAddress(next_addr));
+        dropDependentReq(address);
+        if (is_spec) {
+            countSpecIdr(2);
         }
-        if (verdict == 2) {
-            TBE parked := hovTBEs[parkedIdrHovId(data_line)];
-            assert(is_valid(parked));
-            parked.pendReqType := CHIRequestType:WriteValue;
-            DPRINTF(IndirectAccess,
-                "IDR to data line %#x lifts the parked IDR hov_id=%#x to WriteValue.\n",
-                data_line, parked.txnId);
-            dropDependentReq(address);
-        } else if (verdict == 1) {
-            DPRINTF(IndirectAccess,
-                "IDR from index line %#x to data line %#x dropped: one is in flight or recent.\n",
-                address, data_line);
-            dropDependentReq(address);
-            if (is_spec) {
-                countSpecIdr(2);
-            }
-        } else {
-            issue := true;
-        }
+    } else {
+        issue := true;
     }
     if (issue) {
         tbe.actions.pushFrontNB(Event:IssueIDR);
@@ -4686,106 +4698,98 @@ action(TriageIDR,
     }
 }
 
+// The target flow (3b): the Gather Unit injects an ordinary ReadShared
+// (ReadUnique for a write, or under hov_fetch_unique) into its own request
+// path with the Indirect Unit as requestor; the line's own transitions
+// decide whether to send anything (reqRdyPort: nothing when the directory
+// lists the Indirect Unit as holding the block), fetch it from the Value
+// Unit, and deliver CompData to the Indirect Unit. The request holds a
+// tracker slot until its transaction ends (Finalize_DeallocateRequest).
 action(IssueIDR,
-       desc="Gather Unit: send the IDR TriageIDR passed (needs a hov TBE)")
+       desc="Gather Unit: inject the IDR TriageIDR passed (needs a tracker slot and a TBE)")
 {
     assert(gather_unit);
     assert(hasDependentWork(address));
     assert(tbe.dataValid);
 
-    // Resource stall if HOV TBE pool is full
+    // Resource stall while the tracker is full, or while no TBE is free
+    // for the injected request's own transaction.
     check_allocate(storHovTBEs);
+    check_allocate(storTBEs);
 
-    Addr next_addr := peekDependentAddr(address, tbe.dataBlk);
-    Addr data_line := makeLineAddress(next_addr);
-    bool is_write := peekDependentIsWrite(address);
-    bool is_spec := peekDependentIsSpec(address);
-    // Another index line may have sent to this data line while this one
-    // waited for a hov TBE: ask again.
-    int verdict := 0;
-    if (idr_coalesce) {
-        verdict := idrVerdict(data_line, is_write);
-    }
-    if (verdict == 2) {
-        TBE parked := hovTBEs[parkedIdrHovId(data_line)];
-        assert(is_valid(parked));
-        parked.pendReqType := CHIRequestType:WriteValue;
+    if (isInvalid(tbe.indirect_unit_id)) {
+        // The DAG came by a path with no Indirect Unit on it: no target
+        assert(peekDependentHasExpect(address) == false);
         DPRINTF(IndirectAccess,
-            "IDR to data line %#x lifts the parked IDR hov_id=%#x to WriteValue.\n",
-            data_line, parked.txnId);
+            "IDR from index line %#x dropped: no Indirect Unit to deliver to.\n",
+            address);
         dropDependentReq(address);
-    } else if (verdict == 1) {
-        DPRINTF(IndirectAccess,
-            "IDR from index line %#x to data line %#x dropped: one is in flight or recent.\n",
-            address, data_line);
-        dropDependentReq(address);
-        if (is_spec) {
-            countSpecIdr(2);
-        }
+        countHovFwd(4);
     } else {
-            RequestPtr depReq := getDependentReq(address, tbe.dataBlk);
-            Addr acc_addr := getAddr(depReq);
+        bool is_spec := peekDependentIsSpec(address);
+        bool has_expect := peekDependentHasExpect(address);
+        bool is_write := peekDependentIsWrite(address);
+        RequestPtr depReq := getDependentReq(address, tbe.dataBlk);
+        Addr acc_addr := getAddr(depReq);
+        Addr data_line := makeLineAddress(acc_addr);
+        bool unique := (isDepReadReq(depReq) == false) || hov_fetch_unique;
 
-            // Determine request type
-            CHIRequestType idr_type;
+        int hov_slot := storHovTBEs.addEntryToNewSlot();
+        storTBEs.incrementReserved();
+        hovTrackerOpen(hov_slot, data_line, unique, is_spec, has_expect);
+        if (is_spec) {
+            countSpecIdr(0);
+        }
+        if (idr_coalesce) {
+            noteIdrSent(data_line, static_cast(Addr, "value", hov_slot),
+                        is_write, idr_recent_lines);
+        }
+
+        enqueue(reqRdyOutPort, CHIRequestMsg, allocation_latency) {
+            out_msg.addr := data_line;
+            out_msg.accAddr := acc_addr;
+            out_msg.accSize := getSize(depReq);
+            if (unique) {
+                out_msg.type := CHIRequestType:ReadUnique;
+            } else {
+                out_msg.type := CHIRequestType:ReadShared;
+            }
             if (isDepReadReq(depReq)) {
-                idr_type := CHIRequestType:ReadValue;
+                out_msg.secondType := CHIRequestType:ReadValue;
             } else {
-                idr_type := CHIRequestType:WriteValue;
+                out_msg.secondType := CHIRequestType:WriteValue;
             }
+            out_msg.requestor := tbe.indirect_unit_id;
+            out_msg.fwdRequestor := tbe.indirect_unit_id;
+            out_msg.dataToFwdRequestor := false;
+            out_msg.retToSrc := false;
+            // The TBE is reserved here: the request is never retried
+            out_msg.allowRetry := false;
+            out_msg.Destination.add(machineID);
+            out_msg.seqReq := depReq;
+            out_msg.isSeqReqValid := true;
+            out_msg.is_local_pf := false;
+            out_msg.is_remote_pf := false;
+            out_msg.txnId := static_cast(Addr, "value", hov_slot);
+            out_msg.ns := tbe.ns;
+            // hov<p>_data, as uop1 names the same access
+            out_msg.access_name := getReqAccessName(depReq);
+            out_msg.alias := getIndirectAlias(depReq);
+            out_msg.indirect_unit_id := tbe.indirect_unit_id;
+            out_msg.value_unit_id := tbe.value_unit_id;
+            out_msg.gather_unit_id := tbe.gather_unit_id;
+            out_msg.hov_spec := is_spec;
+            out_msg.hov_fwd := true;
+            out_msg.hov_slot := hov_slot;
+            // hov_lane_mask and hov_reg_id stay 0: the scalar form (the
+            // vector form sets the register's lanes in this block)
 
-            // Compute destination before enqueue so we can reuse it for hovTbe
-            NetDest idr_dest;
-            if (isInvalid(tbe.indirect_unit_id)) {
-                idr_dest.add(mapAddressToDownstreamMachine(makeLineAddress(acc_addr)));
-            } else {
-                idr_dest.add(tbe.indirect_unit_id);
-            }
-
-            // Allocate the hov TBE, a transaction keyed by its hov id (see hovTBEs)
-            int hov_slot := storHovTBEs.addEntryToNewSlot();
-            Addr hov_id := makeHovId(hov_slot, blockSize);
-            hovTBEs.allocate(hov_id);
-            TBE hovTbe := hovTBEs[hov_id];
-            initializeHovTBE(hovTbe, hov_id, acc_addr, hov_slot,
-                             idr_type, depReq, idr_dest, tbe);
-            hovTbe.hov_spec := is_spec;
-            if (is_spec) {
-                countSpecIdr(0);
-            }
-            if (idr_coalesce) {
-                noteIdrSent(data_line, hov_id, is_write, idr_recent_lines);
-            }
-
-            enqueue(reqOutPort, CHIRequestMsg, request_latency) {
-                indirectDependentBoilerPlate(out_msg);
-                fillInMsgFromReq(out_msg, depReq);
-                // hov<p>_data, as uop1 names the same access
-                out_msg.access_name := getReqAccessName(depReq);
-
-                out_msg.type := idr_type;
-                out_msg.allowRetry := hovTbe.pendReqAllowRetry;
-                // The Indirect Unit returns this id on HovAck/RetryAck/PCrdGrant
-                out_msg.txnId := hov_id;
-
-                out_msg.indirect_unit_id := tbe.indirect_unit_id;
-                out_msg.value_unit_id := tbe.value_unit_id;
-                out_msg.gather_unit_id := tbe.gather_unit_id;
-                out_msg.alias := hovTbe.alias;
-                out_msg.hov_spec := is_spec;
-
-                DPRINTF(IndirectAccess,
-                    "IDR: index_line=%#x -> data_addr=%#x alias=%#x isRead=%d hov_id=%#x spec=%d\n",
-                    address, out_msg.addr, hovTbe.alias, isDepReadReq(depReq), hov_id, is_spec
-                );
-
-                out_msg.Destination := idr_dest;
-                if (isInvalid(tbe.indirect_unit_id)) {
-                    DPRINTF(IndirectAccess, "Indirect unit id not set yet. Sending downstream.\n");
-                } else {
-                    DPRINTF(IndirectAccess, "Indirect unit id set. Sending upstream.\n");
-                }
-            }
+            DPRINTF(IndirectAccess,
+                "3b: index_line=%#x -> inject %s for data line %#x (acc %#x) on behalf of %s, slot %d, alias=%#x spec=%d expect=%d\n",
+                address, out_msg.type, data_line, acc_addr,
+                tbe.indirect_unit_id, hov_slot, out_msg.alias, is_spec,
+                has_expect);
+        }
     }
     // The line's next IDR follows at once (a non-blocking trigger), whether
     // ScheduleIDRs or PostProcess pushed the first.
@@ -4916,35 +4920,227 @@ action(Send_NotifAck, desc="Send NotifAck back to requestor for NotifyIndIdx") {
     }
 }
 
-action(Receive_HovAck, desc="IDR accepted by the Indirect Unit: free the hov TBE") {
-    assert(gather_unit);
-    assert(tbe.expected_req_resp.hasExpected());
-    if (tbe.expected_req_resp.receiveResp(CHIResponseType:HovAck) == false) {
-      error("Unexpected response on HOV TBE");
-    }
-    assert(tbe.expected_req_resp.hasExpected() == false);
-    if (idr_coalesce) {
-        // The IDR's data line (the hov TBE's addr) is no longer in flight.
-        noteIdrAcked(tbe.addr);
-    }
-    // Read the slot and key before the entry goes away, then unset the TBE
-    // so the transition's setState does not touch freed memory (as the DVM
-    // Final transitions do).
-    storHovTBEs.removeEntryFromSlot(tbe.storSlot);
-    hovTBEs.deallocate(tbe.txnId);
-    unset_tbe();
+////////////////////////////////////////////////////////////////////////////
+// The target flow (docs/agents/2026-10-25-wp0/PLAN.md)
+
+// Gather Unit, reqRdyPort: an injected request for a block the directory
+// lists the Indirect Unit as holding. Send nothing, as CHI's directory
+// does for a requester that holds the block; free the slot and the TBE
+// reservation IssueIDR made.
+action(Hov_FwdHeld, desc="Gather Unit: drop an injected request for a block the Indirect Unit holds") {
+  assert(gather_unit);
+  assert(is_invalid(tbe));
+  peek(reqRdyPort, CHIRequestMsg) {
+    assert(in_msg.hov_fwd);
+    DPRINTF(IndirectAccess,
+        "3b: injected %s for %#x not sent: %s holds the block (slot %d).\n",
+        in_msg.type, address, in_msg.requestor, in_msg.hov_slot);
+    storHovTBEs.removeEntryFromSlot(in_msg.hov_slot);
+    hovTrackerClose(in_msg.hov_slot, 2, idr_coalesce);
+  }
+  storTBEs.decrementReserved();
+  processRetryQueue();
 }
 
-action(Send_HovAck, desc="Ack ReadValue/WriteValue acceptance to Gather Unit") {
-    // Scheduled via processNextState — indirect_unit check done in Initiate_Request
-    enqueue(rspOutPort, CHIResponseMsg, response_latency) {
-        out_msg.addr := tbe.addr;
-        out_msg.type := CHIResponseType:HovAck;
-        // The Gather Unit matches the hov TBE by secondType and txnId
-        out_msg.secondType := tbe.secondType;
-        out_msg.txnId := tbe.txnId;
-        out_msg.responder := machineID;
-        out_msg.Destination.add(tbe.requestor);
+// Gather Unit, reqRdyPort: the Indirect Unit's own request for a block
+// the directory already lists it as holding with the permission asked for.
+// In this protocol that happens only when a delivery reached the
+// Indirect Unit while this request was in flight, and its TBE took the
+// delivery as this request's data: nothing is owed.
+action(Hov_DupDrop, desc="Gather Unit: drop a request a delivery already served") {
+  assert(gather_unit);
+  assert(is_invalid(tbe));
+  peek(reqRdyPort, CHIRequestMsg) {
+    DPRINTF(IndirectAccess,
+        "%s for %#x from %s dropped: a delivery already served it.\n",
+        in_msg.type, address, in_msg.requestor);
+  }
+  countHovDupDropped();
+  storTBEs.decrementReserved();
+  processRetryQueue();
+}
+
+// Indirect Unit: the index data names a data block to expect (3a). Queue
+// it for that line on reqRdy, with a TBE reserved for it; with no TBE free,
+// the expect is dropped (the delivery is then taken on arrival).
+action(Hov_RecvExpect, desc="Indirect Unit: queue the expect the index data carries") {
+  if (indirect_unit) {
+    peek(datInPort, CHIDataMsg) {
+      if (in_msg.hov_expect) {
+        if (storTBEs.areNSlotsAvailable(1)) {
+          storTBEs.incrementReserved();
+          enqueue(reqRdyOutPort, CHIRequestMsg, allocation_latency) {
+            out_msg.addr := in_msg.hov_expect_addr;
+            out_msg.accAddr := in_msg.hov_expect_addr;
+            out_msg.accSize := blockSize;
+            out_msg.type := CHIRequestType:HovExpect;
+            if (in_msg.hov_expect_unique) {
+              out_msg.secondType := CHIRequestType:WriteValue;
+            } else {
+              out_msg.secondType := CHIRequestType:ReadValue;
+            }
+            out_msg.requestor := in_msg.responder;
+            out_msg.fwdRequestor := in_msg.responder;
+            out_msg.allowRetry := false;
+            out_msg.Destination.add(machineID);
+            out_msg.isSeqReqValid := false;
+            out_msg.is_local_pf := false;
+            out_msg.is_remote_pf := false;
+            out_msg.txnId := in_msg.txnId;
+            out_msg.access_name := in_msg.hov_access_name;
+          }
+          DPRINTF(IndirectAccess,
+              "3a: index data %#x names data block %#x (unique %d); expect queued.\n",
+              address, in_msg.hov_expect_addr, in_msg.hov_expect_unique);
+        } else {
+          DPRINTF(IndirectAccess,
+              "3a: expect for %#x dropped: no TBE free.\n", in_msg.hov_expect_addr);
+          countHovExpect(2);
+        }
+      }
     }
+  }
+}
+
+// Indirect Unit: wait for the expected block in a TBE shaped as a load
+// miss whose ReadShared someone else sent, so the delivery completes it
+// through the stock CompData transitions and the core's own access to the
+// line stalls on it.
+action(Initiate_HovExpect, desc="Indirect Unit: allocate a TBE that waits for the expected block") {
+  assert(indirect_unit);
+  State initial := getState(tbe, cache_entry, address);
+  peek(reqRdyPort, CHIRequestMsg) {
+    storTBEs.decrementReserved();
+    set_tbe(allocateHovRecvTBE(address, in_msg.requestor,
+                               in_msg.secondType == CHIRequestType:WriteValue,
+                               in_msg.access_name));
+  }
+  hovSetupRecvTBE(tbe, cache_entry, initial, 1);
+  if (hovExpectTimers.isSet(address)) {
+    hovExpectTimers.unset(address);
+  }
+  if (hov_expect_timeout > intToCycles(0)) {
+    hovExpectTimers.set(address,
+                        clockEdge() + cyclesToTicks(hov_expect_timeout));
+  }
+  countHovExpect(0);
+  DPRINTF(IndirectAccess, "3a: waiting for data block %#x.\n", address);
+  incomingTransactionStart(address, curTransitionEvent(), initial, false);
+}
+
+// Indirect Unit: the expected block is here already
+action(Hov_ExpectPresent, desc="Indirect Unit: an expect for a block that is here") {
+  assert(is_invalid(tbe));
+  storTBEs.decrementReserved();
+  if (hovTakeDeliveredNoExpect(address)) {
+    countHovExpect(3);
+  } else {
+    countHovExpect(1);
+  }
+}
+
+// Indirect Unit: the line is busy (a delivery taken on arrival, or the
+// core's own access): the expect is not needed or cannot wait
+action(Hov_ExpectBusy, desc="Indirect Unit: an expect for a line with a transaction") {
+  assert(is_valid(tbe));
+  storTBEs.decrementReserved();
+  if ((tbe.hov_recv == 2) || hovTakeDeliveredNoExpect(address)) {
+    countHovExpect(3);
+  } else {
+    countHovExpect(4);
+  }
+}
+
+// Indirect Unit: a delivered block (5) no TBE waits for. Take it in a TBE
+// allocated on arrival, shaped as Initiate_HovExpect's; the transition
+// then receives the data as the stock CompData transitions do.
+action(Initiate_HovDeliver, desc="Indirect Unit: allocate a TBE for a delivered block") {
+  assert(indirect_unit);
+  State initial := getState(tbe, cache_entry, address);
+  peek(datInPort, CHIDataMsg) {
+    set_tbe(allocateHovRecvTBE(address, in_msg.responder, false,
+                               in_msg.hov_access_name));
+    tbe.hov_lane_mask := in_msg.hov_lane_mask;
+    tbe.hov_reg_id := in_msg.hov_reg_id;
+  }
+  hovSetupRecvTBE(tbe, cache_entry, initial, 2);
+  hovNoteDeliveredNoExpect(address);
+  countHovDeliver(1);
+  DPRINTF(IndirectAccess, "5: data block %#x delivered with no TBE waiting; taken on arrival.\n", address);
+  incomingTransactionStart(address, curTransitionEvent(), initial, false);
+}
+
+// Indirect Unit, stock CompData transition: count a delivery that a TBE
+// waiting for data takes (an expect's, or the core's own miss)
+action(Hov_CountDelivery, desc="Indirect Unit: count a delivery a waiting TBE takes") {
+  if (indirect_unit) {
+    peek(datInPort, CHIDataMsg) {
+      if (in_msg.hov_fwd && (tbe.dataBlkValid.count() == 0)) {
+        if (tbe.hov_recv == 1) {
+          countHovDeliver(0);
+          DPRINTF(IndirectAccess, "5: data block %#x delivered into its expect.\n", address);
+        } else if (tbe.hov_recv == 0) {
+          countHovDeliver(2);
+          DPRINTF(IndirectAccess, "5: data block %#x delivered; the core's own miss takes it.\n", address);
+        }
+      }
+    }
+  }
+}
+
+// Indirect Unit: a delivered block it cannot take (the line is here, or
+// busy with a transaction that does not wait for this data, or no TBE is
+// free). Acknowledge it as declined so the Gather Unit keeps the block and
+// leaves its directory as it was, and drop the data. Never recycled: the
+// Gather Unit's transaction waits for this CompAck.
+action(Hov_Decline, desc="Indirect Unit: decline a delivered block") {
+  peek(datInPort, CHIDataMsg) {
+    assert(in_msg.hov_fwd);
+    enqueue(rspOutPort, CHIResponseMsg, response_latency) {
+      out_msg.addr := address;
+      out_msg.type := CHIResponseType:CompAck;
+      out_msg.responder := machineID;
+      out_msg.Destination.add(in_msg.responder);
+      out_msg.txnId := in_msg.txnId;
+      out_msg.hov_declined := true;
+    }
+    hovDeclineBegin(address, (blockSize / data_channel_size) - 1);
+  }
+  countHovDeliver(3);
+  DPRINTF(IndirectAccess, "5: data block %#x delivered but declined.\n", address);
+}
+
+action(Hov_DeclineCont, desc="Indirect Unit: drop a later chunk of a declined delivery") {
+  hovDeclineChunk(address);
+}
+
+// Indirect Unit: a TBE waiting for an expected block gives up after
+// hov_expect_timeout cycles (the block was not sent: the Gather Unit's
+// directory said this cache held it). It ends with no data; the core's
+// access then misses as it would have without the expect.
+action(Hov_ExpectTimeout, desc="Indirect Unit: give up waiting for an expected block") {
+  if (is_valid(tbe) && tbe.is_snp_tbe) {
+    // A snoop is being handled on the line: look again later
+    hovExpectTimers.unset(address);
+    hovExpectTimers.set(address,
+                        clockEdge() + cyclesToTicks(intToCycles(100)));
+  } else {
+    hovExpectTimers.unset(address);
+    if (is_valid(tbe) && tbe.is_req_tbe && (tbe.hov_recv == 1) &&
+        tbe.expected_req_resp.hasExpected() &&
+        (tbe.expected_req_resp.hasReceivedData() == false) &&
+        (tbe.dataBlkValid.count() == 0)) {
+      DPRINTF(IndirectAccess, "3a: expect for %#x timed out.\n", address);
+      clearExpectedReqResp(tbe);
+      tbe.dataToBeInvalid := true;
+      countHovExpect(5);
+      // nothing is expected now: run the queued fill check and finish
+      processNextState(address, tbe, cache_entry);
+    }
+  }
+}
+
+action(Hov_ExpectTimeoutStale, desc="Indirect Unit: a timer whose TBE is gone") {
+  hovExpectTimers.unset(address);
 }
 // FFUTSYM
