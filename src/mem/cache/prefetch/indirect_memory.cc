@@ -28,9 +28,12 @@
 
  #include "mem/cache/prefetch/indirect_memory.hh"
 
+ #include <algorithm>
  #include <cstdlib>
+ #include <cstring>
 
  #include "base/cprintf.hh"
+ #include "sim/byteswap.hh"
  #include "mem/cache/base.hh"
  #include "params/IndirectMemoryPrefetcher.hh"
 
@@ -205,16 +208,18 @@ IndirectMemory::calculatePrefetch(const PrefetchInfo &pfi,
                         }
 
                         // If the counter is high enough, start prefetching
+                        // The distance grows with confidence, as gem5 had
+                        // it; the targets are those of the next indices,
+                        // A[B[i+1..i+distance]], read from the index lines
+                        // (the old loop pushed A[B[i]], the element the
+                        // core loads next, distance - 1 times).
                         if (pt_entry->indirectCounter > prefetchThreshold) {
                             impStats.indexReadsEnabled++;
-                            unsigned distance = maxPrefetchDistance *
-                                pt_entry->indirectCounter.calcSaturation();
-                            for (int delta = 1; delta < distance; delta += 1) {
-                                Addr pf_addr = targetAddr(pt_entry->baseAddr,
-                                    pt_entry->index, pt_entry->shift);
-                                addresses.push_back(AddrPriority(pf_addr, 0));
-                                impStats.indirectCandidates++;
-                            }
+                            unsigned distance = std::max(1u,
+                                (unsigned)(maxPrefetchDistance *
+                                pt_entry->indirectCounter.calcSaturation()));
+                            walkFrontier(pt_entry, pfi, distance, addresses,
+                                         cache);
                         }
                     }
                 }
@@ -242,6 +247,94 @@ IndirectMemory::calculatePrefetch(const PrefetchInfo &pfi,
             pt_entry->address = addr;
             pt_entry->secure = is_secure;
         }
+    }
+}
+
+void
+IndirectMemory::walkFrontier(PrefetchTableEntry *pt_entry,
+    const PrefetchInfo &pfi, unsigned distance,
+    std::vector<AddrPriority> &addresses, const CacheAccessor &cache)
+{
+    const unsigned size = pfi.getSize();
+    const Addr trigger = pfi.getAddr();
+    const Addr limit = trigger + (Addr)distance * size;
+
+    // Continue after the frontier; restart at the trigger when the
+    // stream jumped (a new row, a new pass) or the core overtook the
+    // frontier (the walk had stopped at an absent line or a page end).
+    if (!pt_entry->frontierValid || pt_entry->frontier < trigger ||
+        pt_entry->frontier > limit) {
+        if (pt_entry->frontierValid) {
+            impStats.frontierResets++;
+        }
+        pt_entry->frontier = trigger;
+        pt_entry->frontierValid = true;
+    }
+
+    // The index lines are read on the trigger's page only, whose physical
+    // address the trigger gives; the next page waits for a trigger on it.
+    const Addr page_end = pageAddress(trigger) + pageBytes;
+    const Addr trigger_paddr = pfi.getPaddr();
+    std::vector<uint8_t> line(blkSize);
+    Addr line_addr = MaxAddr;
+
+    for (Addr pos = pt_entry->frontier + size; pos <= limit; pos += size) {
+        if (pos + size > page_end) {
+            impStats.indirectPageStop++;
+            break;
+        }
+        const Addr pos_line = blockAddress(pos);
+        const Addr offset = pos - pos_line;
+        if (offset + size > blkSize) {
+            // A misaligned index straddles two lines; stop.
+            break;
+        }
+        if (pos_line != line_addr) {
+            const Addr pos_line_paddr = trigger_paddr + pos_line - trigger;
+            if (!cache.readLineFunctional(pos_line_paddr, line.data(),
+                                          blkSize)) {
+                impStats.indirectAbsentIndexLine++;
+                break;
+            }
+            line_addr = pos_line;
+        }
+
+        // Indices are read unsigned, as for the trigger's own value.
+        uint64_t raw = 0;
+        switch (size) {
+          case sizeof(uint8_t): {
+            uint8_t v;
+            std::memcpy(&v, &line[offset], size);
+            raw = gtoh(v, byteOrder);
+            break;
+          }
+          case sizeof(uint16_t): {
+            uint16_t v;
+            std::memcpy(&v, &line[offset], size);
+            raw = gtoh(v, byteOrder);
+            break;
+          }
+          case sizeof(uint32_t): {
+            uint32_t v;
+            std::memcpy(&v, &line[offset], size);
+            raw = gtoh(v, byteOrder);
+            break;
+          }
+          default: {
+            assert(size == sizeof(uint64_t));
+            uint64_t v;
+            std::memcpy(&v, &line[offset], size);
+            raw = gtoh(v, byteOrder);
+            break;
+          }
+        }
+
+        addresses.push_back(AddrPriority(
+            targetAddr(pt_entry->baseAddr, (int64_t)raw, pt_entry->shift),
+            0));
+        impStats.indirectCandidates++;
+        impStats.indirectDistance.sample((pos - trigger) / size);
+        pt_entry->frontier = pos;
     }
 }
 
