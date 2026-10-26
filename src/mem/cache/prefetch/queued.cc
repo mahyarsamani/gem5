@@ -279,8 +279,12 @@ Queued::QueuedStats::QueuedStats(statistics::Group *parent)
     ADD_STAT(pfSpanPage, statistics::units::Count::get(),
              "number of prefetches that crossed the page"),
     ADD_STAT(pfUsefulSpanPage, statistics::units::Count::get(),
-             "number of prefetches that is useful and crossed the page")
+             "number of prefetches that is useful and crossed the page"),
+    ADD_STAT(pfTranslationFailed, statistics::units::Count::get(),
+             "number of prefetches dropped because their translation "
+             "faulted")
 {
+    pfTranslationFailed.flags(statistics::nozero);
 }
 
 
@@ -334,6 +338,7 @@ Queued::translationComplete(DeferredPacket *dp, bool failed,
         DPRINTF(HWPrefetch, "%s Translation of vaddr %#x failed, dropping "
                 "prefetch request %#x \n", mmu->name(),
                 it->translationRequest->getVaddr());
+        statsQueued.pfTranslationFailed++;
     }
     pfqMissingTranslation.erase(it);
 }

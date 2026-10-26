@@ -43,6 +43,7 @@
 
 #include "base/cache/associative_cache.hh"
 #include "base/sat_counter.hh"
+#include "base/statistics.hh"
 #include "mem/cache/prefetch/queued.hh"
 #include "mem/cache/tags/tagged_entry.hh"
 
@@ -200,6 +201,47 @@ class IndirectMemory : public Queued
      * @param addr address of the access
      */
     void checkAccessMatchOnActiveEntries(Addr addr);
+
+    /** IMP's own counters, printed as <prefetcher>.imp.<stat>: Base's
+     *  pfIssued and pfUseful mix every kind of candidate. */
+    struct IndirectMemoryStats : public statistics::Group
+    {
+        IndirectMemoryStats(statistics::Group *parent,
+                            const std::vector<int> &shifts);
+
+        /** PT hits whose value could be read as an index */
+        statistics::Scalar indexReads;
+        /** Index reads of an enabled entry above the threshold */
+        statistics::Scalar indexReadsEnabled;
+        /** IPD entries allocated */
+        statistics::Scalar ipdAllocs;
+        /** IPD entries released after a third index without a match */
+        statistics::Scalar ipdReleases;
+        /** IPD entries whose miss tracking another entry took over */
+        statistics::Scalar ipdStolen;
+        /** Patterns found, per element of shift_values */
+        statistics::Vector patternsEnabled;
+        /** Confidence falling to the threshold from above */
+        statistics::Scalar patternsDisabled;
+        /** PT entries with an enabled pattern replaced */
+        statistics::Scalar patternsReplaced;
+        /** Accesses matching an enabled pattern's current target */
+        statistics::Scalar confidenceHits;
+        /** Indirect target addresses handed to the queue */
+        statistics::Scalar indirectCandidates;
+        /** Frontier walks stopped at an index line not in the cache */
+        statistics::Scalar indirectAbsentIndexLine;
+        /** Frontier walks stopped at the end of the trigger's page */
+        statistics::Scalar indirectPageStop;
+        /** Frontier restarts because the index stream jumped */
+        statistics::Scalar frontierResets;
+        /** Distance in elements (j - i) of every indirect candidate */
+        statistics::Distribution indirectDistance;
+        /** Candidates of IMP's own stream part */
+        statistics::Scalar streamCandidates;
+        /** Prefetches waiting for a translation at the dump */
+        statistics::Value pendingTranslations;
+    } impStats;
 
   public:
     IndirectMemory(const IndirectMemoryPrefetcherParams &p);

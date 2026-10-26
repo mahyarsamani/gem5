@@ -187,6 +187,9 @@ class Queued : public Base
         statistics::Scalar pfRemovedFull;
         statistics::Scalar pfSpanPage;
         statistics::Scalar pfUsefulSpanPage;
+        /** Prefetches dropped because their translation faulted; nozero,
+         *  so prefetchers without an MMU print nothing new. */
+        statistics::Scalar pfTranslationFailed;
     } statsQueued;
   public:
     using AddrPriority = std::pair<Addr, int32_t>;
