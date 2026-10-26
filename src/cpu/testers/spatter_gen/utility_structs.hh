@@ -256,18 +256,20 @@ class SpatterAccess: public Extension<Request, SpatterAccess>,
 
     PacketPtr nextPacket(SpatterAccessMode access_mode)
     {
+        // In indirect mode every trip but the last reads an index (its
+        // intent, gather or scatter, is in the DAG) and the last trip is
+        // the value access (uop1), which carries the alias.
+        bool indirect = access_mode == SpatterAccessMode::indirect;
+        bool gather = _kernelType == SpatterKernelType::gather;
         MemCmd cmd;
-        if (tripsLeft() > 2) {
-            cmd = access_mode == SpatterAccessMode::normal ? MemCmd::ReadReq : MemCmd::ReadIndReq;
-        } else if (tripsLeft() == 2) {
-            cmd = access_mode == SpatterAccessMode::normal ? MemCmd::ReadReq :
-            (_kernelType == SpatterKernelType::gather ? MemCmd::ReadIndReq : MemCmd::WriteIndReq);
+        if (tripsLeft() > 1) {
+            cmd = indirect ? MemCmd::ReadIdxReq : MemCmd::ReadReq;
+        } else if (indirect) {
+            cmd = gather ? MemCmd::ReadValReq : MemCmd::WriteValReq;
         } else {
-            cmd = _kernelType == \
-                SpatterKernelType::gather ? MemCmd::ReadReq : MemCmd::WriteReq;
+            cmd = gather ? MemCmd::ReadReq : MemCmd::WriteReq;
         }
 
-        bool indirect = access_mode == SpatterAccessMode::indirect;
         RequestPtr req = nextRequest(indirect && (tripsLeft() > 1), indirect);
 
         return createPacket(req, cmd);

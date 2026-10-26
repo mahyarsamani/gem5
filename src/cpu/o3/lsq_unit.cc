@@ -255,6 +255,12 @@ LSQUnit::LSQUnitStats::LSQUnitStats(statistics::Group *parent)
     : statistics::Group(parent),
       ADD_STAT(forwLoads, statistics::units::Count::get(),
                "Number of loads that had data forwarded from stores"),
+      ADD_STAT(hovForwIdxLoads, statistics::units::Count::get(),
+               "Number of index uops that had index[i] forwarded from an "
+               "older index uop"),
+      ADD_STAT(hovRegIdxLoads, statistics::units::Count::get(),
+               "Number of index uops of the register form (index[i] "
+               "supplied by the program)"),
       ADD_STAT(squashedLoads, statistics::units::Count::get(),
                "Number of loads squashed"),
       ADD_STAT(ignoredResponses, statistics::units::Count::get(),
@@ -1564,6 +1570,67 @@ LSQUnit::read(LSQRequest *request, ssize_t load_idx)
             }
         }
     }
+
+    // MYSTUFF
+    // Load-to-load forwarding of index[i] between uop0s: an older uop0 in
+    // the LQ to the same address and size whose data has arrived supplies
+    // the index value (a younger load may always observe what an older
+    // load to the same address observed). The request still goes to the
+    // Sequencer, as a NotifyIndIdxReq, so that its DAG reaches the Gather
+    // Unit; no data comes back.
+    if (request->mainReq()->getExtension<DependentAccessGen>() &&
+        !request->isSplit()) {
+        const Addr paddr = request->mainReq()->getPaddr();
+        const unsigned size = request->mainReq()->getSize();
+        auto dag = request->mainReq()->getExtension<DependentAccessGen>();
+        if (dag->hasIndexValue()) {
+            // The register form of ldind/stind: the program supplied
+            // index[i], so this uop0 reads nothing; it delivers its
+            // descriptor like a forwarded uop0 does.
+            if (!load_inst->memData) {
+                load_inst->memData = new uint8_t[size];
+            }
+            const uint64_t value = dag->indexValue();
+            std::memcpy(load_inst->memData, &value, size);
+            request->markIdxForwarded();
+            ++stats.hovRegIdxLoads;
+            DPRINTF(LSQUnit, "Index in register for [sn:%lli] addr %#x "
+                    "value %llu\n", load_inst->seqNum, paddr, value);
+        }
+        auto lq_it = load_inst->lqIt;
+        while (!dag->hasIndexValue() && lq_it != loadQueue.begin()) {
+            lq_it--;
+            if (!lq_it->valid()) {
+                continue;
+            }
+            const DynInstPtr &older = lq_it->instruction();
+            LSQRequest *older_req = lq_it->request();
+            if (older_req && !older_req->isSplit() &&
+                older_req->isComplete() && older->memData &&
+                !older->isSquashed() &&
+                older_req->mainReq()->getExtension<DependentAccessGen>() &&
+                older_req->mainReq()->getPaddr() == paddr &&
+                older_req->mainReq()->getSize() == size) {
+                if (!load_inst->memData) {
+                    load_inst->memData = new uint8_t[size];
+                }
+                std::memcpy(load_inst->memData, older->memData, size);
+                // The Sequencer pairs the latency sample of a
+                // notification from this value.
+                uint64_t forwarded = 0;
+                std::memcpy(&forwarded, older->memData,
+                            std::min<size_t>(size, sizeof(forwarded)));
+                dag->setIndexValue(forwarded);
+                request->markIdxForwarded();
+                ++stats.hovForwIdxLoads;
+                DPRINTF(LSQUnit, "Forwarding index[i] from [sn:%lli] to "
+                        "[sn:%lli] addr %#x\n", older->seqNum,
+                        load_inst->seqNum, paddr);
+                break;
+            }
+        }
+    }
+    // FFUTSYM
 
     // If there's no forwarding case, then go access memory
     DPRINTF(LSQUnit, "Doing memory access for inst [sn:%lli] PC %s\n",

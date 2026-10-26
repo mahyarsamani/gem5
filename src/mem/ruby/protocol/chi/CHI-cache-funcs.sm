@@ -223,18 +223,28 @@ bool isConsideredEvict(CHIRequestType type)
 bool isIndirectIdx(CHIRequestType type, CHIRequestType second_type) {
     return (
         ((type == CHIRequestType:Load) || (type == CHIRequestType:ReadOnce)) &&
-        ((second_type == CHIRequestType:ReadIndirect) ||
-        (second_type == CHIRequestType:WriteIndirect))
+        (second_type == CHIRequestType:ReadIndex)
     );
 }
 
-// An IDR (ReadValue/WriteValue), whatever type it was mapped to locally.
+// A value access (ReadValue/WriteValue), whatever type it was mapped to
+// locally: an IDR, or the core's own uop1 (LDVAL/STVAL).
 bool isIndirectVal(CHIRequestType type, CHIRequestType second_type)
 {
     return (
         (second_type == CHIRequestType:ReadValue) ||
         (second_type == CHIRequestType:WriteValue)
     );
+}
+
+// An IDR: a value access another controller (the Gather Unit) sent here.
+// The core's own uop1 (LDVAL/STVAL) is a value access whose requestor is
+// this controller; it is a normal load or store here (TBE id,
+// Sequencer callback, demand stats) and an IDR's HovAck is not its.
+bool isIdr(CHIRequestType type, CHIRequestType second_type,
+           MachineID requestor)
+{
+    return isIndirectVal(type, second_type) && (requestor != machineID);
 }
 // FFUTSYM
 
@@ -391,16 +401,25 @@ bool coalesce() {
 }
 
 void notifyCoalesced(Addr addr, RubyRequestType type, RequestPtr req,
-                     DataBlock data_blk, bool was_miss) {
+                     DataBlock data_blk, bool was_miss,
+                     std::string access_name) {
   DPRINTF(RubySlicc, "notifyCoalesced(addr=%#x, type=%s, was_miss=%d)\n",
                       addr, type, was_miss);
-  if (was_miss) {
-    cache.profileDemandMiss();
+  // MYSTUFF: a coalesced index access (uop0) is counted apart from demand
+  bool is_index := (type == RubyRequestType:LDIDX);
+  if (is_index && was_miss) {
+    cache.profileIndexMiss(access_name);
+  } else if (is_index) {
+    cache.profileIndexHit(access_name);
+  } else if (was_miss) {
+    cache.profileDemandMiss(access_name);
   } else {
-    cache.profileDemandHit();
+    cache.profileDemandHit(access_name);
   }
+  // FFUTSYM
   if (use_prefetcher && notify_coalesced) {
     bool is_read := (type == RubyRequestType:LD) ||
+                    (type == RubyRequestType:LDVAL) ||
                     (type == RubyRequestType:Load_Linked) ||
                     (type == RubyRequestType:IFETCH);
     if (was_miss) {
@@ -525,7 +544,7 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   // MYSTUFF: an IDR becomes a Load/Store here (manipulateType) but keeps
   // the hov id the Gather Unit gave it as txnId; Send_HovAck returns it.
   if (fromSequencer(in_msg.type) &&
-      (isIndirectVal(in_msg.type, in_msg.secondType) == false)) {
+      (isIdr(in_msg.type, in_msg.secondType, in_msg.requestor) == false)) {
     assert(in_msg.txnId == max_outstanding_transactions);
     tbe.txnId := static_cast(Addr, "value", tbe.storSlot);
   } else {
@@ -547,6 +566,7 @@ TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes"
   tbe.reqType := in_msg.type;
   tbe.secondType := in_msg.secondType;
 //   tbe.access_name := in_msg.access_name;
+  tbe.hov_spec := in_msg.hov_spec;
 // FFUTSYM
 
   tbe.isSeqReqValid := in_msg.isSeqReqValid;
@@ -635,6 +655,12 @@ TBE allocateSnoopTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes" {
   tbe.fwdRequestor := in_msg.fwdRequestor;
   tbe.reqType := in_msg.type;
   tbe.txnId := in_msg.txnId;
+  // MYSTUFF: the request behind the snoop, so a snoop this cache forwards
+  // upstream (prepareRequest copies tbe.seqReq) still names the
+  // requester's bytes (profileSnoopSharing)
+  tbe.seqReq := in_msg.seqReq;
+  tbe.isSeqReqValid := in_msg.isSeqReqValid;
+  // FFUTSYM
 
   tbe.snpNeedsData := in_msg.retToSrc;
 
@@ -788,6 +814,9 @@ void prepareRequest(TBE tbe, CHIRequestType type, CHIRequestMsg & out_msg) {
   out_msg.read_usefulness := tbe.read_usefulness;
   out_msg.write_usefulness := tbe.write_usefulness;
   out_msg.access_name := tbe.access_name;
+  out_msg.life_origin := tbe.dataBlk.getLifeOrigin();
+  out_msg.life_origin_mask := tbe.dataBlk.getLifeOriginMask();
+  out_msg.life_others_mask := tbe.dataBlk.getLifeOthersMask();
 
   out_msg.secondType := tbe.secondType;
   if (isConsideredEvict(out_msg.type)) {
@@ -854,6 +883,9 @@ void prepareRequestRetry(TBE tbe, CHIRequestMsg & out_msg) {
   out_msg.read_usefulness := tbe.read_usefulness;
   out_msg.write_usefulness := tbe.write_usefulness;
   out_msg.access_name := tbe.access_name;
+  out_msg.life_origin := tbe.dataBlk.getLifeOrigin();
+  out_msg.life_origin_mask := tbe.dataBlk.getLifeOriginMask();
+  out_msg.life_others_mask := tbe.dataBlk.getLifeOthersMask();
   out_msg.indirect_unit_id := tbe.indirect_unit_id;
   out_msg.value_unit_id := tbe.value_unit_id;
   out_msg.gather_unit_id := tbe.gather_unit_id;
@@ -954,8 +986,7 @@ void printResources() {
 bool indirectAllocCriterion(CHIRequestType second_type) {
   // Gather unit: allocate for index array cache lines
   bool gather_unit_criterion := (alloc_for_index &&
-                                  ((second_type == CHIRequestType:ReadIndirect) ||
-                                  (second_type == CHIRequestType:WriteIndirect)));
+                                  (second_type == CHIRequestType:ReadIndex));
   // Indirect unit (L1) and Value unit (shared): both allocate for data
   // array cache lines when they see ReadValue/WriteValue. The per-level
   // alloc_for_read_value/alloc_for_write_value booleans (set in config)
@@ -982,14 +1013,23 @@ bool needCacheEntry(CHIRequestType req_type, CHIRequestType second_type,
   }
 
   // MYSTUFF
+  // A notification carries DAGs for an index line the Gather Unit may have
+  // to fetch (FetchIndexLine); alloc_for_index decides whether it fills.
+  if (req_type == CHIRequestType:NotifyIndIdx) {
+    return gather_unit && alloc_for_index;
+  }
   // Apply HOV specific cache allocation criteria
   if (second_type != CHIRequestType:null) {
     // Positive whitelist: Only allow requests that actively fetch or write data
     // to allocate blocks based on indirect criteria. This prevents crashes with
     // dataless requests like CleanUnique or CMOs.
+    // A ReadUnique is left to the default criteria: its requester is about
+    // to write the line, so a copy kept here would be stale at once, and
+    // the flow from a state with the line only upstream (RUSC, RU, ...)
+    // has no fill step (Initiate_ReadUnique_HitUpstream). A WriteValue line
+    // reaches the Value Unit with the writer's write-back instead.
     bool is_data_request := (req_type == CHIRequestType:ReadShared) ||
                             (req_type == CHIRequestType:ReadNotSharedDirty) ||
-                            (req_type == CHIRequestType:ReadUnique) ||
                             (req_type == CHIRequestType:Load) ||
                             (req_type == CHIRequestType:Store);
     if (is_data_request) {
@@ -1021,10 +1061,15 @@ bool needCacheEntry(CHIRequestType req_type, CHIRequestType second_type,
 bool needDeallocCacheEntry(CHIRequestType req_type,
                            CHIRequestType second_type) {
   // MYSTUFF
-  // A level that caches this kind of indirect line keeps it, even when the
-  // request takes it unique or shared (e.g. the Value Unit on a WriteValue's
-  // ReadUnique, so it keeps caching the data array at block granularity).
-  if ((second_type != CHIRequestType:null) &&
+  // A level that caches this kind of indirect line keeps it when the
+  // request takes it shared (e.g. the Value Unit on a ReadValue's
+  // ReadShared, so it keeps caching the data array at block granularity).
+  // A request that takes the line unique is left to the default criteria
+  // (see needCacheEntry): the copy would be stale once the requester writes.
+  bool takes_unique := (req_type == CHIRequestType:ReadUnique) ||
+                       (req_type == CHIRequestType:MakeReadUnique) ||
+                       (req_type == CHIRequestType:CleanUnique);
+  if ((second_type != CHIRequestType:null) && (takes_unique == false) &&
       indirectAllocCriterion(second_type)) {
     return false;
   }
@@ -1192,6 +1237,12 @@ void deallocateReqTBE(TBE tbe) {
   // Clear any cached Request extensions for this TBE's line address.
   if (gather_unit) {
       clearExtensions(tbe.addr);
+  }
+  // MYSTUFF: a Sequencer or prefetch request (its own requestor, not a
+  // notification) gives its place in the core's budget back.
+  if ((tbe.requestor == machineID) &&
+      (tbe.reqType != CHIRequestType:NotifyIndIdx)) {
+    storSeqTBEs.decrementReserved();
   }
   storTBEs.removeEntryFromSlot(tbe.storSlot);
   TBEs.deallocate(tbe.addr);
@@ -1530,9 +1581,13 @@ Event reqToEvent(CHIRequestType type, bool is_prefetch) {
       return Event:AtomicNoReturn;
     }
   } else if (type == CHIRequestType:NotifyIndIdx) {
-    return Event:Fwd_NotifyIndIdx;
-  } else if (type == CHIRequestType:ProcessNotif) {
-    return Event:UpdateDAG;
+    // The Gather Unit consumes a notification; a cache above it absorbs
+    // or forwards it.
+    if (gather_unit) {
+      return Event:UpdateDAG;
+    } else {
+      return Event:Fwd_NotifyIndIdx;
+    }
   } else {
     error("Invalid CHIRequestType");
   }
@@ -1900,11 +1955,6 @@ void populateFromSeqReqMsg(CHIRequestMsg &out_msg, RubyRequest in_msg) {
     out_msg.is_local_pf := false;
     out_msg.is_remote_pf := false;
     out_msg.txnId := max_outstanding_transactions;
-    // For NOTIFY_INDIDX, use the sequencer's notif ID for tracking
-    // the dummy_pkt lifecycle. The sequencer maps RequestPtr -> notifId.
-    if (in_msg.Type == RubyRequestType:NOTIFY_INDIDX) {
-        out_msg.txnId := sequencer.getNotifId(out_msg.seqReq);
-    }
     out_msg.ns := !in_msg.isSecure;
     out_msg.atomic_op.clear();
     out_msg.atomic_op.orMask(in_msg.writeMask);
@@ -1918,17 +1968,32 @@ void populateFromSeqReqMsg(CHIRequestMsg &out_msg, RubyRequest in_msg) {
       } else {
         out_msg.type := CHIRequestType:Store;
       }
-    } else if (in_msg.Type == RubyRequestType:LDIND) {
-      out_msg.type := CHIRequestType:ReadIndirect;
-    } else if (in_msg.Type == RubyRequestType:STIND) {
-      out_msg.type := CHIRequestType:WriteIndirect;
+    // MYSTUFF: the two uops of an ldind or stind. Like an IDR arriving
+    // from the Gather Unit, each becomes a Load or Store here with its kind
+    // kept as secondType (manipulateType, manipulateSecondType), so the
+    // levels below see an index access (ReadIndex) or a value access
+    // (ReadValue/WriteValue: allocation by alloc_for_*_value, no training
+    // of the Gather Unit's prefetcher). Unmarked, a uop1 miss would reach
+    // the Gather Unit as a plain load sharing the ldind's PC with uop0,
+    // and its random data lines would keep the stride table from learning
+    // the index stream. IDRs stay apart from uop1 by requestor (isIdr).
+    } else if (in_msg.Type == RubyRequestType:LDIDX) {
+      out_msg.type := CHIRequestType:ReadIndex;
+    } else if (in_msg.Type == RubyRequestType:LDVAL) {
+      out_msg.type := CHIRequestType:ReadValue;
+    } else if (in_msg.Type == RubyRequestType:STVAL) {
+      assert(in_msg.Size < blockSize);
+      out_msg.type := CHIRequestType:WriteValue;
     } else if (in_msg.Type == RubyRequestType:NOTIFY_INDIDX) {
       out_msg.type := CHIRequestType:NotifyIndIdx;
+    // FFUTSYM
     } else if (in_msg.Type == RubyRequestType:ATOMIC_RETURN) {
       out_msg.type := CHIRequestType:AtomicLoad;
     } else if (in_msg.Type == RubyRequestType:ATOMIC_NO_RETURN) {
       out_msg.type := CHIRequestType:AtomicStore;
     } else {
+      DPRINTF(RubySlicc, "Unhandled RubyRequestType %s for %#x\n",
+              in_msg.Type, in_msg.LineAddress);
       error("Invalid RubyRequestType");
     }
 
@@ -1969,6 +2034,10 @@ void replicateRequestMsg(CHIRequestMsg &out_msg, CHIRequestMsg in_msg)
     out_msg.read_usefulness := in_msg.read_usefulness;
     out_msg.write_usefulness := in_msg.write_usefulness;
     out_msg.access_name := in_msg.access_name;
+    out_msg.life_origin := in_msg.life_origin;
+    out_msg.life_origin_mask := in_msg.life_origin_mask;
+    out_msg.life_others_mask := in_msg.life_others_mask;
+    out_msg.hov_spec := in_msg.hov_spec;
 }
 
 
@@ -1983,36 +2052,6 @@ void indirectDependentBoilerPlate(CHIRequestMsg &out_msg)
     // out_msg.fwdRequestor :=
 
     // NOTE: allowRetry is set explicitly by the caller (e.g. from hovTbe)
-    out_msg.isSeqReqValid := false;
-    // NOTE: Defaults to nullptr.
-    // out_msg.seqReq := null;
-    out_msg.is_local_pf := false;
-    out_msg.is_remote_pf := false;
-
-    // NOTE: Maybe able to use this for access id;
-    // NOTE: Defaults to false;
-    // out_msg.usesTxnId := false;
-    // NOTE: Defaults to 0;
-    out_msg.txnId := max_outstanding_transactions;
-
-
-    out_msg.secondType := CHIRequestType:null;
-}
-
-// figureOutNotifType removed — NotifyReadIndIdx/NotifyWriteIndIdx merged
-// into NotifyIndIdx. Read/write intent is in the DAG descriptor.
-
-void indirectNotifBoilerPlate(CHIRequestMsg &out_msg)
-{
-    out_msg.requestor := machineID;
-
-    out_msg.dataToFwdRequestor := false;
-    // NOTE: I don't know what to set for this right now. Might be able to set
-    // this to true later if we have compaction. I am starting to believe that
-    // I really need a HOVHelper SimObject at this point.
-    // out_msg.fwdRequestor :=
-
-    out_msg.allowRetry := true;
     out_msg.isSeqReqValid := false;
     // NOTE: Defaults to nullptr.
     // out_msg.seqReq := null;
@@ -2061,29 +2100,9 @@ bool cachedHere(State state)
 // isIndirectIdx and isIndirectVal are defined near the top of this file
 // (SLICC needs a function defined before its first use).
 
-bool isIndirectNotify(CHIRequestType type, CHIRequestType second_type)
-{
-    return type == CHIRequestType:NotifyIndIdx;
-}
-
-bool isIndirectNotifyFromCPU(CHIRequestType type, CHIRequestType second_type)
-{
-    return isIndirectNotify(type, second_type) && (second_type == CHIRequestType:null);
-}
-
-bool isIndirectNotifyNotFromCPU(CHIRequestType type, CHIRequestType second_type)
-{
-    return isIndirectNotify(type, second_type) && (second_type == CHIRequestType:NotifyIndIdx);
-}
-
 bool isIndirect(CHIRequestType type, CHIRequestType second_type)
 {
     return isIndirectIdx(type, second_type) || isIndirectVal(type, second_type);
-}
-
-bool isProcessNotify(CHIRequestType type, CHIRequestType second_type)
-{
-    return (type == CHIRequestType:ProcessNotif) && (second_type == CHIRequestType:NotifyIndIdx);
 }
 
 bool isPropagateEvict(CHIRequestType type, CHIRequestType second_type)
@@ -2093,16 +2112,12 @@ bool isPropagateEvict(CHIRequestType type, CHIRequestType second_type)
 
 CHIRequestType manipulateType(CHIRequestMsg msg)
 {
-    if (indirect_unit && msg.type == CHIRequestType:ReadIndirect) {
-        return CHIRequestType:Load;
-    } else if (indirect_unit && msg.type == CHIRequestType:WriteIndirect) {
+    if (indirect_unit && msg.type == CHIRequestType:ReadIndex) {
         return CHIRequestType:Load;
     } else if (indirect_unit && msg.type == CHIRequestType:ReadValue) {
         return CHIRequestType:Load;
     } else if (indirect_unit && msg.type == CHIRequestType:WriteValue) {
         return CHIRequestType:Store;
-    } else if (gather_unit && isIndirectNotify(msg.type, msg.secondType)) {
-        return CHIRequestType:ProcessNotif;
     } else {
         return msg.type;
     }
@@ -2110,16 +2125,12 @@ CHIRequestType manipulateType(CHIRequestMsg msg)
 
 CHIRequestType manipulateSecondType(CHIRequestMsg msg)
 {
-    if (indirect_unit && msg.type == CHIRequestType:ReadIndirect) {
-        return CHIRequestType:ReadIndirect;
-    } else if (indirect_unit && msg.type == CHIRequestType:WriteIndirect) {
-        return CHIRequestType:WriteIndirect;
+    if (indirect_unit && msg.type == CHIRequestType:ReadIndex) {
+        return CHIRequestType:ReadIndex;
     } else if (indirect_unit && msg.type == CHIRequestType:ReadValue) {
         return CHIRequestType:ReadValue;
     } else if (indirect_unit && msg.type == CHIRequestType:WriteValue) {
         return CHIRequestType:WriteValue;
-    } else if (gather_unit && msg.type == CHIRequestType:NotifyIndIdx) {
-        return CHIRequestType:NotifyIndIdx;
     } else {
         return msg.secondType;
     }
@@ -2132,21 +2143,32 @@ bool shouldNotifyPrefetcher(CHIRequestType type, CHIRequestType second_type) {
     if (isIndirectIdx(type, second_type)) {
         return gather_unit;
     }
+    // A notification or a post-evict write-back carries a DAG-only
+    // seqReq (no packet behind it): nothing for the prefetcher to learn.
+    if ((type == CHIRequestType:NotifyIndIdx) ||
+        isPropagateEvict(type, second_type)) {
+        return false;
+    }
     return true;
 }
 
-bool needPostEvictIdxLine(TBE tbe, CHIRequestType type, CHIRequestType second_type)
+// The transaction carries a DAG for an index line: an index access
+// (uop0), a notification, or a post-evict write-back propagated from a
+// cache above.
+bool carriesIndexDAG(TBE tbe)
 {
-    return isInvalid(tbe.gather_unit_id) && (
-                                            isIndirectIdx(type, second_type) ||
-                                            isIndirectNotifyFromCPU(type, second_type) ||
-                                            isPropagateEvict(type, second_type)
-    );
+    return isIndirectIdx(tbe.reqType, tbe.secondType) ||
+           (tbe.reqType == CHIRequestType:NotifyIndIdx) ||
+           isPropagateEvict(tbe.reqType, tbe.secondType);
 }
 
-bool needPostNotif(TBE tbe, CHIRequestType type, CHIRequestType second_type)
+// This cache is above the Gather Unit and still holds the index line
+// when the transaction ends: it must stash the DAG and post-evict the
+// line, so that the write-back carries the DAG to the Gather Unit.
+bool idxLineAboveGU(TBE tbe, State toBeState)
 {
-    return isInvalid(tbe.gather_unit_id) && isIndirectIdx(type, second_type);
+    return (gather_unit == false) && isInvalid(tbe.gather_unit_id) &&
+           cachedHere(toBeState) && carriesIndexDAG(tbe);
 }
 
 // Returns true if post-processing work remains before Final can fire.
@@ -2155,16 +2177,6 @@ bool needsPostProcess(Addr address, TBE tbe) {
     return true;
   }
   State toBeState := makeFinalState(tbe, getCacheEntry(address), getDirEntry(address));
-  if (needPostNotif(tbe, tbe.reqType, tbe.secondType) && cachedHere(toBeState) && (tbe.postNotifSent == false)) {
-    return true;
-  }
-  if (needPostEvictIdxLine(tbe, tbe.reqType, tbe.secondType) && cachedHere(toBeState) && (tbe.postEvictSent == false)) {
-    return true;
-  }
-  return false;
-}
-
-void dummy() {
-    DPRINTF(IndirectAccess, "Dummy function to place a breakpoint on for debugging.\n");
+  return idxLineAboveGU(tbe, toBeState) && (tbe.postEvictSent == false);
 }
 // FFUTSYM

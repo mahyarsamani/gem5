@@ -63,6 +63,7 @@
 #include "mem/ruby/profiler/Profiler.hh"
 #include "mem/ruby/protocol/PrefetchBit.hh"
 #include "mem/ruby/protocol/RubyAccessMode.hh"
+#include "mem/ruby/slicc_interface/AbstractController.hh"
 #include "mem/ruby/slicc_interface/RubyRequest.hh"
 #include "mem/ruby/slicc_interface/RubySlicc_Util.hh"
 #include "mem/ruby/system/RubySystem.hh"
@@ -104,16 +105,58 @@ Sequencer::Sequencer(const Params &p)
     // The profiler will collate these across different
     // sequencers and display those collated statistics.
     // MYSTUFF
-    hovLdindE2ELatency = new statistics::Histogram(this, "hovLdindE2ELatency",
-        statistics::units::Cycle::get(),
+    hovLdindE2ELatency = latencyDistribution("hovLdindE2ELatency",
         "LDIND latency from index-fetch issue to value arrival");
-    hovLdindE2ELatency->init(32);
+    hovLdindE2ELatencyLeader = latencyDistribution(
+        "hovLdindE2ELatencyLeader",
+        "hovLdindE2ELatency of uop0s whose DAG rode their own LDIDX");
+    hovLdindE2ELatencyMerged = latencyDistribution(
+        "hovLdindE2ELatencyMerged",
+        "hovLdindE2ELatency of uop0s merged onto an index line in flight "
+        "(their DAG rode the drain-time notification)");
+    hovLdindE2ELatencyNotified = latencyDistribution(
+        "hovLdindE2ELatencyNotified",
+        "hovLdindE2ELatency of uop0s sent as a NotifyIndIdxReq (index "
+        "forwarded in the LSQ, or the register form)");
     hovLdindUnmatched = new statistics::Scalar(this, "hovLdindUnmatched",
         statistics::units::Count::get(),
         "LDIND value arrivals with no matching index fetch");
     hovLdindStale = new statistics::Scalar(this, "hovLdindStale",
         statistics::units::Count::get(),
         "LDIND index fetches dropped without a value (e.g. squashed)");
+    m_hovCheckPeriod = p.hov_check_period;
+    m_hovGatherUnitPath = p.hov_gather_unit;
+    hovDagsSuppressed = new statistics::Vector(this, "hovDagsSuppressed",
+        statistics::units::Count::get(),
+        "DAG descriptors not sent because the Gather Unit's speculation "
+        "covered them, by path (aliased onto a line in flight, notify)");
+    hovDagsSuppressed->init(2)
+        .subname(0, "aliased")
+        .subname(1, "notify")
+        .flags(statistics::nozero);
+    hovDagsPrunedAtDrain = new statistics::Scalar(this,
+        "hovDagsPrunedAtDrain", statistics::units::Count::get(),
+        "DAG descriptors dropped from a line's drain notification because "
+        "the Gather Unit's speculation covered them");
+    hovNotifsElided = new statistics::Scalar(this, "hovNotifsElided",
+        statistics::units::Count::get(),
+        "drain notifications not sent because every descriptor was "
+        "covered");
+    hovValueChecks = new statistics::Scalar(this, "hovValueChecks",
+        statistics::units::Count::get(),
+        "LDIND values compared with a functional read");
+    hovValueMismatches = new statistics::Scalar(this, "hovValueMismatches",
+        statistics::units::Count::get(),
+        "LDIND values that differ from a functional read");
+    hovIndexChecks = new statistics::Scalar(this, "hovIndexChecks",
+        statistics::units::Count::get(),
+        "Core-supplied index values compared with a functional read");
+    hovIndexMismatches = new statistics::Scalar(this, "hovIndexMismatches",
+        statistics::units::Count::get(),
+        "Core-supplied index values that differ from a functional read");
+    hovChecksUnchecked = new statistics::Scalar(this, "hovChecksUnchecked",
+        statistics::units::Count::get(),
+        "hov checks skipped: no complete copy for the functional read");
     // FFUTSYM
 
     m_outstandReqHist.init(10);
@@ -184,6 +227,20 @@ Sequencer::~Sequencer()
     delete invalidLabelCache;
     // FFUTSYM
 }
+
+// MYSTUFF
+void
+Sequencer::init()
+{
+    RubyPort::init();
+    if (!m_hovGatherUnitPath.empty()) {
+        SimObject *obj = SimObject::find(m_hovGatherUnitPath.c_str());
+        m_hovGatherUnit = dynamic_cast<AbstractController *>(obj);
+        fatal_if(!m_hovGatherUnit, "%s: hov_gather_unit %s is not a Ruby "
+                 "controller.", name(), m_hovGatherUnitPath);
+    }
+}
+// FFUTSYM
 
 void
 Sequencer::llscLoadLinked(const Addr claddr)
@@ -405,8 +462,8 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType primary_type,
     }
 
     Addr line_addr = makeLineAddress(pkt->getAddr());
-    // Two-uop model: the index access (uop0, LDIND/STIND, carries the DAG)
-    // and the value access (uop1, a normal LD/ST that carries the alias)
+    // Two-uop model: the index access (uop0, LDIDX, carries the DAG) and
+    // the value access (uop1, LDVAL/STVAL, carries the alias)
     // both use m_RequestTable keyed by their line address.
     // Check if there is any outstanding request for the same cache line.
     auto &seq_req_list = m_RequestTable[line_addr];
@@ -418,7 +475,14 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType primary_type,
         // descriptors into this line's DAG in m_IndirectDAGTable. The table
         // holds its own copy, so merging never changes a request's DAG
         // (which the CPU and the request still share).
-        if (auto new_dag = pkt->req->getExtension<DependentAccessGen>()) {
+        auto new_dag = pkt->req->getExtension<DependentAccessGen>();
+        // MYSTUFF: the Gather Unit's speculation already sent its IDR.
+        if (new_dag && hovCovered(*new_dag)) {
+            (*hovDagsSuppressed)[0] += new_dag->numDescriptors();
+            new_dag = nullptr;
+        }
+        // FFUTSYM
+        if (new_dag) {
             auto it = m_IndirectDAGTable.find(line_addr);
             if (it != m_IndirectDAGTable.end()) {
                 it->second->merge(*new_dag);
@@ -566,6 +630,7 @@ Sequencer::writeCallback(Addr address, Addr accAddress, DataBlock& data,
 
         if (ruby_request) {
             assert(seq_req.m_type != RubyRequestType_LD);
+            assert(seq_req.m_type != RubyRequestType_LDVAL);
             assert(seq_req.m_type != RubyRequestType_Load_Linked);
             assert(seq_req.m_type != RubyRequestType_IFETCH);
             assert(seq_req.m_type != RubyRequestType_ATOMIC_RETURN);
@@ -574,6 +639,7 @@ Sequencer::writeCallback(Addr address, Addr accAddress, DataBlock& data,
 
         // handle write request
         if ((seq_req.m_type != RubyRequestType_LD) &&
+            (seq_req.m_type != RubyRequestType_LDVAL) &&
             (seq_req.m_type != RubyRequestType_Load_Linked) &&
             (seq_req.m_type != RubyRequestType_IFETCH)) {
             // LL/SC support (tested with ARMv8)
@@ -651,8 +717,8 @@ Sequencer::processReadCallback(SequencerRequest &seq_req,
                (seq_req.m_type == RubyRequestType_Load_Linked) ||
                (seq_req.m_type == RubyRequestType_IFETCH) ||
                // MYSTUFF
-               (seq_req.m_type == RubyRequestType_LDIND) ||
-               (seq_req.m_type == RubyRequestType_STIND));
+               (seq_req.m_type == RubyRequestType_LDVAL) ||
+               (seq_req.m_type == RubyRequestType_LDIDX));
                // FFUTSYM
     }
     if ((seq_req.m_type != RubyRequestType_LD) &&
@@ -660,8 +726,8 @@ Sequencer::processReadCallback(SequencerRequest &seq_req,
         (seq_req.m_type != RubyRequestType_IFETCH) &&
         (seq_req.m_type != RubyRequestType_REPLACEMENT) &&
         // MYSTUFF
-        (seq_req.m_type != RubyRequestType_LDIND) &&
-        (seq_req.m_type != RubyRequestType_STIND)) {
+        (seq_req.m_type != RubyRequestType_LDVAL) &&
+        (seq_req.m_type != RubyRequestType_LDIDX)) {
         // FFUTSYM
         // Write request: reissue request to the cache hierarchy
         issueRequest(seq_req.pkt, seq_req.m_second_type);
@@ -704,8 +770,8 @@ Sequencer::readCallback(Addr address, Addr accAddress, DataBlock& data,
                    (seq_req.m_type == RubyRequestType_Load_Linked) ||
                    (seq_req.m_type == RubyRequestType_IFETCH) ||
                    // MYSTUFF
-                   (seq_req.m_type == RubyRequestType_LDIND) ||
-                   (seq_req.m_type == RubyRequestType_STIND));
+                   (seq_req.m_type == RubyRequestType_LDVAL) ||
+                   (seq_req.m_type == RubyRequestType_LDIDX));
                    // FFUTSYM
         }
         if (ruby_request) {
@@ -740,17 +806,97 @@ Sequencer::sendMergedDAGNotif(Addr address)
     if (it == m_IndirectDAGTable.end()) {
         return;
     }
+    // Descriptors the Gather Unit's speculation covered by now (the
+    // line's data has just come through it) need no notification.
+    if (m_hovGatherUnit) {
+        RequestorID rid = it->second->requestorId();
+        size_t pruned = it->second->eraseDescriptorsIf(
+            [&](const DependentAccessGen::DepDescriptor &d, size_t is) {
+                return hovCovered(d, is, rid);
+            });
+        *hovDagsPrunedAtDrain += pruned;
+        if (it->second->numDescriptors() == 0) {
+            (*hovNotifsElided)++;
+            DPRINTF(IndirectAccess, "Drain notification for %#x elided: "
+                    "%d descriptors covered.\n", address, pruned);
+            return;
+        }
+    }
+    sendDAGNotif(address, it->second);
+}
 
-    RequestPtr dummy_req = std::make_shared<Request>();
-    dummy_req->setExtension<DependentAccessGen>(it->second);
-    PacketPtr dummy_pkt = new Packet(dummy_req, MemCmd::InvalidCmd);
+bool
+Sequencer::hovCovered(const DependentAccessGen::DepDescriptor &desc,
+                      size_t index_size, RequestorID rid)
+{
+    if (!m_hovGatherUnit || index_size == 0) {
+        return false;
+    }
+    int elem = getOffset(desc.indexAddr) / index_size;
+    bool write = desc.intent == DependentAccessGen::AccessIntent::Write;
+    return m_hovGatherUnit->hovCovers(makeLineAddress(desc.indexAddr), rid,
+                                      desc.pair, elem, write);
+}
 
-    // Assign a unique notif ID for tracking this dummy_pkt.
-    // The protocol will use this ID (via txnId) to identify
-    // the NotifAck and call cleanupNotifPkt.
-    uint64_t notifId = m_nextNotifId++;
-    m_NotifPktTable[notifId] = dummy_pkt;
-    m_NotifIdTable[dummy_req] = notifId;
+bool
+Sequencer::hovCovered(const DependentAccessGen &dag)
+{
+    // A single uop0's DAG; a merged one is left to the drain's prune.
+    if (!m_hovGatherUnit || dag.numDescriptors() != 1) {
+        return false;
+    }
+    return hovCovered(dag.descriptor(0), dag.indexSize(),
+                      dag.requestorId());
+}
+
+namespace
+{
+
+std::shared_ptr<DependentAccessGen>
+cloneDAG(const DependentAccessGen &dag)
+{
+    return std::shared_ptr<DependentAccessGen>(
+        static_cast<DependentAccessGen *>(dag.clone().release()));
+}
+
+} // anonymous namespace
+
+void
+Sequencer::deliverDAG(Addr line_addr, const DependentAccessGen &dag)
+{
+    if (m_RequestTable.count(line_addr)) {
+        // A request for the line is outstanding: the DAG joins the
+        // merged notification that the line's drain sends.
+        auto it = m_IndirectDAGTable.find(line_addr);
+        if (it != m_IndirectDAGTable.end()) {
+            it->second->merge(dag);
+        } else {
+            m_IndirectDAGTable[line_addr] = cloneDAG(dag);
+        }
+        return;
+    }
+    sendDAGNotif(line_addr, cloneDAG(dag));
+}
+
+void
+Sequencer::deliverDAGReq(Addr line_addr, RequestPtr req)
+{
+    auto dag = req->getExtension<DependentAccessGen>();
+    assert(dag);
+    deliverDAG(line_addr, *dag);
+}
+
+void
+Sequencer::sendDAGNotif(Addr address,
+                        std::shared_ptr<DependentAccessGen> dag)
+{
+    // A line-sized request carries the DAG. No packet is behind it: the
+    // RubyRequest holds the RequestPtr itself, and the protocol only
+    // ever reads that and the message's own fields.
+    RequestPtr dag_req = std::make_shared<Request>(
+        address, m_ruby_system->getBlockSizeBytes(), 0,
+        m_controller->getRequestorId());
+    dag_req->setExtension<DependentAccessGen>(dag);
 
     auto msg = std::make_shared<RubyRequest>(
                                 clockEdge(),
@@ -759,10 +905,18 @@ Sequencer::sendMergedDAGNotif(Addr address)
                                 m_ruby_system->getBlockSizeBytes(),
                                 0, RubyRequestType_NOTIFY_INDIDX,
                                 RubyAccessMode_Supervisor,
-                                dummy_pkt, PrefetchBit_No, 0, coreId()
+                                nullptr, PrefetchBit_No, 0, coreId()
                             );
+    msg->m_req = dag_req;
     // Each merged descriptor carries its own alias; the notif has none.
     msg->m_alias = 0;
+    // The index line's name, as the label cache knows it from the index
+    // accesses that touched it, names the Gather Unit's lookup.
+    if (m_sequencer_type == SequencerType::Data) {
+        auto label = labelCache->lookup(address);
+        if (label)
+            msg->m_accessName = label.value();
+    }
     Cycles latency = m_controller->mandatoryQueueLatency(
         RubyRequestType_NOTIFY_INDIDX);
     DPRINTFR(ProtocolTrace, "%15s %3s %10s%20s %6s>%-6s %#x %s\n",
@@ -775,35 +929,6 @@ Sequencer::sendMergedDAGNotif(Addr address)
                         );
 }
 
-// FFUTSYM
-
-uint64_t
-Sequencer::getNotifId(const RequestPtr& req) const
-{
-    auto it = m_NotifIdTable.find(req);
-    panic_if(it == m_NotifIdTable.end(),
-             "getNotifId: no notif ID found for request %p", req.get());
-    return it->second;
-}
-
-void
-Sequencer::cleanupNotifPkt(uint64_t notifId)
-{
-    auto pkt_it = m_NotifPktTable.find(notifId);
-    panic_if(pkt_it == m_NotifPktTable.end(),
-             "cleanupNotifPkt: no dummy_pkt for notifId %llu", notifId);
-
-    // Remove the RequestPtr → notifId mapping
-    RequestPtr req = pkt_it->second->req;
-    m_NotifIdTable.erase(req);
-
-    // Delete the leaked dummy_pkt and remove from table
-    delete pkt_it->second;
-    m_NotifPktTable.erase(pkt_it);
-
-    DPRINTF(IndirectAccess, "cleanupNotifPkt: cleaned up notifId %llu\n",
-            notifId);
-}
 // FFUTSYM
 
 void
@@ -865,6 +990,32 @@ Sequencer::atomicCallback(Addr address, DataBlock& data,
 }
 
 // MYSTUFF
+statistics::Distribution *
+Sequencer::latencyDistribution(const std::string &name, const char *desc)
+{
+    auto *stat = new statistics::Distribution(
+        this, name.c_str(), statistics::units::Cycle::get(), desc);
+    stat->init(0, LATENCY_MAX_CYCLES, LATENCY_BUCKET_CYCLES);
+    return stat;
+}
+
+std::string
+Sequencer::accessNameOf(RequestPtr req) const
+{
+    // As issueRequest names a request (the instruction's own label first,
+    // the label cache otherwise), without caching a first touch: a
+    // coalesced request never reached issueRequest.
+    auto from_cpu = req->getExtension<MemAccessName>();
+    if (from_cpu != nullptr)
+        return from_cpu->name();
+    if (m_sequencer_type == SequencerType::Data) {
+        auto label = labelCache->lookup(req->getPaddr());
+        if (label)
+            return label.value();
+    }
+    return "";
+}
+
 void
 Sequencer::handleIndArrival(PacketPtr pkt)
 {
@@ -873,18 +1024,16 @@ Sequencer::handleIndArrival(PacketPtr pkt)
         prodExitTimes.erase(pkt->req);
         for (auto [relation_name, instance_id]: relation_tags) {
             if (indRelProdAccLat.find(relation_name) == indRelProdAccLat.end()) {
-                statistics::Histogram* new_stat = new statistics::Histogram(
-                        this,
-                        csprintf("indRelProdAccLat.%s", relation_name).c_str(),
-                        statistics::units::Tick::get(),
-                        "Access latency for the producer of the indirect access.");
-                new_stat->init(64);
-                indRelProdAccLat[relation_name] = new_stat;
+                indRelProdAccLat[relation_name] = latencyDistribution(
+                        csprintf("indRelProdAccLat.%s", relation_name),
+                        "Access latency for the producer of the indirect "
+                        "access.");
             }
             DPRINTF(LatencyBreakdown, "%s: Sampling producer access latency for "
                     "relation %s with instance id %d at %d ticks.\n",
                     __func__, relation_name, instance_id, curTick() - exit_time);
-            indRelProdAccLat[relation_name]->sample(curTick() - exit_time);
+            indRelProdAccLat[relation_name]->sample(
+                ticksToCycles(curTick() - exit_time));
         }
     }
     if (consExitTimes.find(pkt->req) != consExitTimes.end()) {
@@ -893,35 +1042,29 @@ Sequencer::handleIndArrival(PacketPtr pkt)
         auto [relation_name, instance_id] = relation_tags[0];
         consExitTimes.erase(pkt->req);
         if (indRelConsAccLat.find(relation_name) == indRelConsAccLat.end()) {
-            statistics::Histogram* new_stat = new statistics::Histogram(
-                    this,
-                    csprintf("indRelConsAccLat.%s", relation_name).c_str(),
-                    statistics::units::Tick::get(),
+            indRelConsAccLat[relation_name] = latencyDistribution(
+                    csprintf("indRelConsAccLat.%s", relation_name),
                     "Access latency for the consumer of the indirect access.");
-            new_stat->init(64);
-            indRelConsAccLat[relation_name] = new_stat;
         }
         DPRINTF(LatencyBreakdown, "%s: Sampling consumer access latency for "
                 "relation %s with instance id %d at %d ticks.\n",
                 __func__, relation_name, instance_id, curTick() - exit_time);
-        indRelConsAccLat[relation_name]->sample(curTick() - exit_time);
+        indRelConsAccLat[relation_name]->sample(
+            ticksToCycles(curTick() - exit_time));
         if ((indExitTimes.find(relation_name) != indExitTimes.end()) &&
             (indExitTimes[relation_name].find(instance_id) != indExitTimes[relation_name].end())) {
             Tick overall_exit_time = indExitTimes[relation_name][instance_id];
             indExitTimes[relation_name].erase(instance_id);
             if (indRelAccLat.find(relation_name) == indRelAccLat.end()) {
-                statistics::Histogram* new_stat = new statistics::Histogram(
-                        this,
-                        csprintf("indRelAccLat.%s", relation_name).c_str(),
-                        statistics::units::Tick::get(),
+                indRelAccLat[relation_name] = latencyDistribution(
+                        csprintf("indRelAccLat.%s", relation_name),
                         "Overall access latency for the indirect access.");
-                new_stat->init(64);
-                indRelAccLat[relation_name] = new_stat;
             }
             DPRINTF(LatencyBreakdown, "%s: Sampling overall access latency for "
                     "relation %s with instance id %d at %d ticks.\n",
                     __func__, relation_name, instance_id, curTick() - overall_exit_time);
-            indRelAccLat[relation_name]->sample(curTick() - overall_exit_time);
+            indRelAccLat[relation_name]->sample(
+                ticksToCycles(curTick() - overall_exit_time));
         }
     }
 }
@@ -952,7 +1095,8 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
         // account for it in its hit/miss stats and/or train prefetchers
         // (this is protocol-dependent)
         m_controller->notifyCoalesced(request_address, type, pkt->req,
-                                      data, externalHit);
+                                      data, externalHit,
+                                      accessNameOf(pkt->req));
     }
 
     // Load-linked handling
@@ -976,8 +1120,8 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
             (type == RubyRequestType_Load_Linked) ||
             (type == RubyRequestType_ATOMIC_RETURN) ||
             // MYSTUFF
-            (type == RubyRequestType_LDIND) ||
-            (type == RubyRequestType_STIND)
+            (type == RubyRequestType_LDVAL) ||
+            (type == RubyRequestType_LDIDX)
             // FFUTSYM
             ) {
             pkt->setData(
@@ -987,6 +1131,10 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
                     makeLineAddress(request_address),
                     getOffset(request_address), pkt->getSize());
             data.setReadUsefulness(getOffset(request_address), pkt->getSize(), name(), makeLineAddress(request_address));
+            // MYSTUFF: lifetime usefulness, by this core (the Sequencer)
+            data.setLifetime(getOffset(request_address), pkt->getSize(),
+                             getId());
+            // FFUTSYM
 
            if (type == RubyRequestType_ATOMIC_RETURN) {
                DPRINTF(RubySequencer, "ATOMIC RETURN data %s\n", data);
@@ -1020,6 +1168,10 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
                 makeLineAddress(request_address),
                 getOffset(request_address), pkt->getSize());
             data.setWriteUsefulness(getOffset(request_address), pkt->getSize(), name(), makeLineAddress(request_address));
+            // MYSTUFF: lifetime usefulness, by this core (the Sequencer)
+            data.setLifetime(getOffset(request_address), pkt->getSize(),
+                             getId());
+            // FFUTSYM
             DPRINTF(RubySequencer, "set data %s\n", data);
         }
     }
@@ -1041,14 +1193,16 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
     // MYSTUFF: must run before pkt can be freed (delete / ruby_hit_callback)
     handleIndArrival(pkt);
     if (!rs->getWarmupEnabled() && !rs->getCooldownEnabled()) {
-        // uop0 is an indirect read carrying the DAG; uop1 (the value) is a
-        // normal load that only carries the alias.
-        if (type == RubyRequestType_LDIND &&
+        // uop0 is an index read carrying the DAG; uop1 (the value) is a
+        // value access that only carries the alias.
+        if (type == RubyRequestType_LDIDX &&
             pkt->req->getExtension<DependentAccessGen>()) {
-            hovRecordLdindIndex(srequest, data);    // uop0: index arrived
-        } else if (type == RubyRequestType_LD &&
-                   pkt->req->getExtension<IndirectAccessAlias>()) {
+            // uop0: index arrived; a coalesced one aliased onto the line,
+            // so its DAG was merged into the drain-time notification
+            hovRecordLdindIndex(srequest, data, was_coalesced);
+        } else if (type == RubyRequestType_LDVAL) {
             hovSampleLdindValue(srequest);          // uop1: value arrived
+            hovCheckValue(pkt, data);
         }
     }
     // FFUTSYM
@@ -1069,21 +1223,23 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
 // MYSTUFF
 void
 Sequencer::hovRecordLdindIndex(SequencerRequest *srequest,
-                               const DataBlock &data)
+                               const DataBlock &data, bool merged)
 {
     PacketPtr pkt = srequest->pkt;
     auto dag = pkt->req->getExtension<DependentAccessGen>();
     // A request's own DAG is never merged (merges happen in the
     // Sequencer's copies in m_IndirectDAGTable).
     if (dag->descriptor(0).intent != DependentAccessGen::AccessIntent::Read) {
-        return;                                     // STIND uop0
+        return;                                     // an stind's uop0
     }
     uint64_t index = 0;
     unsigned size = pkt->getSize();
     assert(size <= sizeof(index));
     std::memcpy(&index, data.getData(getOffset(pkt->getAddr()), size), size);
     Addr data_pa = dag->genAddress(index);
-    m_hovLdindPending[data_pa].push_back(srequest->issue_time);
+    m_hovLdindPending[data_pa].push_back(
+        {srequest->issue_time,
+         merged ? HovDagKind::Merged : HovDagKind::Leader});
 }
 
 void
@@ -1097,18 +1253,94 @@ Sequencer::hovSampleLdindValue(SequencerRequest *srequest)
     auto &pending = it->second;
     // Index fetches whose value never came (squashed uop1) age out.
     while (!pending.empty() &&
-           curCycle() - pending.front() > m_deadlock_threshold) {
+           curCycle() - pending.front().issue > m_deadlock_threshold) {
         pending.pop_front();
         (*hovLdindStale)++;
     }
     if (pending.empty()) {
         (*hovLdindUnmatched)++;
     } else {
-        hovLdindE2ELatency->sample(curCycle() - pending.front());
+        Cycles latency = curCycle() - pending.front().issue;
+        hovLdindE2ELatency->sample(latency);
+        switch (pending.front().kind) {
+          case HovDagKind::Leader:
+            hovLdindE2ELatencyLeader->sample(latency);
+            break;
+          case HovDagKind::Merged:
+            hovLdindE2ELatencyMerged->sample(latency);
+            break;
+          case HovDagKind::Notified:
+            hovLdindE2ELatencyNotified->sample(latency);
+            break;
+        }
         pending.pop_front();
     }
     if (pending.empty()) {
         m_hovLdindPending.erase(it);
+    }
+}
+
+bool
+Sequencer::hovFunctionalRead(Addr paddr, unsigned size, uint8_t *buf)
+{
+    RequestPtr req = std::make_shared<Request>(
+        paddr, size, 0, m_controller->getRequestorId());
+    Packet fpkt(req, MemCmd::ReadReq);
+    fpkt.dataStatic(buf);
+    return m_ruby_system->functionalRead(&fpkt);
+}
+
+void
+Sequencer::hovCheckValue(PacketPtr pkt, const DataBlock &data)
+{
+    if (m_hovCheckPeriod == 0 || ++m_hovValueSeen % m_hovCheckPeriod)
+        return;
+    unsigned size = pkt->getSize();
+    uint8_t expected[sizeof(uint64_t)];
+    assert(size <= sizeof(expected));
+    if (!hovFunctionalRead(pkt->getAddr(), size, expected)) {
+        (*hovChecksUnchecked)++;
+        return;
+    }
+    (*hovValueChecks)++;
+    const uint8_t *got = data.getData(getOffset(pkt->getAddr()), size);
+    if (std::memcmp(got, expected, size) != 0) {
+        (*hovValueMismatches)++;
+        uint64_t got_v = 0, expected_v = 0;
+        std::memcpy(&got_v, got, size);
+        std::memcpy(&expected_v, expected, size);
+        warn_once("%s: LDIND value mismatch at %#x: got %#x, memory "
+                  "holds %#x (hovValueMismatches counts them all).\n",
+                  name(), pkt->getAddr(), got_v, expected_v);
+        DPRINTF(IndirectAccess, "LDIND value mismatch at %#x: got %#x, "
+                "memory holds %#x\n", pkt->getAddr(), got_v, expected_v);
+    }
+}
+
+void
+Sequencer::hovCheckIndex(PacketPtr pkt, const DependentAccessGen &dag)
+{
+    if (m_hovCheckPeriod == 0 || ++m_hovIndexSeen % m_hovCheckPeriod)
+        return;
+    unsigned size = pkt->getSize();
+    uint8_t buf[sizeof(uint64_t)];
+    assert(size <= sizeof(buf));
+    if (!hovFunctionalRead(pkt->getAddr(), size, buf)) {
+        (*hovChecksUnchecked)++;
+        return;
+    }
+    (*hovIndexChecks)++;
+    uint64_t expected = 0;
+    std::memcpy(&expected, buf, size);
+    if (dag.indexValue() != expected) {
+        (*hovIndexMismatches)++;
+        warn_once("%s: index mismatch at %#x: the core supplied %#x, "
+                  "memory holds %#x (hovIndexMismatches counts them "
+                  "all).\n", name(), pkt->getAddr(), dag.indexValue(),
+                  expected);
+        DPRINTF(IndirectAccess, "Index mismatch at %#x: the core supplied "
+                "%#x, memory holds %#x\n", pkt->getAddr(), dag.indexValue(),
+                expected);
     }
 }
 // FFUTSYM
@@ -1179,9 +1411,10 @@ Sequencer::completeHitCallback(std::vector<PacketPtr> & mylist)
 
             pkt->senderState = ss->predecessor;
 
-            if (pkt->cmd != MemCmd::WriteReq) {
-                // for WriteReq, we keep the original senderState until
-                // writeCompleteCallback
+            if ((pkt->cmd != MemCmd::WriteReq) &&
+                (pkt->cmd != MemCmd::WriteValReq)) {
+                // for WriteReq (and WriteValReq, uop1's), we keep the
+                // original senderState until writeCompleteCallback
                 delete ss;
             }
 
@@ -1262,6 +1495,36 @@ Sequencer::makeRequest(PacketPtr pkt)
         return RequestStatus_BufferFull;
     }
 
+    // MYSTUFF
+    // A uop0 whose index value the LSQ forwarded from an older uop0 only
+    // delivers its DAG: no request-table entry, no data back. The port
+    // turns the packet into its response right away.
+    if (pkt->cmd == MemCmd::NotifyIndIdxReq) {
+        auto dag = pkt->req->getExtension<DependentAccessGen>();
+        assert(dag);
+        // The core has index[i] (forwarded, or the register form): the
+        // value access that follows is paired with this issue for the
+        // end-to-end latency, as hovRecordLdindIndex does on a data
+        // return.
+        if (dag->hasIndexValue() && !dag->isMerged() &&
+            dag->hasTranslator()) {
+            m_hovLdindPending[dag->genAddress(dag->indexValue())]
+                .push_back({curCycle(), HovDagKind::Notified});
+        }
+        if (dag->hasIndexValue()) {
+            hovCheckIndex(pkt, *dag);
+        }
+        // The Gather Unit's speculation already sent its IDR.
+        if (hovCovered(*dag)) {
+            (*hovDagsSuppressed)[1] += dag->numDescriptors();
+        } else {
+            deliverDAG(makeLineAddress(pkt->getAddr()), *dag);
+        }
+        ruby_hit_callback(pkt);
+        return RequestStatus_Issued;
+    }
+    // FFUTSYM
+
     RubyRequestType primary_type = RubyRequestType_NULL;
     RubyRequestType secondary_type = RubyRequestType_NULL;
 
@@ -1339,8 +1602,10 @@ Sequencer::makeRequest(PacketPtr pkt)
             //
             // Note: M5 packets do not differentiate ST from RMW_Write
             //{
-            if (pkt->isIndirect()) {
-                primary_type = secondary_type = RubyRequestType_STIND;
+            if (pkt->isIndirectVal()) {
+                // uop1 of an stind: a store to the data address that the
+                // levels below treat as a value access.
+                primary_type = secondary_type = RubyRequestType_STVAL;
             } else {
                 primary_type = secondary_type = RubyRequestType_ST;
             }
@@ -1350,8 +1615,14 @@ Sequencer::makeRequest(PacketPtr pkt)
                 primary_type = secondary_type = htmCmdToRubyRequestType(pkt);
             } else if (pkt->req->isInstFetch()) {
                 primary_type = secondary_type = RubyRequestType_IFETCH;
-            } else if (pkt->isIndirect()) {
-                primary_type = secondary_type = RubyRequestType_LDIND;
+            } else if (pkt->isIndirectIdx()) {
+                // uop0 of an ldind or stind: reads index[i] and carries
+                // the DAG (its intent says read or write).
+                primary_type = secondary_type = RubyRequestType_LDIDX;
+            } else if (pkt->isIndirectVal()) {
+                // uop1 of an ldind: a load of the data address that the
+                // levels below treat as a value access.
+                primary_type = secondary_type = RubyRequestType_LDVAL;
             } else {
                 if (pkt->req->isReadModifyWrite()) {
                     primary_type = RubyRequestType_RMW_Read;
@@ -1390,14 +1661,12 @@ Sequencer::makeRequest(PacketPtr pkt)
         return status;
 
     // Log VA→PA mapping for indirect accesses (for trace analysis)
-    if (primary_type == RubyRequestType_LDIND ||
-        primary_type == RubyRequestType_STIND) {
-        DPRINTF(IndirectAccess, "SEQ: va=%#x pa=%#x line_pa=%#x type=%s "
+    if (primary_type == RubyRequestType_LDIDX) {
+        DPRINTF(IndirectAccess, "SEQ: va=%#x pa=%#x line_pa=%#x type=LDIDX "
                 "aliased=%d\n",
                 pkt->req->hasVaddr() ? pkt->req->getVaddr() : 0,
                 pkt->getAddr(),
                 makeLineAddress(pkt->getAddr()),
-                primary_type == RubyRequestType_LDIND ? "LDIND" : "STIND",
                 status == RequestStatus_Aliased ? 1 : 0);
     }
 

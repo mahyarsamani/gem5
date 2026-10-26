@@ -52,6 +52,7 @@
 #include "mem/port.hh"
 #include "params/BaseCPU.hh"
 #include "sim/full_system.hh"
+#include "sim/system.hh"
 
 namespace gem5
 {
@@ -251,6 +252,18 @@ unserialize(ThreadContext &tc, CheckpointIn &cp)
 void
 takeOverFrom(ThreadContext &ntc, ThreadContext &otc)
 {
+    // MYSTUFF
+    // In SE mode a thread created by clone() runs its own Process object
+    // (the configured one is only the first thread's), so the context that
+    // takes over gets the old context's process; in FS mode there is none.
+    // A thread waiting on a futex is recorded by its context, so its waits
+    // move to the new context too (else a wakeup would activate the
+    // switched-out CPU).
+    if (!FullSystem) {
+        ntc.setProcessPtr(otc.getProcessPtr());
+        otc.getSystemPtr()->futexMap.replaceThreadContext(&otc, &ntc);
+    }
+    // FFUTSYM
     assert(ntc.getProcessPtr() == otc.getProcessPtr());
 
     ntc.setStatus(otc.status());

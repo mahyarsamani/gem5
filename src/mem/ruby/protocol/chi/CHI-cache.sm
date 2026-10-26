@@ -106,6 +106,11 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   int number_of_DVM_TBEs;
   int number_of_DVM_snoop_TBEs;
   int number_of_HOV_TBEs := 16;
+  // TBEs only IDRs may take (the Indirect Unit): the core's own requests
+  // and prefetches share the other number_of_TBEs - idr_reserved_tbes
+  // (storSeqTBEs); notifications from the Sequencer are outside that
+  // budget, standing in for a notification path that needs no TBE.
+  int idr_reserved_tbes := 0;
 
   // replacements use the same TBE slot as the request that triggered it
   // in this case the number_of_repl_TBEs parameter is ignored
@@ -242,6 +247,27 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
   bool profile_usefulness := "True";
   bool notify_coalesced := "True";
+
+  // Coalesce IDRs at the Gather Unit: the DAGs of one index line whose
+  // dependent accesses share a data line send one IDR (a write among them
+  // makes it a WriteValue), and an IDR whose data line has one in flight,
+  // parked in retry (lifted to a write in place) or among the last
+  // idr_recent_lines sent is dropped. A dropped IDR costs only the early
+  // fill: uop1 is a real access and fetches the line itself.
+  bool idr_coalesce := "False";
+  int idr_recent_lines := 64;
+
+  // In-line speculation at the Gather Unit: with an index line's data
+  // here, the first DAG of each (core, pair) on it makes IDRs for the
+  // line's elements after its own (1, forward) or all of them (2, line);
+  // 0 is off. Cover rows (which elements have an IDR) live for
+  // hov_spec_window cycles on at most hov_spec_lines index lines; a real
+  // DAG for a covered element is dropped. A speculated write is a read
+  // unless hov_spec_writes.
+  int hov_spec_mode := 0;
+  int hov_spec_lines := 64;
+  Cycles hov_spec_window := 4000;
+  bool hov_spec_writes := "False";
   // FFUTSYM
 {
 
@@ -334,6 +360,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     AllocRequest,           desc="Allocates a TBE for a request. Triggers a retry if table is full";
     AllocRequestWithCredit, desc="Allocates a TBE for a request. Always succeeds.";
     AllocSeqRequest,        desc="Allocates a TBE for a sequencer request. Stalls requests if table is full";
+    AllocSeqNotif,          desc="Allocates a TBE for a sequencer notification (NOTIFY_INDIDX), outside the core's TBE budget";
     AllocSeqDvmRequest,     desc="Allocates a TBE for a sequencer DVM request. Stalls requests if table is full";
     AllocPfRequest,         desc="Allocates a TBE for a prefetch request. Stalls requests if table is full";
     AllocSnoop,             desc="Allocates a TBE for a snoop. Stalls snoop if table is full";
@@ -602,14 +629,13 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     // MYSTUFF
     Fwd_NotifyIndIdx, in_trans="yes", desc="";
-    PostEvictIdxLine, desc="Evict a Line holding index elements in a cache upstream to gather unit.";
 
     UpdateDAG,        in_trans="yes", desc="";
-    ExtractDAG,       desc="Cache the DAGs of an index request at the Gather Unit";
-    PostProcess,      desc="Post-processing: push IDR/notif/evict actions one at a time";
-    SendIDR,          in_trans="yes", desc="Send one ReadValue/WriteValue IDR (non-blocking)";
-    SendPostNotif,    desc="Send NotifyIndIdx after all IDRs";
-    TriggerPostEvict,    desc="Trigger propagate evict for index line";
+    ExtractDAG,       desc="Cache the DAGs carried by a request's seqReq at the Gather Unit";
+    PostProcess,      desc="Post-processing: push one IDR, or stash the DAG and post-evict the index line";
+    TriageIDR,        in_trans="yes", desc="Drop the next IDR, or pass it to IssueIDR (non-blocking)";
+    IssueIDR,         in_trans="yes", desc="Send one ReadValue/WriteValue IDR (non-blocking; needs a hov TBE)";
+    StashAndPostEvict, desc="Above the Gather Unit: stash the DAG for the index line and schedule its post-evict";
 
     // HOV-specific events
     HovAck,           desc="Ack from Indirect Unit for ReadValue/WriteValue acceptance";
@@ -838,6 +864,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     // MYSTUFF:
     Addr alias,                     default="0", desc="Alias";
+    bool hov_spec,                  default="false", desc="An IDR the Gather Unit speculated";
 
     MachineID indirect_unit_id,      desc="MachineID of the indirect unit for an indirect request";
     MachineID value_unit_id,         desc="MachineID of the value unit for an indirect request";
@@ -850,8 +877,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
 
     std::string access_name,       desc="Name of the access from high level program.";
 
-    bool postNotifSent,            default="false", desc="PostNotif has been sent during post-processing";
-    bool postEvictSent,            default="false", desc="PostEvict has been sent during post-processing";
+    bool postEvictSent,            default="false", desc="StashAndPostEvict has run for this transaction";
     // FFUTSYM:
   }
 
@@ -900,6 +926,10 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   // Main TBE table used for incoming requests
   TBETable TBEs,      template="<Cache_TBE>", constructor="m_number_of_TBEs";
   TBEStorage storTBEs, constructor="this, m_number_of_TBEs";
+  // MYSTUFF: the core's budget within storTBEs (idr_reserved_tbes), counted
+  // by reservations only: a Sequencer or prefetch request reserves one when
+  // it is accepted and releases it when its TBE is deallocated.
+  TBEStorage storSeqTBEs, constructor="this, m_number_of_TBEs - m_idr_reserved_tbes";
 
   // TBE table for WriteBack/Evict requests generated by a replacement
   // Notice storTBEs will be used when unify_repl_TBEs is set

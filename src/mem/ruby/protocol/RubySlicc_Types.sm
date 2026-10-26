@@ -165,8 +165,8 @@ structure (Sequencer, external = "yes") {
 
   // MYSTUFF
   bool canOverride(std::string name);
-  Addr getNotifId(RequestPtr);
-  void cleanupNotifPkt(Addr);
+  // A DAG without a request of its own (an orphaned post-evict stash)
+  void deliverDAGReq(Addr, RequestPtr);
   // FFUTSYM
 }
 
@@ -254,12 +254,29 @@ structure (CacheMemory, external = "yes") {
   Addr getAddressAtIdx(int);
 
   void profileUsefulness(Addr, bool, std::string, WriteMask, WriteMask);
+  void profileInvalidationUsefulness(std::string, WriteMask, WriteMask);
+  void profileDroppedEvictUsefulness(std::string, WriteMask, WriteMask);
   void profileDemandHit();
   void profileDemandMiss();
   void profilePrefetchHit();
   void profilePrefetchMiss();
-  // MYSTUFF
+  // MYSTUFF: the same, counted per access name as well
+  void profileDemandHit(std::string);
+  void profileDemandMiss(std::string);
+  void profilePrefetchHit(std::string);
+  void profilePrefetchMiss(std::string);
+  void profileIndexHit(std::string);
+  void profileIndexMiss(std::string);
+  void profileIdrHit(std::string);
+  void profileIdrMiss(std::string);
+  void profileIdrSpecHit(std::string);
+  void profileIdrSpecMiss(std::string);
+  void profileGatherHit(std::string);
+  void profileGatherMiss(std::string);
+  void profileAllocation(std::string);
   void profileTransfer(MachineID, std::string, int, std::string);
+  void profileSnoopSharing(DataBlock, RequestPtr, bool, bool, std::string);
+  void profileLifetime(DataBlock, std::string, bool);
   // FFUTSYM
 }
 

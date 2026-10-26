@@ -173,6 +173,13 @@ class RubyPrefetcherProxy : public CacheAccessor, public Named
     bool coalesce() const override
     { return cacheCntrl->coalesce(); }
 
+    /** This controller's own copy of the line, through its functionalRead:
+     *  the TBE's valid bytes when the line has a TBE, else a readable
+     *  (Read_Only or Read_Write) cache entry; false unless every requested
+     *  byte was read. */
+    bool readLineFunctional(Addr paddr, uint8_t *data,
+                            unsigned size) const override;
+
 };
 
 } // namespace ruby

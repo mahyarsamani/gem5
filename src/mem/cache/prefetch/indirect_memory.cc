@@ -28,6 +28,12 @@
 
  #include "mem/cache/prefetch/indirect_memory.hh"
 
+ #include <algorithm>
+ #include <cstdlib>
+ #include <cstring>
+
+ #include "base/cprintf.hh"
+ #include "sim/byteswap.hh"
  #include "mem/cache/base.hh"
  #include "params/IndirectMemoryPrefetcher.hh"
 
@@ -43,6 +49,7 @@ IndirectMemory::IndirectMemory(const IndirectMemoryPrefetcherParams &p)
     shiftValues(p.shift_values), prefetchThreshold(p.prefetch_threshold),
     streamCounterThreshold(p.stream_counter_threshold),
     streamingDistance(p.streaming_distance),
+    confidenceWindow(std::max(1u, (unsigned)p.confidence_window)),
     prefetchTable((name() + ".PrefetchTable").c_str(),
                   p.pt_table_entries,
                   p.pt_table_assoc,
@@ -55,8 +62,56 @@ IndirectMemory::IndirectMemory(const IndirectMemoryPrefetcherParams &p)
         p.ipd_table_indexing_policy,
         IndirectPatternDetectorEntry(p.addr_array_len, shiftValues.size(),
             genTagExtractor(p.ipd_table_indexing_policy))),
-    ipdEntryTrackingMisses(nullptr), byteOrder(p.sys->getGuestByteOrder())
+    ipdEntryTrackingMisses(nullptr), byteOrder(p.sys->getGuestByteOrder()),
+    impStats(this, shiftValues)
 {
+    impStats.pendingTranslations.functor(
+        [this]() { return (statistics::Counter)
+                   pfqMissingTranslation.size(); });
+}
+
+IndirectMemory::IndirectMemoryStats::IndirectMemoryStats(
+    statistics::Group *parent, const std::vector<int> &shifts)
+  : statistics::Group(parent, "imp"),
+    ADD_STAT(indexReads, statistics::units::Count::get(),
+             "PT hits whose value could be read as an index"),
+    ADD_STAT(indexReadsEnabled, statistics::units::Count::get(),
+             "index reads of an enabled pattern above the threshold"),
+    ADD_STAT(ipdAllocs, statistics::units::Count::get(),
+             "IPD entries allocated"),
+    ADD_STAT(ipdReleases, statistics::units::Count::get(),
+             "IPD entries released after a third index without a match"),
+    ADD_STAT(ipdStolen, statistics::units::Count::get(),
+             "IPD entries whose miss tracking another entry took over"),
+    ADD_STAT(patternsEnabled, statistics::units::Count::get(),
+             "patterns found, per shift value"),
+    ADD_STAT(patternsDisabled, statistics::units::Count::get(),
+             "confidence falling to the threshold from above"),
+    ADD_STAT(patternsReplaced, statistics::units::Count::get(),
+             "PT entries with an enabled pattern replaced"),
+    ADD_STAT(confidenceHits, statistics::units::Count::get(),
+             "accesses matching an enabled pattern's current target"),
+    ADD_STAT(indirectCandidates, statistics::units::Count::get(),
+             "indirect target addresses handed to the queue"),
+    ADD_STAT(indirectAbsentIndexLine, statistics::units::Count::get(),
+             "frontier walks stopped at an index line not in the cache"),
+    ADD_STAT(indirectPageStop, statistics::units::Count::get(),
+             "frontier walks stopped at the end of the trigger's page"),
+    ADD_STAT(frontierResets, statistics::units::Count::get(),
+             "frontier restarts because the index stream jumped"),
+    ADD_STAT(indirectDistance, statistics::units::Count::get(),
+             "distance in elements of every indirect candidate"),
+    ADD_STAT(streamCandidates, statistics::units::Count::get(),
+             "candidates of IMP's own stream part"),
+    ADD_STAT(pendingTranslations, statistics::units::Count::get(),
+             "prefetches waiting for a translation at the dump")
+{
+    patternsEnabled.init(shifts.size());
+    for (int i = 0; i < shifts.size(); i++) {
+        patternsEnabled.subname(i, csprintf("shift%s%d",
+            shifts[i] < 0 ? "Neg" : "", std::abs(shifts[i])));
+    }
+    indirectDistance.init(0, 127, 4);
 }
 
 void
@@ -98,6 +153,7 @@ IndirectMemory::calculatePrefetch(const PrefetchInfo &pfi,
                     int64_t delta = addr - pt_entry->address;
                     for (unsigned int i = 1; i <= streamingDistance; i += 1) {
                         addresses.push_back(AddrPriority(addr + delta * i, 0));
+                        impStats.streamCandidates++;
                     }
                 }
                 pt_entry->address = addr;
@@ -129,38 +185,82 @@ IndirectMemory::calculatePrefetch(const PrefetchInfo &pfi,
                             // Ignore non-power-of-two sizes
                             read_index = false;
                     }
+                    if (read_index) {
+                        impStats.indexReads++;
+                    }
                     if (read_index && !pt_entry->enabled) {
                         // Not enabled (no pattern detected in this stream),
                         // add or update an entry in the pattern detector and
                         // start tracking misses
                         allocateOrUpdateIPDEntry(pt_entry, index);
                     } else if (read_index) {
-                        // Enabled entry, update the index
-                        pt_entry->index = index;
-                        if (!pt_entry->increasedIndirectCounter) {
-                            pt_entry->indirectCounter--;
+                        // Enabled entry, update the index. The value that
+                        // leaves the confidence window unmatched (the
+                        // current one, with a window of 1) costs a point.
+                        bool unmatched_leaves;
+                        if (confidenceWindow == 1) {
+                            unmatched_leaves =
+                                !pt_entry->increasedIndirectCounter;
                         } else {
-                            // Set this to false, to see if the new index
-                            // has any match
-                            pt_entry->increasedIndirectCounter = false;
+                            pt_entry->olderIndices.push_front(
+                                {pt_entry->index,
+                                 pt_entry->increasedIndirectCounter});
+                            unmatched_leaves = false;
+                            if (pt_entry->olderIndices.size() >=
+                                confidenceWindow) {
+                                unmatched_leaves =
+                                    !pt_entry->olderIndices.back().matched;
+                                pt_entry->olderIndices.pop_back();
+                            }
+                        }
+                        pt_entry->index = index;
+                        // Set this to false, to see if the new index has
+                        // any match
+                        pt_entry->increasedIndirectCounter = false;
+                        if (unmatched_leaves) {
+                            if (pt_entry->indirectCounter ==
+                                prefetchThreshold + 1) {
+                                impStats.patternsDisabled++;
+                            }
+                            pt_entry->indirectCounter--;
                         }
 
                         // If the counter is high enough, start prefetching
+                        // The distance grows with confidence, as gem5 had
+                        // it; the targets are those of the next indices,
+                        // A[B[i+1..i+distance]], read from the index lines
+                        // (the old loop pushed A[B[i]], the element the
+                        // core loads next, distance - 1 times).
                         if (pt_entry->indirectCounter > prefetchThreshold) {
-                            unsigned distance = maxPrefetchDistance *
-                                pt_entry->indirectCounter.calcSaturation();
-                            for (int delta = 1; delta < distance; delta += 1) {
-                                Addr pf_addr = pt_entry->baseAddr +
-                                    (pt_entry->index << pt_entry->shift);
-                                addresses.push_back(AddrPriority(pf_addr, 0));
-                            }
+                            impStats.indexReadsEnabled++;
+                            unsigned distance = std::max(1u,
+                                (unsigned)(maxPrefetchDistance *
+                                pt_entry->indirectCounter.calcSaturation()));
+                            walkFrontier(pt_entry, pfi, distance, addresses,
+                                         cache);
                         }
                     }
                 }
             }
         } else {
+            // findVictim() invalidates the victim, so count the enabled
+            // patterns around it to see whether it held one.
+            auto count_enabled = [this]() {
+                int n = 0;
+                for (const auto &entry : prefetchTable) {
+                    n += entry.enabled ? 1 : 0;
+                }
+                return n;
+            };
+            const int enabled_before = count_enabled();
             pt_entry = prefetchTable.findVictim(key);
             assert(pt_entry != nullptr);
+            if (count_enabled() < enabled_before) {
+                impStats.patternsReplaced++;
+            }
+            // The victim's IPD entries must not enable a pattern on the
+            // entry's new owner.
+            releaseIPDEntriesOf(pt_entry);
             prefetchTable.insertEntry(key, pt_entry);
             pt_entry->address = addr;
             pt_entry->secure = is_secure;
@@ -169,8 +269,120 @@ IndirectMemory::calculatePrefetch(const PrefetchInfo &pfi,
 }
 
 void
+IndirectMemory::walkFrontier(PrefetchTableEntry *pt_entry,
+    const PrefetchInfo &pfi, unsigned distance,
+    std::vector<AddrPriority> &addresses, const CacheAccessor &cache)
+{
+    const unsigned size = pfi.getSize();
+    const Addr trigger = pfi.getAddr();
+    const Addr limit = trigger + (Addr)distance * size;
+
+    // Continue after the frontier; restart at the trigger when the
+    // stream jumped (a new row, a new pass) or the core overtook the
+    // frontier (the walk had stopped at an absent line or a page end).
+    if (!pt_entry->frontierValid || pt_entry->frontier < trigger ||
+        pt_entry->frontier > limit) {
+        if (pt_entry->frontierValid) {
+            impStats.frontierResets++;
+        }
+        pt_entry->frontier = trigger;
+        pt_entry->frontierValid = true;
+    }
+
+    // The index lines are read on the trigger's page only, whose physical
+    // address the trigger gives; the next page waits for a trigger on it.
+    const Addr page_end = pageAddress(trigger) + pageBytes;
+    const Addr trigger_paddr = pfi.getPaddr();
+    std::vector<uint8_t> line(blkSize);
+    Addr line_addr = MaxAddr;
+
+    for (Addr pos = pt_entry->frontier + size; pos <= limit; pos += size) {
+        if (pos + size > page_end) {
+            impStats.indirectPageStop++;
+            break;
+        }
+        const Addr pos_line = blockAddress(pos);
+        const Addr offset = pos - pos_line;
+        if (offset + size > blkSize) {
+            // A misaligned index straddles two lines; stop.
+            break;
+        }
+        if (pos_line != line_addr) {
+            const Addr pos_line_paddr = trigger_paddr + pos_line - trigger;
+            if (!cache.readLineFunctional(pos_line_paddr, line.data(),
+                                          blkSize)) {
+                impStats.indirectAbsentIndexLine++;
+                break;
+            }
+            line_addr = pos_line;
+        }
+
+        // Indices are read unsigned, as for the trigger's own value.
+        uint64_t raw = 0;
+        switch (size) {
+          case sizeof(uint8_t): {
+            uint8_t v;
+            std::memcpy(&v, &line[offset], size);
+            raw = gtoh(v, byteOrder);
+            break;
+          }
+          case sizeof(uint16_t): {
+            uint16_t v;
+            std::memcpy(&v, &line[offset], size);
+            raw = gtoh(v, byteOrder);
+            break;
+          }
+          case sizeof(uint32_t): {
+            uint32_t v;
+            std::memcpy(&v, &line[offset], size);
+            raw = gtoh(v, byteOrder);
+            break;
+          }
+          default: {
+            assert(size == sizeof(uint64_t));
+            uint64_t v;
+            std::memcpy(&v, &line[offset], size);
+            raw = gtoh(v, byteOrder);
+            break;
+          }
+        }
+
+        addresses.push_back(AddrPriority(
+            targetAddr(pt_entry->baseAddr, (int64_t)raw, pt_entry->shift),
+            0));
+        impStats.indirectCandidates++;
+        impStats.indirectDistance.sample((pos - trigger) / size);
+        pt_entry->frontier = pos;
+    }
+}
+
+Addr
+IndirectMemory::targetAddr(Addr base, int64_t index, int shift)
+{
+    // Shifting by a negative amount is undefined in C++; the paper's -3
+    // means one bit per index (a bit vector), a division by 8.
+    if (shift >= 0) {
+        return base + (Addr)(index << shift);
+    }
+    return base + (Addr)(index >> -shift);
+}
+
+void
+IndirectMemory::releaseIPDEntriesOf(const PrefetchTableEntry *pt_entry)
+{
+    for (auto &ipd_entry : ipd) {
+        if (ipd_entry.isValid() && ipd_entry.ptEntry == pt_entry) {
+            if (ipdEntryTrackingMisses == &ipd_entry) {
+                ipdEntryTrackingMisses = nullptr;
+            }
+            ipd.invalidate(&ipd_entry);
+        }
+    }
+}
+
+void
 IndirectMemory::allocateOrUpdateIPDEntry(
-    const PrefetchTableEntry *pt_entry, int64_t index)
+    PrefetchTableEntry *pt_entry, int64_t index)
 {
     // The address of the pt_entry is used to index the IPD
     Addr ipd_entry_addr = (Addr) pt_entry;
@@ -182,19 +394,30 @@ IndirectMemory::allocateOrUpdateIPDEntry(
             // Second time we see an index, fill idx2
             ipd_entry->idx2 = index;
             ipd_entry->secondIndexSet = true;
+            if (ipdEntryTrackingMisses != nullptr &&
+                ipdEntryTrackingMisses != ipd_entry) {
+                impStats.ipdStolen++;
+            }
             ipdEntryTrackingMisses = ipd_entry;
         } else {
             // Third access! no pattern has been found so far,
             // release the IPD entry
             ipd.invalidate(ipd_entry);
             ipdEntryTrackingMisses = nullptr;
+            impStats.ipdReleases++;
         }
     } else {
+        // Any entry still tracking misses stops here, the victim included.
+        if (ipdEntryTrackingMisses != nullptr) {
+            impStats.ipdStolen++;
+        }
         ipd_entry = ipd.findVictim(key);
         assert(ipd_entry != nullptr);
         ipd.insertEntry(key, ipd_entry);
         ipd_entry->idx1 = index;
+        ipd_entry->ptEntry = pt_entry;
         ipdEntryTrackingMisses = ipd_entry;
+        impStats.ipdAllocs++;
     }
 }
 
@@ -208,7 +431,7 @@ IndirectMemory::trackMissIndex1(Addr miss_addr)
     std::vector<Addr> &ba_array = entry->baseAddr[entry->numMisses];
     int idx = 0;
     for (int shift : shiftValues) {
-        ba_array[idx] = miss_addr - (entry->idx1 << shift);
+        ba_array[idx] = miss_addr - targetAddr(0, entry->idx1, shift);
         idx += 1;
     }
     entry->numMisses += 1;
@@ -230,15 +453,19 @@ IndirectMemory::trackMissIndex2(Addr miss_addr)
         std::vector<Addr> &ba_array = entry->baseAddr[midx];
         int idx = 0;
         for (int shift : shiftValues) {
-            if (ba_array[idx] == (miss_addr - (entry->idx2 << shift))) {
+            if (ba_array[idx] ==
+                    miss_addr - targetAddr(0, entry->idx2, shift)) {
                 // Match found!
                 // Fill the corresponding pt_entry
-                PrefetchTableEntry *pt_entry =
-                    (PrefetchTableEntry *) entry->getTag();
+                PrefetchTableEntry *pt_entry = entry->ptEntry;
+                assert(pt_entry != nullptr);
                 pt_entry->baseAddr = ba_array[idx];
                 pt_entry->shift = shift;
                 pt_entry->enabled = true;
                 pt_entry->indirectCounter.reset();
+                pt_entry->frontierValid = false;
+                pt_entry->olderIndices.clear();
+                impStats.patternsEnabled[idx]++;
                 // Release the current IPD Entry
                 ipd.invalidate(entry);
                 // Do not track more misses
@@ -255,10 +482,22 @@ IndirectMemory::checkAccessMatchOnActiveEntries(Addr addr)
 {
     for (auto &pt_entry : prefetchTable) {
         if (pt_entry.enabled) {
-            if (addr == pt_entry.baseAddr +
-                       (pt_entry.index << pt_entry.shift)) {
+            if (addr == targetAddr(pt_entry.baseAddr, pt_entry.index,
+                                   pt_entry.shift)) {
                 pt_entry.indirectCounter++;
                 pt_entry.increasedIndirectCounter = true;
+                impStats.confidenceHits++;
+                continue;
+            }
+            // Earlier index values (confidence_window > 1)
+            for (auto &slot : pt_entry.olderIndices) {
+                if (addr == targetAddr(pt_entry.baseAddr, slot.value,
+                                       pt_entry.shift)) {
+                    pt_entry.indirectCounter++;
+                    slot.matched = true;
+                    impStats.confidenceHits++;
+                    break;
+                }
             }
         }
     }

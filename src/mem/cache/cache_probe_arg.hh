@@ -68,6 +68,21 @@ struct CacheAccessor
 
     /** Determine if cache is coalescing writes */
     virtual bool coalesce() const = 0;
+
+    /**
+     * Copy `size` bytes at physical address `paddr`, which must lie within
+     * one cache line, from this cache's own copy of the line into `data`.
+     * Zero latency: what a prefetcher attached to this cache can see of a
+     * line it holds (IMP reads the next indices from its L1's line, DMP
+     * from its L2's). The default reads nothing.
+     * @return false if this cache does not hold the line with readable
+     *         data (absent, or busy without valid data)
+     */
+    virtual bool
+    readLineFunctional(Addr paddr, uint8_t *data, unsigned size) const
+    {
+        return false;
+    }
 };
 
 /**

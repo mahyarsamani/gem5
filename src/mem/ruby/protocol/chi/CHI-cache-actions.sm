@@ -145,11 +145,29 @@ action(AllocateTBE_DvmSnoop, desc="") {
 action(AllocateTBE_SeqRequest, desc="") {
   // No retry for sequencer requests; just create resource stall
   check_allocate(storTBEs);
+  // MYSTUFF: and within the core's budget (idr_reserved_tbes stay free)
+  check_allocate(storSeqTBEs);
 
   // reserve a slot for this request
   storTBEs.incrementReserved();
+  storSeqTBEs.incrementReserved();
 
   // Move request to rdy queue
+  peek(seqInPort, RubyRequest) {
+    enqueue(reqRdyOutPort, CHIRequestMsg, allocation_latency) {
+      populateFromSeqReqMsg(out_msg, in_msg);
+      out_msg.secondType := manipulateSecondType(out_msg);
+      out_msg.type := manipulateType(out_msg);
+    }
+  }
+  seqInPort.dequeue(clockEdge());
+}
+
+// MYSTUFF: a notification from the Sequencer takes a TBE outside the
+// core's budget, standing in for a notification path that needs none.
+action(AllocateTBE_SeqNotif, desc="") {
+  check_allocate(storTBEs);
+  storTBEs.incrementReserved();
   peek(seqInPort, RubyRequest) {
     enqueue(reqRdyOutPort, CHIRequestMsg, allocation_latency) {
       populateFromSeqReqMsg(out_msg, in_msg);
@@ -207,9 +225,12 @@ action(AllocateTBE_SeqDvmRequest, desc="") {
 action(AllocateTBE_PfRequest, desc="Allocate TBE for prefetch request") {
   // No retry for prefetch requests; just create resource stall
   check_allocate(storTBEs);
+  // MYSTUFF: prefetches are the core's too (idr_reserved_tbes stay free)
+  check_allocate(storSeqTBEs);
 
   // reserve a slot for this request
   storTBEs.incrementReserved();
+  storSeqTBEs.incrementReserved();
 
   // Move request to rdy queue
   peek(pfInPort, RubyRequest) {
@@ -253,6 +274,9 @@ action(Initiate_Request, desc="") {
   bool reduce_usefulness := false;
   WriteMask read_usefulness;
   WriteMask write_usefulness;
+  int life_origin := -1;
+  WriteMask life_origin_mask;
+  WriteMask life_others_mask;
 
   MachineID indirect_unit_id;
   MachineID gather_unit_id;
@@ -268,6 +292,9 @@ action(Initiate_Request, desc="") {
         read_usefulness := in_msg.read_usefulness;
         write_usefulness := in_msg.write_usefulness;
         reduce_usefulness := true;
+        life_origin := in_msg.life_origin;
+        life_origin_mask := in_msg.life_origin_mask;
+        life_others_mask := in_msg.life_others_mask;
         DPRINTF(Usefulness, "Got read usefulness for name %s with count %d from message.\n", in_msg.access_name, read_usefulness.count());
         DPRINTF(Usefulness, "Got write usefulness for name %s with count %d from message.\n", in_msg.access_name, write_usefulness.count());
     }
@@ -280,6 +307,12 @@ action(Initiate_Request, desc="") {
 
   DirEntry dir_entry := getDirEntry(address);
   copyCacheAndDir(cache_entry, dir_entry, tbe, initial);
+
+  // MYSTUFF: an eviction's lifetime set joins whatever this cache holds
+  // (a write-back's data brings its own copy again; OR is idempotent).
+  tbe.dataBlk.mergeLifetimeMasks(life_origin, life_origin_mask,
+                                 life_others_mask);
+  // FFUTSYM
 
   tbe.use_DMT := is_HN && enable_DMT;
   tbe.use_DCT := enable_DCT;
@@ -310,6 +343,14 @@ action(Initiate_Request, desc="") {
     tbe.dataBlk.copyWriteUsefulness(cache_entry.DataBlk.getWriteUsefulness(getName(), address), getName(), address);
     tbe.dataBlk.reduceUsefulness(read_usefulness, write_usefulness, getName(), address);
     DPRINTF(Usefulness, "Inside Initiate_Request. After calling functions from DataBlock.\n");
+  } else if (reduce_usefulness && profile_usefulness) {
+    // The eviction's masks reach a cache that does not hold the line (e.g.
+    // a victim cache allocating on the write-back): reset on insertion
+    // drops them from this cache's CBU, so count them apart.
+    peek(reqRdyPort, CHIRequestMsg) {
+      cache.profileDroppedEvictUsefulness(in_msg.access_name,
+                                          read_usefulness, write_usefulness);
+    }
   }
 
   tbe.indirect_unit_id := indirect_unit_id;
@@ -345,17 +386,28 @@ action(Initiate_Request, desc="") {
                          (is_invalid(cache_entry) && (alloc_entry == false));
   tbe.doCacheFill := alloc_entry || is_valid(cache_entry);
 
+  // MYSTUFF: a value access this level means to keep (the Value Unit) must
+  // see the data: with DCT a sharer would forward it straight to the
+  // requester and the line would never fill here. Only the ReadShared
+  // flows fill from upstream (MaintainCoherence); a ReadOnce served from
+  // upstream drops its data whatever the snoop.
+  if (alloc_entry && isIndirectVal(tbe.reqType, tbe.secondType) &&
+      ((tbe.reqType == CHIRequestType:ReadShared) ||
+       (tbe.reqType == CHIRequestType:ReadNotSharedDirty))) {
+    tbe.use_DCT := false;
+  }
+  // FFUTSYM
+
   // Schedule HovAck before tag read so the gather unit knows we accepted
-  if (indirect_unit && isIndirectVal(tbe.reqType, tbe.secondType)) {
+  if (indirect_unit && isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
     tbe.actions.pushNB(Event:SendHovAck);
   }
 
-  // An index request that reaches the Gather Unit carries its DAG in
-  // seqReq. Cache it so that PostProcess sends the IDRs once the index
-  // data is here. (Index hits above the Gather Unit deliver the DAG with
-  // SendPostNotif instead, which the Gather Unit gets as UpdateDAG.)
-  if (gather_unit && isIndirectIdx(tbe.reqType, tbe.secondType) &&
-      tbe.isSeqReqValid) {
+  // Gather Unit: every DAG that reaches it rides seqReq, whatever the
+  // carrier (an index request, a notification, a post-evict write-back
+  // from a cache above). Cache it so that PostProcess sends the IDRs
+  // once the index data is in the TBE.
+  if (gather_unit && tbe.isSeqReqValid && hasDAG(tbe.seqReq)) {
     tbe.actions.pushNB(Event:ExtractDAG);
   }
 
@@ -406,6 +458,19 @@ action(Initiate_Snoop, desc="") {
   if (is_valid(cache_entry)) {
     tbe.access_name := cache_entry.DataBlk.getAccessName(getName(), address);
   }
+  // False or true sharing, counted once per snooped core: at its topmost
+  // copy (the L1, or the L2 when no cache above holds the line), against
+  // the bytes of the request behind the snoop (its seqReq).
+  if (is_valid(cache_entry) && tbe.dir_sharers.isEmpty()) {
+    peek(snpRdyPort, CHIRequestMsg) {
+      bool unique := (in_msg.type == CHIRequestType:SnpUnique) ||
+                     (in_msg.type == CHIRequestType:SnpUniqueFwd) ||
+                     (in_msg.type == CHIRequestType:SnpCleanInvalid);
+      cache.profileSnoopSharing(cache_entry.DataBlk, in_msg.seqReq,
+                                in_msg.isSeqReqValid, unique,
+                                tbe.access_name);
+    }
+  }
   // FFUTSYM
 
   // if we end up with valid data drop it if no entry allocated
@@ -445,6 +510,8 @@ action(Initiate_Snoop_Hazard, desc="") {
 
 action(RestoreFromHazard, desc="") {
   TBE hazard_tbe := getHazardTBE(tbe);
+  // The snoop's type, read before tbe switches to the hazard TBE.
+  CHIRequestType snpReqType := tbe.reqType;
 
   // update
   setDataToBeStates(tbe);
@@ -461,17 +528,25 @@ action(RestoreFromHazard, desc="") {
   replicateTBE(ms_dummy_tbe, tbe);
 
   // if the pending request is a WB or Evict then it becomes a stale request
-  // if data is no longer in the expected state
+  // if data is no longer in the expected state.
+  // Cherry-picked from upstream gem5 develop (918ac65af1, in v26.0): stale
+  // state is sticky across consecutive hazards, and an Evict or
+  // CleanUnique goes stale on an invalidating snoop rather than whenever
+  // the data is absent (a cache that evicts on behalf of an upstream
+  // sharer, e.g. from RSC, never had the data).
+  bool invalidating_snoop := (snpReqType == CHIRequestType:SnpCleanInvalid) ||
+                             (snpReqType == CHIRequestType:SnpUnique) ||
+                             (snpReqType == CHIRequestType:SnpUniqueFwd);
   if (tbe.pendReqType == CHIRequestType:WriteBackFull) {
-    tbe.is_stale := (tbe.dataValid && tbe.dataDirty) == false;
+    tbe.is_stale := tbe.is_stale || ((tbe.dataValid && tbe.dataDirty) == false);
   } else if (tbe.pendReqType == CHIRequestType:WriteCleanFull) {
-    tbe.is_stale := (tbe.dataValid && tbe.dataDirty) == false;
-  } else if (hazard_tbe.pendReqType == CHIRequestType:WriteEvictFull) {
-    tbe.is_stale := (tbe.dataValid && tbe.dataUnique) == false;
-  } else if (hazard_tbe.pendReqType == CHIRequestType:Evict) {
-    tbe.is_stale := tbe.dataValid == false;
-  } else if (hazard_tbe.pendReqType == CHIRequestType:CleanUnique) {
-    tbe.is_stale := tbe.dataValid == false;
+    tbe.is_stale := tbe.is_stale || ((tbe.dataValid && tbe.dataDirty) == false);
+  } else if (tbe.pendReqType == CHIRequestType:WriteEvictFull) {
+    tbe.is_stale := tbe.is_stale || ((tbe.dataValid && tbe.dataUnique) == false);
+  } else if (tbe.pendReqType == CHIRequestType:Evict) {
+    tbe.is_stale := tbe.is_stale || invalidating_snoop;
+  } else if (tbe.pendReqType == CHIRequestType:CleanUnique) {
+    tbe.is_stale := tbe.is_stale || invalidating_snoop;
   }
 
   // a pending action from the original request may have been stalled during
@@ -501,19 +576,23 @@ action(Initiate_Replacement, desc="") {
     peek(replTriggerInPort, ReplacementMsg) {
       set_tbe(allocateReplacementTBEOnSlot(address, in_msg.slot));
       DPRINTF(RubySlicc, "Allocated replacement TBE on slot %d\n", tbe.storSlot);
-      if (in_msg.post_evict) {
-        tbe.secondType := CHIRequestType:PropagateEvict;
-      }
     }
   } else {
-    peek(replTriggerInPort, ReplacementMsg) {
-      set_tbe(allocateReplacementTBE(address));
-      DPRINTF(RubySlicc, "Allocated replacement TBE on new slot %d\n", tbe.storSlot);
-      if (in_msg.post_evict) {
-        tbe.secondType := CHIRequestType:PropagateEvict;
-      }
-    }
+    set_tbe(allocateReplacementTBE(address));
+    DPRINTF(RubySlicc, "Allocated replacement TBE on new slot %d\n", tbe.storSlot);
   }
+  // MYSTUFF
+  // A DAG stashed for this line (StashAndPostEvict) rides this write-back
+  // to the Gather Unit, whichever replacement this is: the delayed
+  // post-evict or an ordinary one that got here first (the late post-evict
+  // then finds the line in I and is dropped).
+  if (hasStash(address)) {
+    tbe.seqReq := takePostEvictDAG(address);
+    tbe.isSeqReqValid := true;
+    tbe.secondType := CHIRequestType:PropagateEvict;
+    DPRINTF(IndirectAccess, "Replacement of %#lx carries the stashed index DAG.\n", address);
+  }
+  // FFUTSYM
   // MYSTUFF
   tbe.read_usefulness := read_usefulness;
   tbe.write_usefulness := write_usefulness;
@@ -1668,7 +1747,7 @@ action(Send_ReadNoSnp, desc="") {
   assert((tbe.use_DMT == false) ||
          ((tbe.reqType == CHIRequestType:AtomicReturn) ||
           (tbe.reqType == CHIRequestType:AtomicNoReturn)) ||
-          (tbe.reqType == CHIRequestType:ReadIndirect));
+          (tbe.reqType == CHIRequestType:ReadIndex));
 
   clearExpectedReqResp(tbe);
   tbe.expected_req_resp.addExpectedDataType(CHIDataType:CompData_UC);
@@ -2254,6 +2333,10 @@ action(Receive_ReqDataResp, desc="") {
     if (tbe.expected_req_resp.receiveData(in_msg.type) == false) {
       error("Received unexpected message");
     }
+    // MYSTUFF: the copy's lifetime set joins the TBE's, whether or not
+    // its bytes are taken.
+    tbe.dataBlk.mergeLifetime(in_msg.dataBlk);
+    // FFUTSYM
     // Copy data to tbe only if we didn't have valid data or the received
     // data is dirty
     if ((in_msg.type == CHIDataType:NCBWrData) &&
@@ -2332,6 +2415,9 @@ action(Receive_SnpDataResp, desc="") {
     if (tbe.expected_snp_resp.receiveData(in_msg.type) == false) {
       error("Received unexpected message");
     }
+    // MYSTUFF: the snooped copy's lifetime set joins the TBE's.
+    tbe.dataBlk.mergeLifetime(in_msg.dataBlk);
+    // FFUTSYM
     // Copy data to tbe only if we didn't have valid data or the received
     // data is dirty
     if ((tbe.dataBlkValid.isFull() == false) ||
@@ -2797,6 +2883,12 @@ action(Receive_SnpResp, desc="") {
       error("Received unexpected message");
     }
     assert(in_msg.stale == tbe.is_stale);
+    // MYSTUFF: a dataless snoop response carries the snooped copy's
+    // lifetime set.
+    tbe.dataBlk.mergeLifetimeMasks(in_msg.life_origin,
+                                   in_msg.life_origin_mask,
+                                   in_msg.life_others_mask);
+    // FFUTSYM
   }
 }
 
@@ -2833,12 +2925,24 @@ action(Send_Retry_Hov, desc="Resend an IDR after RetryAck + PCrdGrant") {
   enqueue(reqOutPort, CHIRequestMsg, request_latency) {
     prepareRequestRetry(tbe, out_msg);
     // prepareRequestRetry fills what a line request needs; the IDR also
-    // carries its hov id and alias, and no secondType (see SendIDR).
+    // carries its hov id and alias, and no secondType (see IssueIDR).
     out_msg.txnId := tbe.txnId;
     out_msg.alias := tbe.alias;
     out_msg.secondType := CHIRequestType:null;
+    out_msg.hov_spec := tbe.hov_spec;
     DPRINTF(IndirectAccess, "IDR retry: hov_id=%#x data_line=%#x type=%s\n",
             tbe.txnId, out_msg.addr, out_msg.type);
+  }
+  if (idr_coalesce) {
+    // Sent again: a later write can no longer lift it.
+    noteIdrResent(tbe.addr);
+  }
+}
+
+action(Note_IdrParked,
+       desc="A RetryAck holds the IDR here; a later write to its data line lifts it") {
+  if (idr_coalesce) {
+    noteIdrParked(tbe.addr);
   }
 }
 // FFUTSYM
@@ -3178,6 +3282,11 @@ action(Send_FwdSnpResp, desc="") {
     out_msg.addr := address;
     out_msg.responder := machineID;
     out_msg.Destination.add(tbe.requestor);
+    // MYSTUFF: the copy's lifetime set goes down with the response.
+    out_msg.life_origin := tbe.dataBlk.getLifeOrigin();
+    out_msg.life_origin_mask := tbe.dataBlk.getLifeOriginMask();
+    out_msg.life_others_mask := tbe.dataBlk.getLifeOthersMask();
+    // FFUTSYM
 
     // We have the data (locally or upstream) or are dropping it
     bool keepData := (tbe.dir_sharers.count() > 0) ||
@@ -3303,12 +3412,20 @@ action(Send_RespSepData, desc="") {
 action(Send_CompI, desc="") {
   assert(is_valid(tbe));
 
-  if (!isStashReqType(tbe.reqType)) {
-    // Used to ack Evict request
-    assert(tbe.dir_sharers.isElement(tbe.requestor));
-    assert((tbe.dir_ownerExists == false) || (tbe.dir_owner != tbe.requestor));
+  // Cherry-picked from upstream gem5 develop (7522f5f70b, in v26.0): the
+  // requestor of an Evict may have been removed from the sharers by an
+  // invalidating snoop that hit this transaction as a hazard (the
+  // requestor saw the same snoop and marked its Evict stale), so the ack
+  // is flagged stale instead of asserting.
+  bool is_stale := (!isStashReqType(tbe.reqType)) && (!tbe.dir_sharers.isElement(tbe.requestor));
 
-    tbe.dir_sharers.remove(tbe.requestor);
+  if (!isStashReqType(tbe.reqType)) {
+    // Used to ack Evict request. upstream maybe invalidated by hazard SnpCleanInvalid.
+    if (tbe.dir_sharers.isElement(tbe.requestor)) {
+      assert((tbe.dir_ownerExists == false) || (tbe.dir_owner != tbe.requestor));
+
+      tbe.dir_sharers.remove(tbe.requestor);
+    }
   }
 
   enqueue(rspOutPort, CHIResponseMsg, response_latency) {
@@ -3318,6 +3435,7 @@ action(Send_CompI, desc="") {
     out_msg.Destination.add(tbe.requestor);
     out_msg.txnId := tbe.txnId;
     out_msg.dbid := tbe.txnId;
+    out_msg.stale := is_stale;
   }
 }
 
@@ -3469,6 +3587,11 @@ action(Send_SnpRespI, desc="") {
     out_msg.type := CHIResponseType:SnpResp_I;
     out_msg.responder := machineID;
     out_msg.Destination.add(tbe.requestor);
+    // MYSTUFF: the copy's lifetime set goes down with the response.
+    out_msg.life_origin := tbe.dataBlk.getLifeOrigin();
+    out_msg.life_origin_mask := tbe.dataBlk.getLifeOriginMask();
+    out_msg.life_others_mask := tbe.dataBlk.getLifeOthersMask();
+    // FFUTSYM
   }
 }
 
@@ -3568,9 +3691,41 @@ action(Finalize_UpdateCacheFromTBE, desc="") {
     // make sure only deallocate the cache entry if data is invalid
     assert(tbe.dataValid == false);
     if (is_valid(cache_entry)) {
+      // MYSTUFF
+      // The line leaves without a replacement (an invalidating snoop, a
+      // back-invalidate, or a deallocation on a unique request from
+      // upstream): sample the bytes used during its stay, the block's own
+      // and those the Sequencer marked in the TBE during this transaction,
+      // apart from replacements (sampled in Initiate_Replacement).
+      if (profile_usefulness && cache_entry.DataBlk.isAlloc()) {
+        WriteMask read_usefulness := cache_entry.DataBlk.getReadUsefulness(getName(), address);
+        WriteMask write_usefulness := cache_entry.DataBlk.getWriteUsefulness(getName(), address);
+        if (tbe.dataBlk.isAlloc()) {
+          read_usefulness.orMask(tbe.dataBlk.getReadUsefulness(getName(), address));
+          write_usefulness.orMask(tbe.dataBlk.getWriteUsefulness(getName(), address));
+        }
+        cache.profileInvalidationUsefulness(
+          cache_entry.DataBlk.getAccessName(getName(), address),
+          read_usefulness, write_usefulness);
+      }
+      // FFUTSYM
       cache.deallocate(address);
       unset_cache_entry();
     }
+    // MYSTUFF
+    // The line leaves without a replacement (an invalidating snoop, or the
+    // Gather Unit's back-invalidate, on its own or as a hazard during a
+    // request) while a DAG is stashed for it: the stash becomes a
+    // notification through the Sequencer. A replacement took the stash in
+    // Initiate_Replacement, so it never gets here.
+    if (hasStash(address)) {
+      assert(tbe.is_repl_tbe == false);
+      assert(indirect_unit);
+      DPRINTF(IndirectAccess, "Stash for %#lx orphaned by a snoop: notifying.\n", address);
+      sequencer.deliverDAGReq(address, takePostEvictDAG(address));
+      countStashOrphaned();
+    }
+    // FFUTSYM
   }
 }
 
@@ -3632,6 +3787,10 @@ action(CheckCacheFill, desc="") {
     // don't have a cache block, but there is space to allocate one
     set_cache_entry(cache.allocate(address, new CacheEntry));
     // MYSTUFF:
+    // bytes brought in and kept, per access name (bytesTransferred at the
+    // sender counts pass-through responses too, e.g. index lines the
+    // Indirect Unit does not cache)
+    cache.profileAllocation(tbe.access_name);
     DPRINTF(Usefulness, "Inside CheckCacheFill. Before calling functions from DataBlock.\n");
     cache_entry.DataBlk.setAccessName("reset", true, getName(), address);
     DPRINTF(Usefulness, "Inside CheckCacheFill. After calling functions from DataBlock.\n");
@@ -3693,7 +3852,22 @@ action(Finalize_DeallocateRequest, desc="") {
   wakeupPendingSnps(tbe);
   wakeupPendingTgrs(tbe);
 
-  // Notif and propagate evict logic moved to SendPostNotif/TriggerPostEvict actions.
+  // Index-line post-processing (IDRs at the Gather Unit, StashAndPostEvict
+  // above it) has run by now: processNextState pushes PostProcess until
+  // needsPostProcess is false, and only then Final.
+
+  // MYSTUFF: the line leaves the chip when the home, whose downstream is
+  // memory, ends an eviction (or its own replacement) with no copy and no
+  // sharer left: sample the lifetime set the eviction and the snoops
+  // brought.
+  if (profile_usefulness && is_HN && (tbe.finalState == State:I) &&
+      (tbe.is_repl_tbe || (tbe.is_req_tbe && isConsideredEvict(tbe.reqType)))) {
+    if (machineIDToMachineType(mapAddressToDownstreamMachine(address)) ==
+        MachineType:Memory) {
+      cache.profileLifetime(tbe.dataBlk, tbe.access_name, false);
+    }
+  }
+  // FFUTSYM
 
   if (tbe.is_req_tbe) {
     deallocateReqTBE(tbe);
@@ -3800,15 +3974,16 @@ action(Callback_LoadHit, desc="") {
   assert(tbe.reqType == CHIRequestType:Load);
 
   // MYSTUFF
-  // Two-uop model: only the index access (uop0, ReadIndirect) calls back;
+  // Two-uop model: only the index access (uop0, ReadIndex) calls back;
   // the CPU extracts index[i] from the line and writes it to Rd+1.
-  // Value accesses (ReadValue/WriteValue, sent by the Gather Unit) never
-  // call back: they only bring the line to the Indirect Unit, and the
-  // core's own value access (uop1) is a normal load/store.
-  if (isIndirect(tbe.reqType, tbe.secondType)) {
+  // IDRs (ReadValue/WriteValue, sent by the Gather Unit) never call back:
+  // they only bring the line to the Indirect Unit, and the core's own
+  // value access (uop1) is a Load/Store that calls back as any other.
+  if (isIndirectIdx(tbe.reqType, tbe.secondType) ||
+      isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
     if (tbe.dataValid && (tbe.reqType == CHIRequestType:Load)) {
         DPRINTF(IndirectAccess, "Finished servicing a hit for a load to addr %#lx.\n", tbe.addr);
-        if (tbe.secondType == CHIRequestType:ReadIndirect) {
+        if (tbe.secondType == CHIRequestType:ReadIndex) {
             DPRINTF(IndirectAccess, "Load to addr %#lx was to an index. Calling back to CPU.\n", tbe.addr);
             sequencer.readCallback(tbe.addr, tbe.accAddr, tbe.dataBlk, true);
         }
@@ -3829,7 +4004,7 @@ action(Callback_StoreHit, desc="") {
   // A WriteValue (sent by the Gather Unit for stind) only obtains unique
   // permission at the Indirect Unit: no callback and no data written. The
   // core's own value store (uop1) is a normal store that writes the data.
-  if (isIndirectVal(tbe.reqType, tbe.secondType)) {
+  if (isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
     DPRINTF(IndirectAccess, "WriteValue to addr %#lx hit. No callback.\n", tbe.addr);
   // FFUTSYM
   } else if (tbe.is_local_pf == false) {
@@ -3862,6 +4037,7 @@ action(Callback_ExpressPrefetchHit, desc="") {
   // have not allocated TBE, but must clear the reservation
   assert(is_invalid(tbe));
   storTBEs.decrementReserved();
+  storSeqTBEs.decrementReserved();
   assert(storTBEs.areNSlotsAvailable(1));
   assert(use_prefetcher);
 
@@ -3878,13 +4054,14 @@ action(Callback_ExpressPrefetchHit, desc="") {
 action(Callback_Miss, desc="") {
   assert(is_valid(tbe));
   // MYSTUFF
-  // Two-uop model: only the index access (uop0, ReadIndirect) calls back.
-  // Value accesses (ReadValue/WriteValue) never call back; see
+  // Two-uop model: only the index access (uop0, ReadIndex) calls back.
+  // IDRs (ReadValue/WriteValue from the Gather Unit) never call back; see
   // Callback_LoadHit.
-  if (isIndirect(tbe.reqType, tbe.secondType)) {
+  if (isIndirectIdx(tbe.reqType, tbe.secondType) ||
+      isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
     if (tbe.dataValid && (tbe.reqType == CHIRequestType:Load)) {
         DPRINTF(IndirectAccess, "Finished servicing a miss for a load to addr %#lx.\n", tbe.addr);
-        if (tbe.secondType == CHIRequestType:ReadIndirect) {
+        if (tbe.secondType == CHIRequestType:ReadIndex) {
             DPRINTF(IndirectAccess, "Load to addr %#lx was to an index. Calling back to CPU.\n", tbe.addr);
             sequencer.readCallback(tbe.addr, tbe.accAddr, tbe.dataBlk, true);
         }
@@ -3985,12 +4162,21 @@ action(Profile_Miss, desc="") {
   assert(is_valid(tbe));
   bool is_demand := (tbe.is_local_pf || tbe.is_remote_pf) == false;
   bool is_remote_can_notify := tbe.is_remote_pf && upstream_prefetch_trains_prefetcher;
-  if (is_demand) {
-    cache.profileDemandMiss();
-  } else {
+  // MYSTUFF: IDRs and index accesses are counted apart from demand
+  if (is_demand == false) {
     assert(use_prefetcher || tbe.is_remote_pf);
-    cache.profilePrefetchMiss();
+    cache.profilePrefetchMiss(tbe.access_name);
+  } else if (isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
+    cache.profileIdrMiss(tbe.access_name);
+    if (tbe.hov_spec) {
+      cache.profileIdrSpecMiss(tbe.access_name);
+    }
+  } else if (isIndirectIdx(tbe.reqType, tbe.secondType)) {
+    cache.profileIndexMiss(tbe.access_name);
+  } else {
+    cache.profileDemandMiss(tbe.access_name);
   }
+  // FFUTSYM
   // notify prefetcher about this demand miss
   if (use_prefetcher && tbe.isSeqReqValid && (is_demand || is_remote_can_notify) &&
       shouldNotifyPrefetcher(tbe.reqType, tbe.secondType)) {
@@ -4014,12 +4200,21 @@ action(Profile_Hit, desc="") {
   assert(tbe.dataValid);
   bool is_demand := (tbe.is_local_pf || tbe.is_remote_pf) == false;
   bool is_remote_can_notify := tbe.is_remote_pf && upstream_prefetch_trains_prefetcher;
-  if (is_demand) {
-    cache.profileDemandHit();
-  } else {
+  // MYSTUFF: IDRs and index accesses are counted apart from demand
+  if (is_demand == false) {
     assert(use_prefetcher || tbe.is_remote_pf);
-    cache.profilePrefetchHit();
+    cache.profilePrefetchHit(tbe.access_name);
+  } else if (isIdr(tbe.reqType, tbe.secondType, tbe.requestor)) {
+    cache.profileIdrHit(tbe.access_name);
+    if (tbe.hov_spec) {
+      cache.profileIdrSpecHit(tbe.access_name);
+    }
+  } else if (isIndirectIdx(tbe.reqType, tbe.secondType)) {
+    cache.profileIndexHit(tbe.access_name);
+  } else {
+    cache.profileDemandHit(tbe.access_name);
   }
+  // FFUTSYM
   // notify prefetcher about this demand hit
   if (use_prefetcher && tbe.isSeqReqValid && (is_demand || is_remote_can_notify) &&
       shouldNotifyPrefetcher(tbe.reqType, tbe.secondType)) {
@@ -4035,6 +4230,22 @@ action(Profile_Hit, desc="") {
     cache_entry.HWPrefetched := false;
   }
 }
+
+// MYSTUFF
+// Gather Unit: a notification's index line has its data here (hit), or
+// the line must be fetched from upstream or downstream first (miss).
+action(Profile_GatherHit, desc="") {
+  assert(is_valid(tbe));
+  assert(gather_unit);
+  cache.profileGatherHit(tbe.access_name);
+}
+
+action(Profile_GatherMiss, desc="") {
+  assert(is_valid(tbe));
+  assert(gather_unit);
+  cache.profileGatherMiss(tbe.access_name);
+}
+// FFUTSYM
 
 action(Profile_Fill, desc="") {
   assert(is_valid(tbe));
@@ -4058,11 +4269,20 @@ action(Profile_Eviction, desc="") {
     scLockIncLatency();
   }
   if (send_evictions) {
-    DPRINTF(RubySlicc, "Sending invalidation for %#x to the sequencer\n", address);
-    sequencer.evictionCallback(address);
+    // MYSTUFF
+    // A post-evict (the index line leaves because its DAG rides the
+    // write-back; the Gather Unit keeps the line and no writer intervened)
+    // is a policy eviction, not an invalidation: the values the core's
+    // loads read stay current, so the LSQ gets no InvalidateReq and
+    // replays no load for it. Snoops and back-invalidates still send it.
+    if (is_valid(tbe) && (tbe.secondType == CHIRequestType:PropagateEvict)) {
+      DPRINTF(RubySlicc, "Post-evict of %#x: no invalidation to the sequencer\n", address);
+    } else {
+      DPRINTF(RubySlicc, "Sending invalidation for %#x to the sequencer\n", address);
+      sequencer.evictionCallback(address);
+    }
+    // FFUTSYM
   }
-  // MYSTUFF
-  // FFUTSYM
   if (use_prefetcher && is_valid(cache_entry)) {
     pfProxy.notifyPfEvict(address, cache_entry.HWPrefetched, cache_entry.requestor);
   }
@@ -4350,155 +4570,333 @@ action(Profile_OutgoingEnd_DVM, desc="") {
 // MYSTUFF
 
 action(PostProcess,
-       desc="Push one post-processing action (hierarchical: IDR > notif > evict)")
+       desc="Push one post-processing action: an IDR at the Gather Unit, or StashAndPostEvict above it")
 {
-    State toBeState := makeFinalState(tbe, getCacheEntry(address), getDirEntry(address));
-
     if (gather_unit && hasDependentWork(address)) {
-        // One IDR per DAG descriptor. Two IDRs to the same data line are
-        // two Loads at the Indirect Unit; the second stalls there and hits.
-        tbe.actions.pushNB(Event:SendIDR);
-    } else if (needPostNotif(tbe, tbe.reqType, tbe.secondType) && cachedHere(toBeState) && (tbe.postNotifSent == false)) {
-        tbe.actions.push(Event:SendPostNotif);
-
-    } else if (needPostEvictIdxLine(tbe, tbe.reqType, tbe.secondType) && cachedHere(toBeState) && (tbe.postEvictSent == false)) {
-        tbe.actions.push(Event:TriggerPostEvict);
+        if (isConsideredEvict(tbe.reqType) && (tbe.dataValid == false)) {
+            // A dataless Evict carried the DAG and this Gather Unit holds
+            // no copy: a non-inclusive Gather Unit, not supported yet.
+            error("Gather Unit: a dataless Evict carried an index DAG but the line is not here");
+        }
+        // The transaction's initiator fetched the line when this Gather
+        // Unit had no current copy (Initiate_FetchIndexLine_*), so the
+        // data is here by now. One IDR per DAG descriptor, unless
+        // idr_coalesce merges those to one data line. Two IDRs to the
+        // same data line are two Loads at the Indirect Unit; the second
+        // stalls there and hits.
+        assert(tbe.dataValid);
+        speculateLine(address, tbe.dataBlk, hov_spec_mode, hov_spec_writes,
+                      hov_spec_lines, hov_spec_window);
+        if (idr_coalesce) {
+            coalesceExtensions(address, tbe.dataBlk);
+        }
+        tbe.actions.pushNB(Event:TriageIDR);
+    } else {
+        State toBeState := makeFinalState(tbe, getCacheEntry(address), getDirEntry(address));
+        if (idxLineAboveGU(tbe, toBeState) && (tbe.postEvictSent == false)) {
+            tbe.actions.push(Event:StashAndPostEvict);
+        }
     }
 }
 
-action(SendIDR,
-       desc="Send one ReadValue/WriteValue IDR (non-blocking, no self-chain)")
+// The Gather Unit sends the IDRs of an index request as soon as its data
+// goes to the Indirect Unit (SendCompData), not after the transaction's
+// CompAck, fill and tag write (PostProcess), so that an IDR reaches the
+// Indirect Unit about when the index does and before uop1 misses there.
+// PostProcess still sends what this does not reach: the IDRs of a
+// notification (answered with NotifAck) or of a post-evict write-back.
+action(ScheduleIDRs, desc="Gather Unit: send the IDRs once the index data leaves")
+{
+    if (gather_unit && hasDependentWork(address)) {
+        assert(tbe.dataValid);
+        speculateLine(address, tbe.dataBlk, hov_spec_mode, hov_spec_writes,
+                      hov_spec_lines, hov_spec_window);
+        if (idr_coalesce) {
+            coalesceExtensions(address, tbe.dataBlk);
+        }
+        tbe.actions.pushFrontNB(Event:TriageIDR);
+    }
+}
+
+// The IDRs of an index line go one at a time, in two steps, so that only
+// sending needs a hov TBE: SLICC checks a transition's resources before
+// any of its actions run, so a full hov TBE pool would stall even an IDR
+// that is then dropped. TriageIDR drops the next IDR or passes it to
+// IssueIDR, and IssueIDR (which needs a hov TBE) sends it; either pushes
+// the next TriageIDR at once (a non-blocking trigger) while work remains.
+action(TriageIDR,
+       desc="Gather Unit: drop the next IDR, or pass it to IssueIDR")
 {
     assert(gather_unit);
     assert(hasDependentWork(address));
+    // Never build an IDR from index data that is not in the TBE
+    // (copyCacheAndDir leaves it out in UC_RU/UD_RU).
+    assert(tbe.dataValid);
+
+    bool issue := false;
+    // A wrong-path uop0 past the end of its pair (or a speculated element
+    // past it) reads a garbage index whose data address can lie outside
+    // memory. Drop such an IDR, as hardware drops a speculative access to
+    // an unmapped address.
+    Addr next_addr := peekDependentAddr(address, tbe.dataBlk);
+    bool is_spec := peekDependentIsSpec(address);
+    if (isMappedDownstream(makeLineAddress(next_addr)) == false) {
+        DPRINTF(IndirectAccess,
+            "IDR from index line %#x to unmapped address %#x dropped.\n",
+            address, next_addr);
+        dropDependentReq(address);
+        countIdrDroppedUnmapped();
+        if (is_spec) {
+            countSpecIdr(1);
+        }
+    } else {
+        // Coalescing across index lines: an IDR to a data line with one
+        // in flight or sent recently is dropped; a write to a line whose
+        // read IDR is parked in retry lifts that IDR instead.
+        Addr data_line := makeLineAddress(next_addr);
+        bool is_write := peekDependentIsWrite(address);
+        int verdict := 0;
+        if (idr_coalesce) {
+            verdict := idrVerdict(data_line, is_write);
+        }
+        if (verdict == 2) {
+            TBE parked := hovTBEs[parkedIdrHovId(data_line)];
+            assert(is_valid(parked));
+            parked.pendReqType := CHIRequestType:WriteValue;
+            DPRINTF(IndirectAccess,
+                "IDR to data line %#x lifts the parked IDR hov_id=%#x to WriteValue.\n",
+                data_line, parked.txnId);
+            dropDependentReq(address);
+        } else if (verdict == 1) {
+            DPRINTF(IndirectAccess,
+                "IDR from index line %#x to data line %#x dropped: one is in flight or recent.\n",
+                address, data_line);
+            dropDependentReq(address);
+            if (is_spec) {
+                countSpecIdr(2);
+            }
+        } else {
+            issue := true;
+        }
+    }
+    if (issue) {
+        tbe.actions.pushFrontNB(Event:IssueIDR);
+    } else if (hasDependentWork(address)) {
+        tbe.actions.pushFrontNB(Event:TriageIDR);
+    }
+}
+
+action(IssueIDR,
+       desc="Gather Unit: send the IDR TriageIDR passed (needs a hov TBE)")
+{
+    assert(gather_unit);
+    assert(hasDependentWork(address));
+    assert(tbe.dataValid);
 
     // Resource stall if HOV TBE pool is full
     check_allocate(storHovTBEs);
 
-    RequestPtr depReq := getDependentReq(address, tbe.dataBlk);
-    Addr acc_addr := getAddr(depReq);
-
-    // Determine request type
-    CHIRequestType idr_type;
-    if (isDepReadReq(depReq)) {
-        idr_type := CHIRequestType:ReadValue;
-    } else {
-        idr_type := CHIRequestType:WriteValue;
+    Addr next_addr := peekDependentAddr(address, tbe.dataBlk);
+    Addr data_line := makeLineAddress(next_addr);
+    bool is_write := peekDependentIsWrite(address);
+    bool is_spec := peekDependentIsSpec(address);
+    // Another index line may have sent to this data line while this one
+    // waited for a hov TBE: ask again.
+    int verdict := 0;
+    if (idr_coalesce) {
+        verdict := idrVerdict(data_line, is_write);
     }
-
-    // Compute destination before enqueue so we can reuse it for hovTbe
-    NetDest idr_dest;
-    if (isInvalid(tbe.indirect_unit_id)) {
-        idr_dest.add(mapAddressToDownstreamMachine(makeLineAddress(acc_addr)));
-    } else {
-        idr_dest.add(tbe.indirect_unit_id);
-    }
-
-    // Allocate the hov TBE, a transaction keyed by its hov id (see hovTBEs)
-    int hov_slot := storHovTBEs.addEntryToNewSlot();
-    Addr hov_id := makeHovId(hov_slot, blockSize);
-    hovTBEs.allocate(hov_id);
-    TBE hovTbe := hovTBEs[hov_id];
-    initializeHovTBE(hovTbe, hov_id, acc_addr, hov_slot,
-                     idr_type, depReq, idr_dest, tbe);
-
-    enqueue(reqOutPort, CHIRequestMsg, request_latency) {
-        indirectDependentBoilerPlate(out_msg);
-        fillInMsgFromReq(out_msg, depReq);
-
-        out_msg.type := idr_type;
-        out_msg.allowRetry := hovTbe.pendReqAllowRetry;
-        // The Indirect Unit returns this id on HovAck/RetryAck/PCrdGrant
-        out_msg.txnId := hov_id;
-
-        out_msg.indirect_unit_id := tbe.indirect_unit_id;
-        out_msg.value_unit_id := tbe.value_unit_id;
-        out_msg.gather_unit_id := tbe.gather_unit_id;
-        out_msg.alias := hovTbe.alias;
-
+    if (verdict == 2) {
+        TBE parked := hovTBEs[parkedIdrHovId(data_line)];
+        assert(is_valid(parked));
+        parked.pendReqType := CHIRequestType:WriteValue;
         DPRINTF(IndirectAccess,
-            "IDR: index_line=%#x -> data_addr=%#x alias=%#x isRead=%d hov_id=%#x\n",
-            address, out_msg.addr, hovTbe.alias, isDepReadReq(depReq), hov_id
-        );
-
-        out_msg.Destination := idr_dest;
-        if (isInvalid(tbe.indirect_unit_id)) {
-            DPRINTF(IndirectAccess, "Indirect unit id not set yet. Sending downstream.\n");
-        } else {
-            DPRINTF(IndirectAccess, "Indirect unit id set. Sending upstream.\n");
+            "IDR to data line %#x lifts the parked IDR hov_id=%#x to WriteValue.\n",
+            data_line, parked.txnId);
+        dropDependentReq(address);
+    } else if (verdict == 1) {
+        DPRINTF(IndirectAccess,
+            "IDR from index line %#x to data line %#x dropped: one is in flight or recent.\n",
+            address, data_line);
+        dropDependentReq(address);
+        if (is_spec) {
+            countSpecIdr(2);
         }
+    } else {
+            RequestPtr depReq := getDependentReq(address, tbe.dataBlk);
+            Addr acc_addr := getAddr(depReq);
+
+            // Determine request type
+            CHIRequestType idr_type;
+            if (isDepReadReq(depReq)) {
+                idr_type := CHIRequestType:ReadValue;
+            } else {
+                idr_type := CHIRequestType:WriteValue;
+            }
+
+            // Compute destination before enqueue so we can reuse it for hovTbe
+            NetDest idr_dest;
+            if (isInvalid(tbe.indirect_unit_id)) {
+                idr_dest.add(mapAddressToDownstreamMachine(makeLineAddress(acc_addr)));
+            } else {
+                idr_dest.add(tbe.indirect_unit_id);
+            }
+
+            // Allocate the hov TBE, a transaction keyed by its hov id (see hovTBEs)
+            int hov_slot := storHovTBEs.addEntryToNewSlot();
+            Addr hov_id := makeHovId(hov_slot, blockSize);
+            hovTBEs.allocate(hov_id);
+            TBE hovTbe := hovTBEs[hov_id];
+            initializeHovTBE(hovTbe, hov_id, acc_addr, hov_slot,
+                             idr_type, depReq, idr_dest, tbe);
+            hovTbe.hov_spec := is_spec;
+            if (is_spec) {
+                countSpecIdr(0);
+            }
+            if (idr_coalesce) {
+                noteIdrSent(data_line, hov_id, is_write, idr_recent_lines);
+            }
+
+            enqueue(reqOutPort, CHIRequestMsg, request_latency) {
+                indirectDependentBoilerPlate(out_msg);
+                fillInMsgFromReq(out_msg, depReq);
+                // hov<p>_data, as uop1 names the same access
+                out_msg.access_name := getReqAccessName(depReq);
+
+                out_msg.type := idr_type;
+                out_msg.allowRetry := hovTbe.pendReqAllowRetry;
+                // The Indirect Unit returns this id on HovAck/RetryAck/PCrdGrant
+                out_msg.txnId := hov_id;
+
+                out_msg.indirect_unit_id := tbe.indirect_unit_id;
+                out_msg.value_unit_id := tbe.value_unit_id;
+                out_msg.gather_unit_id := tbe.gather_unit_id;
+                out_msg.alias := hovTbe.alias;
+                out_msg.hov_spec := is_spec;
+
+                DPRINTF(IndirectAccess,
+                    "IDR: index_line=%#x -> data_addr=%#x alias=%#x isRead=%d hov_id=%#x spec=%d\n",
+                    address, out_msg.addr, hovTbe.alias, isDepReadReq(depReq), hov_id, is_spec
+                );
+
+                out_msg.Destination := idr_dest;
+                if (isInvalid(tbe.indirect_unit_id)) {
+                    DPRINTF(IndirectAccess, "Indirect unit id not set yet. Sending downstream.\n");
+                } else {
+                    DPRINTF(IndirectAccess, "Indirect unit id set. Sending upstream.\n");
+                }
+            }
     }
-    // No self-chain — PostProcess will be called again by processNextState
+    // The line's next IDR follows at once (a non-blocking trigger), whether
+    // ScheduleIDRs or PostProcess pushed the first.
+    if (hasDependentWork(address)) {
+        tbe.actions.pushFrontNB(Event:TriageIDR);
+    }
 }
 
-action(SendPostNotif,
-       desc="Send NotifyIndIdx during post-processing")
+// A cache above the Gather Unit that holds an index line never forwards a
+// DAG for it: the DAG is stashed per line (merged with any DAG already
+// there) and the delayed post-evict replacement writes the line back with
+// the stash in its seqReq (Initiate_Replacement), so the Gather Unit gets
+// the DAG and the current index data in one transaction.
+action(StashAndPostEvict,
+       desc="Stash the DAG for the index line and schedule its post-evict once")
 {
-    tbe.postNotifSent := true;
-    enqueue(reqOutPort, CHIRequestMsg, request_latency) {
-        out_msg.addr := tbe.addr;
-        out_msg.accAddr := tbe.accAddr;
-
-        indirectNotifBoilerPlate(out_msg);
-
-        out_msg.type := CHIRequestType:NotifyIndIdx;
-        out_msg.secondType := CHIRequestType:NotifyIndIdx;
-        out_msg.seqReq := tbe.seqReq;
-
-        out_msg.indirect_unit_id := tbe.indirect_unit_id;
-        out_msg.value_unit_id := tbe.value_unit_id;
-        out_msg.gather_unit_id := tbe.gather_unit_id;
-        out_msg.alias := tbe.alias;
-        out_msg.txnId := tbe.txnId;
-
-        out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
-        DPRINTF(IndirectAccess, "Sending a notif for %#lx.\n", out_msg.accAddr);
-    }
-    // Wait for NotifAck before proceeding
-    tbe.expected_req_resp.addExpectedRespType(CHIResponseType:NotifAck);
-    tbe.expected_req_resp.addExpectedCount(1);
-}
-
-action(TriggerPostEvict, desc="") {
+    assert(isInvalid(tbe.gather_unit_id));
     tbe.postEvictSent := true;
-    if (!hasPostEvict(address)) {
-        postEvict(address);
-        enqueue(replTriggerOutPort, ReplacementMsg, post_evict_delay) {
+    if (tbe.isSeqReqValid && hasDAG(tbe.seqReq)) {
+        stashPostEvictDAG(address, tbe.seqReq);
+    }
+    if (isReplEnqueued(address) == false) {
+        markReplEnqueued(address);
+        // replTriggerQueue is strict FIFO and ordinary replacements enqueue
+        // with no delay, so a replacement enqueued within post_evict_delay
+        // after this message would arrive before it and violate the order.
+        // This delayed message bypasses the strict-FIFO check: if an
+        // ordinary replacement evicts the same line first, it takes the
+        // stash and the post-evict finds the line in I and is dropped
+        // (transition I, Local_Eviction).
+        enqueue(replTriggerOutPort, ReplacementMsg, post_evict_delay, true) {
             out_msg.addr := address;
             out_msg.from_addr := address;
             out_msg.post_evict := true;
         }
     } else {
-        DPRINTF(IndirectAccess, "TBE for %#lx says post evict but already have it.\n", address);
+        DPRINTF(IndirectAccess, "Post-evict of %#lx already scheduled; DAG merged into the stash.\n", address);
     }
 }
 
-action(Error_UpdateDAGNoIndexLine, desc="") {
-  error("UpdateDAG with the index line not cached at the Gather Unit");
+action(ClearReplEnqueued,
+       desc="A replacement popped without acting (UD_T): keep the stash, let the next DAG re-schedule the post-evict")
+{
+    clearReplEnqueued(address);
+}
+
+// Gather Unit: a notification (UpdateDAG) brought DAGs for a line whose
+// current data is not here. The state says where it is: an upstream cache
+// holds a copy (UC_RU, UD_RU, RU, RSC, RSD, RUSC, RUSD), which is snooped
+// as Initiate_ReadOnce_HitUpstream does, or nobody above does (I), and the
+// line is read from downstream as Initiate_LoadMiss does. PostProcess
+// sends the IDRs once the data has arrived.
+action(Initiate_FetchIndexLine_Upstream,
+       desc="Gather Unit: snoop the upstream copy of the index line before the IDRs")
+{
+    assert(gather_unit);
+    assert(tbe.dataValid == false);
+    assert(tbe.dir_sharers.count() > 0);
+    tbe.actions.push(Event:ReadMissPipe);
+    tbe.actions.push(Event:SendSnpOnce);
+    if (is_invalid(cache_entry)) {
+        // no entry here: the snooped data is dropped at the end
+        tbe.dataToBeInvalid := true;
+    }
+    DPRINTF(IndirectAccess, "Gather Unit fetches index line %#x from upstream.\n", address);
+}
+
+action(Initiate_FetchIndexLine_Downstream,
+       desc="Gather Unit: read the absent index line from downstream before the IDRs")
+{
+    assert(gather_unit);
+    assert(tbe.dataValid == false);
+    assert(is_invalid(cache_entry));
+    tbe.actions.push(Event:ReadMissPipe);
+    if (tbe.doCacheFill) {
+        tbe.actions.push(Event:SendReadShared);
+        tbe.actions.push(Event:CheckCacheFill);
+        tbe.actions.push(Event:TagArrayWrite);
+    } else {
+        tbe.actions.push(Event:SendReadOnce);
+        tbe.dataToBeInvalid := true;
+    }
+    DPRINTF(IndirectAccess, "Gather Unit fetches index line %#x from downstream (fill=%d).\n", address, tbe.doCacheFill);
 }
 
 action(Extract_Extensions, desc="") {
     // NOTE: We may want to remove this assertion and put the
     // entire functionality inside an if statement.
-    assert(isIndirectIdx(tbe.reqType, tbe.secondType) || isProcessNotify(tbe.reqType, tbe.secondType));
-    extractExtensions(tbe.addr, tbe.seqReq);
+    assert(gather_unit);
+    assert(tbe.isSeqReqValid && hasDAG(tbe.seqReq));
+    // MYSTUFF: count the DAG's descriptors by carrier: an index request,
+    // a notification, or a post-evict write-back
+    if (tbe.reqType == CHIRequestType:NotifyIndIdx) {
+      countDAGCarrier(1, tbe.seqReq);
+    } else if (isPropagateEvict(tbe.reqType, tbe.secondType)) {
+      countDAGCarrier(2, tbe.seqReq);
+    } else {
+      countDAGCarrier(0, tbe.seqReq);
+    }
+    // FFUTSYM
+    extractExtensions(tbe.addr, tbe.seqReq, tbe.dataBlk);
 }
 
+// Forward a notification downstream (this cache does not hold the line).
 action(Send_NotifyIndIdx) {
     enqueue(reqOutPort, CHIRequestMsg, request_latency) {
         prepareRequest(tbe, CHIRequestType:NotifyIndIdx, out_msg);
-        out_msg.allowRetry := true;
         out_msg.Destination.clear();
         out_msg.Destination.add(mapAddressToDownstreamMachine(out_msg.addr));
-
-        // Manipulate type so downstream caches don't trigger duplicate post-evicts
-        // but ONLY if this cache is actually going to trigger the post-evict!
-        if (needPostEvictIdxLine(tbe, tbe.reqType, tbe.secondType)) {
-            State toBeState := makeFinalState(tbe, getCacheEntry(address), getDirEntry(address));
-            if (cachedHere(toBeState)) {
-                out_msg.secondType := CHIRequestType:NotifyIndIdx;
-            }
-        }
+        // Arm the TBE as well as the message, so a RetryAck can be served.
+        allowRequestRetry(tbe, out_msg);
     }
     // Wait for NotifAck from downstream before finalizing
     tbe.expected_req_resp.addExpectedRespType(CHIResponseType:NotifAck);
@@ -4518,25 +4916,6 @@ action(Send_NotifAck, desc="Send NotifAck back to requestor for NotifyIndIdx") {
     }
 }
 
-// NOTE: This guard relies on isIndirectNotifyFromCPU which checks
-// secondType == null. This works when the indirect unit and gather unit
-// are at different cache levels. However, if the gather unit is ALSO
-// at the L1 (same controller as the indirect unit), manipulateSecondType
-// will set secondType = NotifyIndIdx (matching the gather_unit case),
-// causing isIndirectNotifyFromCPU to return false and SKIPPING cleanup.
-// This will result in a dummy_pkt memory leak in that configuration.
-// TODO: Fix this for configurations where gather_unit == indirect_unit.
-//       Additionally, SendPostNotif should check if gather_unit_id is
-//       already known (isValid(tbe.gather_unit_id)), which can only
-//       happen when the same cache has both the indirect_unit and
-//       gather_unit designations. In that case, the notif can be
-//       processed locally instead of being forwarded downstream.
-action(Cleanup_NotifPkt, desc="Clean up dummy_pkt via sequencer callback on NotifAck") {
-    if (indirect_unit && isIndirectNotifyFromCPU(tbe.reqType, tbe.secondType)) {
-        sequencer.cleanupNotifPkt(tbe.txnId);
-    }
-}
-
 action(Receive_HovAck, desc="IDR accepted by the Indirect Unit: free the hov TBE") {
     assert(gather_unit);
     assert(tbe.expected_req_resp.hasExpected());
@@ -4544,6 +4923,10 @@ action(Receive_HovAck, desc="IDR accepted by the Indirect Unit: free the hov TBE
       error("Unexpected response on HOV TBE");
     }
     assert(tbe.expected_req_resp.hasExpected() == false);
+    if (idr_coalesce) {
+        // The IDR's data line (the hov TBE's addr) is no longer in flight.
+        noteIdrAcked(tbe.addr);
+    }
     // Read the slot and key before the entry goes away, then unset the TBE
     // so the transition's setState does not touch freed memory (as the DVM
     // Final transitions do).

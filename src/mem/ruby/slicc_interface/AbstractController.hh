@@ -41,6 +41,7 @@
 #ifndef __MEM_RUBY_SLICC_INTERFACE_ABSTRACTCONTROLLER_HH__
 #define __MEM_RUBY_SLICC_INTERFACE_ABSTRACTCONTROLLER_HH__
 
+#include <deque>
 #include <exception>
 #include <iostream>
 #include <memory>
@@ -88,16 +89,94 @@ class AbstractController : public ClockedObject, public Consumer
 {
   // MYSTUFF
   private:
-    std::set<Addr> postEvicts;
     std::unordered_map<Addr, Addr> addrToAliasMap;
     std::unordered_map<Addr, Addr> aliasToAddrMap;
 
     // Per-line cache of DAGs extracted from seqReq on arrival.
-    // Keyed by line address. Supports multiple sub-line entries per line
-    // (e.g., index[i] and index[i+1] in the same cache line).
-    // read and offset are derived from the DAG descriptor when needed.
-    std::unordered_map<Addr,
-        std::vector<std::shared_ptr<DependentAccessGen>>> m_cachedEntries;
+    // Keyed by index line address. Supports multiple sub-line entries per
+    // line (e.g., index[i] and index[i+1] in the same cache line); each
+    // entry is one pending dependent access: its single-descriptor DAG,
+    // the IDR's intent (a write absorbs the reads coalesced into it) and
+    // how many DAGs it absorbed. `coalesced` says coalesceExtensions ran
+    // on the current entries; extractExtensions clears it.
+    // `spec`: made by speculateLine, not by a core's uop0.
+    struct DependentEntry
+    {
+        std::shared_ptr<DependentAccessGen> dag;
+        bool write;
+        unsigned absorbed = 0;
+        bool spec = false;
+    };
+    struct DependentEntries
+    {
+        std::vector<DependentEntry> entries;
+        bool coalesced = false;
+    };
+    std::unordered_map<Addr, DependentEntries> m_cachedEntries;
+
+    // The IDRs this Gather Unit sent, by data line, for coalescing across
+    // index lines (idrVerdict): one in flight per line (a hov TBE, from
+    // IssueIDR to HovAck), parked while a RetryAck holds it here (a later
+    // write may still lift it to WriteValue), and the last idr_recent_lines
+    // sent, kept after HovAck. A dropped IDR costs only the early fill:
+    // uop1 is a real access and fetches the line itself.
+    struct IdrInFlight
+    {
+        Addr hovId;
+        bool write;
+        bool parked = false;
+    };
+    std::unordered_map<Addr, IdrInFlight> m_idrInFlight;
+    std::deque<Addr> m_idrRecentFifo;
+    std::unordered_map<Addr, bool> m_idrRecent;  // data line -> write
+
+    // In-line speculation (speculateLine). A cover row says which elements
+    // of an index line this Gather Unit has an IDR for, per (core, pair):
+    // bit k of `covered` is element k (`writes`: that IDR is a write).
+    // A row is a hint: it lives for hov_spec_window cycles from `made`,
+    // and at most hov_spec_lines index lines keep rows (FIFO).
+    struct HovCover
+    {
+        RequestorID rid;
+        uint8_t pair;
+        int leaderElem;
+        uint64_t covered = 0;
+        uint64_t writes = 0;
+        Cycles made;
+    };
+    std::unordered_map<Addr, std::vector<HovCover>> m_hovCover;
+    std::deque<Addr> m_hovCoverFifo;
+    // The configuration speculateLine last ran with (the SLICC params).
+    int m_hovSpecLines = 0;
+    Cycles m_hovSpecWindow = Cycles(0);
+    // The live row of (rid, pair) on an index line, or null.
+    HovCover *findCover(Addr line_addr, RequestorID rid, unsigned pair,
+                        Cycles now);
+    // A fresh row of (rid, pair) on an index line (reusing a stale one).
+    HovCover &makeCover(Addr line_addr, RequestorID rid, unsigned pair,
+                        int leader_elem, Cycles now);
+
+    // The index element a DAG reads, from the index line's data.
+    uint64_t indexValue(const DependentAccessGen &dag,
+                        DataBlock &index_data, int &offset,
+                        size_t &index_size);
+    // Mark that element read in the block (the Gather Unit's own use).
+    void markIndexRead(const DependentAccessGen &dag, DataBlock &index_data,
+                       Addr line_addr);
+
+    // Per-line post-evict obligation of a cache above the Gather Unit that
+    // holds an index line: the DAGs that reached it while it held the line
+    // (an index hit, an absorbed notification, a propagated write-back),
+    // merged into one, and whether the delayed post-evict replacement is
+    // already enqueued. Whichever replacement writes the line back next
+    // takes the DAG (Initiate_Replacement) and carries it to the Gather
+    // Unit with the current data.
+    struct PostEvictEntry
+    {
+        std::shared_ptr<DependentAccessGen> dag;
+        bool replEnqueued = false;
+    };
+    std::unordered_map<Addr, PostEvictEntry> m_postEvicts;
 
   protected:
     // NOTE: Pointer to all sequencers that are upstream to this controller.
@@ -115,13 +194,43 @@ class AbstractController : public ClockedObject, public Consumer
     RequestPtr getDependentReq(Addr line_addr, DataBlock &index_data);
 
     // Extract extensions from a Request and append to m_cachedEntries[lineAddr].
-    void extractExtensions(Addr line_addr, RequestPtr req);
+    // A DAG whose element a live cover row already covers is dropped
+    // (hovDagsCoveredAtGU) and its index element marked read in
+    // `index_data` (the speculated IDR stands for it).
+    void extractExtensions(Addr line_addr, RequestPtr req,
+                           DataBlock &index_data);
+
+    // In-line speculation, with the index line's data here: for the first
+    // real DAG of each (core, pair) on the line with no live cover row
+    // (the leader), append speculated entries for the line's elements
+    // after the leader's (mode 1, forward) or all of them (mode 2, line)
+    // that no real entry holds, cloned from the leader's DAG at element k
+    // (alias moved by (k - leader) data elements; a write demoted to a
+    // read unless spec_writes), and make the row. Mode 0 does nothing.
+    void speculateLine(Addr line_addr, DataBlock &index_data, int mode,
+                       bool spec_writes, int max_lines, Cycles window);
+    // Whether the next dependent request was speculated.
+    bool peekDependentIsSpec(Addr line_addr);
+    // A speculated IDR: 0 sent, 1 dropped (unmapped), 2 dropped
+    // (coalesced across index lines).
+    void countSpecIdr(int what);
+
+    // Coalesce the pending DAGs of an index line whose dependent accesses
+    // fall in the same data line into one IDR each: the first in program
+    // order is kept, a write among them makes it a WriteValue, and the
+    // absorbed DAGs' index elements are marked read. Needs the index data
+    // for the addresses. Runs once per batch of entries.
+    void coalesceExtensions(Addr line_addr, DataBlock &index_data);
 
     // Check if there are remaining entries for this lineAddr.
     bool hasDependentWork(Addr line_addr);
 
-    // Peek at the next dependent request's physical address without popping.
+    // Peek at the next dependent request's physical address without
+    // popping; the Gather Unit reads the index element here, so it is
+    // marked read whether the IDR is then sent or dropped.
     Addr peekDependentAddr(Addr line_addr, DataBlock &index_data);
+    // Whether the next dependent request is a write (WriteValue).
+    bool peekDependentIsWrite(Addr line_addr);
 
     // Drop the front dependent entry without generating a request.
     void dropDependentReq(Addr line_addr);
@@ -129,13 +238,60 @@ class AbstractController : public ClockedObject, public Consumer
     // Clear all entries for lineAddr.
     void clearExtensions(Addr line_addr);
 
-    bool hasPostEvict(Addr addr) { return postEvicts.find(addr) != postEvicts.end(); }
-    void postEvict(Addr addr) { postEvicts.insert(addr); }
-    void evict(Addr addr) { postEvicts.erase(addr); }
+    // Coalescing across index lines (see m_idrInFlight). idrVerdict says
+    // what to do with an IDR to `data_line`: IDR_SEND, IDR_DROP (one is
+    // in flight, or was sent recently; a write dropped over a read is
+    // counted as lost intent), or IDR_UPGRADE (a read is parked in retry:
+    // the caller lifts hov TBE parkedIdrHovId to WriteValue and drops
+    // this one). note* keep the tables from IssueIDR, HovAck, RetryAck and
+    // the retry's resend.
+    static constexpr int IDR_SEND = 0;
+    static constexpr int IDR_DROP = 1;
+    static constexpr int IDR_UPGRADE = 2;
+    int idrVerdict(Addr data_line, bool write);
+    Addr parkedIdrHovId(Addr data_line);
+    void noteIdrSent(Addr data_line, Addr hov_id, bool write,
+                     int recent_lines);
+    void noteIdrAcked(Addr data_line);
+    void noteIdrParked(Addr data_line);
+    void noteIdrResent(Addr data_line);
+
+    // Whether a line address maps to some downstream machine (an IDR to an
+    // unmapped address is dropped instead of becoming a fatal mapping).
+    bool isMappedDownstream(Addr addr) const;
+    void countIdrDroppedUnmapped() { stats.idrDroppedUnmapped++; }
+    void countStashOrphaned() { stats.hovStashOrphaned++; }
+    // DAG descriptors extracted at the Gather Unit, by carrier: 0 an
+    // index request, 1 a notification, 2 a post-evict write-back.
+    void countDAGCarrier(int carrier, RequestPtr req);
+
+    // The post-evict stash (see m_postEvicts).
+    bool hasDAG(RequestPtr req);
+    void stashPostEvictDAG(Addr line_addr, RequestPtr req);
+    bool hasStash(Addr line_addr);
+    RequestPtr takePostEvictDAG(Addr line_addr);
+    bool isReplEnqueued(Addr line_addr);
+    void markReplEnqueued(Addr line_addr);
+    void clearReplEnqueued(Addr line_addr);
 
   public:
-    bool disambiguated(Addr alias) { return aliasToAddrMap.find(alias) != aliasToAddrMap.end(); }
-    void setAliasForAddr(Addr alias, Addr address) { addrToAliasMap[address] = alias; aliasToAddrMap[alias] = address; }
+    // Whether a live cover row holds element `elem` of an index line for
+    // (rid, pair), and as a write when `write` (a read does not cover a
+    // write).
+    bool hovCovers(Addr line_addr, RequestorID rid, unsigned pair, int elem,
+                   bool write);
+
+    bool
+    disambiguated(Addr alias)
+    {
+        return aliasToAddrMap.find(alias) != aliasToAddrMap.end();
+    }
+    void
+    setAliasForAddr(Addr alias, Addr address)
+    {
+        addrToAliasMap[address] = alias;
+        aliasToAddrMap[alias] = address;
+    }
     Addr getAddrFromAlias(Addr alias) { return aliasToAddrMap[alias]; }
     // FFUTSYM
   public:
@@ -217,12 +373,15 @@ class AbstractController : public ClockedObject, public Consumer
     { fatal("Prefetches not implemented!");}
 
     //! Notifies controller of a request coalesced at the sequencer.
-    //! By default, it does nothing. Behavior is protocol-specific
+    //! By default, it does nothing. Behavior is protocol-specific.
+    //! access_name is the request's label ("" without one), so the
+    //! per-name hit and miss stats count coalesced requests too.
     virtual void notifyCoalesced(const Addr& addr,
                                  const RubyRequestType& type,
                                  const RequestPtr& req,
                                  const DataBlock& data_blk,
-                                 const bool& was_miss)
+                                 const bool& was_miss,
+                                 const std::string& access_name)
     { }
 
     //! Function for collating statistics from all the controllers of this
@@ -576,6 +735,48 @@ class AbstractController : public ClockedObject, public Consumer
         //! cares for
         statistics::Histogram delayHistogram;
         std::vector<statistics::Histogram *> delayVCHistogram;
+
+        //! IDRs dropped at the Gather Unit because their data address had
+        //! no downstream mapping (a wrong-path index past its pair)
+        statistics::Scalar idrDroppedUnmapped;
+
+        //! IDR coalescing at the Gather Unit (idr_coalesce): DAGs of one
+        //! index line absorbed into another's IDR to the same data line,
+        //! the sizes of those groups, IDRs dropped because one to their
+        //! data line was in flight or sent recently, writes dropped over a
+        //! read IDR (uop1's store upgrades the line), and read IDRs parked
+        //! in retry lifted to WriteValue
+        statistics::Scalar idrCoalescedSameLine;
+        statistics::Histogram idrCoalesceGroupSize;
+        statistics::Scalar idrDroppedInFlight;
+        statistics::Scalar idrDroppedRecent;
+        statistics::Scalar idrIntentLost;
+        statistics::Scalar idrUpgradedInRetry;
+
+        //! Post-evict stashes whose line left without a replacement (an
+        //! invalidating snoop or a back-invalidate) and became notifications
+        statistics::Scalar hovStashOrphaned;
+
+        //! DAG descriptors the Gather Unit extracted, by the message that
+        //! carried them: an index request, a notification, a post-evict
+        //! write-back
+        statistics::Vector hovDAGsByCarrier;
+
+        //! In-line speculation (speculateLine): entries made, leaders that
+        //! made them by mode, speculated IDRs sent and dropped (unmapped,
+        //! coalesced), real DAGs dropped because a row covered them,
+        //! rows dropped by the line limit, writes speculated as reads,
+        //! and speculated entries absorbed into another IDR (one index
+        //! line)
+        statistics::Scalar hovSpecEntries;
+        statistics::Scalar hovSpecLinesForward;
+        statistics::Scalar hovSpecLinesLine;
+        statistics::Scalar hovSpecIdrsSent;
+        statistics::Vector hovSpecIdrsDropped;
+        statistics::Scalar hovDagsCoveredAtGU;
+        statistics::Scalar hovCoverReplaced;
+        statistics::Scalar hovSpecWritesDemoted;
+        statistics::Scalar hovSpecCoalesced;
     } stats;
 
 };

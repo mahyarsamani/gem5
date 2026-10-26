@@ -39,10 +39,12 @@
 #ifndef __MEM_CACHE_PREFETCH_INDIRECT_MEMORY_HH__
 #define __MEM_CACHE_PREFETCH_INDIRECT_MEMORY_HH__
 
+#include <deque>
 #include <vector>
 
 #include "base/cache/associative_cache.hh"
 #include "base/sat_counter.hh"
+#include "base/statistics.hh"
 #include "mem/cache/prefetch/queued.hh"
 #include "mem/cache/tags/tagged_entry.hh"
 
@@ -66,6 +68,19 @@ class IndirectMemory : public Queued
     const int streamCounterThreshold;
     /** Number of prefetches generated when using the streaming prefetcher */
     const int streamingDistance;
+    /**
+     * Index values an access may match for confidence: the current one
+     * (1, the paper's in-order rule) or also the previous ones, since an
+     * out-of-order core reads B[i+1], B[i+2], ... before it loads A[B[i]].
+     */
+    const unsigned int confidenceWindow;
+
+    /** An earlier index value of a PT entry, and whether it was matched */
+    struct IndexSlot
+    {
+        int64_t value;
+        bool matched;
+    };
 
     /** Prefetch Table Entry */
     struct PrefetchTableEntry : public TaggedEntry
@@ -98,12 +113,27 @@ class IndirectMemory : public Queued
          * indirectCounter, the counter is decremented.
          */
         bool increasedIndirectCounter;
+        /**
+         * The index values before the current one, newest first, at most
+         * confidence_window - 1 of them; one that leaves the window
+         * unmatched decrements the confidence (as the current one does when
+         * the window is 1).
+         */
+        std::deque<IndexSlot> olderIndices;
+        /**
+         * Virtual address of the last index element whose target has been
+         * queued (the frontier rule): the next trigger continues after it.
+         */
+        Addr frontier;
+        /** Whether frontier holds a position of the current stream */
+        bool frontierValid;
 
         PrefetchTableEntry(unsigned indirect_counter_bits, TagExtractor ext)
             : TaggedEntry(), address(0), secure(false), streamCounter(0),
               enabled(false), index(0), baseAddr(0), shift(0),
               indirectCounter(indirect_counter_bits),
-              increasedIndirectCounter(false)
+              increasedIndirectCounter(false), frontier(0),
+              frontierValid(false)
         {
             registerTagExtractor(ext);
         }
@@ -121,6 +151,9 @@ class IndirectMemory : public Queued
             shift = 0;
             indirectCounter.reset();
             increasedIndirectCounter = false;
+            olderIndices.clear();
+            frontier = 0;
+            frontierValid = false;
         }
     };
     /** Prefetch table */
@@ -143,13 +176,20 @@ class IndirectMemory : public Queued
          * elements in the shiftValues array.
          */
         std::vector<std::vector<Addr>> baseAddr;
+        /**
+         * The PT entry this entry detects a pattern for. The entry's key is
+         * the same pointer, but recovering it from getTag() is only right
+         * while the IPD's tag extractor does not shift the key.
+         */
+        PrefetchTableEntry *ptEntry;
 
         IndirectPatternDetectorEntry(unsigned int num_addresses,
                                      unsigned int num_shifts,
                                      TagExtractor ext)
           : TaggedEntry(), idx1(0), idx2(0), secondIndexSet(false),
             numMisses(0),
-            baseAddr(num_addresses, std::vector<Addr>(num_shifts))
+            baseAddr(num_addresses, std::vector<Addr>(num_shifts)),
+            ptEntry(nullptr)
         {
             registerTagExtractor(ext);
         }
@@ -162,6 +202,7 @@ class IndirectMemory : public Queued
             idx2 = 0;
             secondIndexSet = false;
             numMisses = 0;
+            ptEntry = nullptr;
         }
     };
     /** Indirect Pattern Detector (IPD) table */
@@ -178,8 +219,37 @@ class IndirectMemory : public Queued
      * @param pt_entry Pointer to the associated page table entry
      * @param index Detected first index value
      */
-    void allocateOrUpdateIPDEntry(const PrefetchTableEntry *pt_entry,
+    void allocateOrUpdateIPDEntry(PrefetchTableEntry *pt_entry,
                                   int64_t index);
+
+    /**
+     * Invalidate the IPD entries of a PT entry that is being replaced, so
+     * that they never enable a pattern on the entry's next owner.
+     */
+    void releaseIPDEntriesOf(const PrefetchTableEntry *pt_entry);
+
+    /**
+     * The address of element `index` of an array at `base` with elements
+     * of 2^shift bytes; a negative shift divides (shift -3: a bit vector,
+     * one bit per index).
+     */
+    static Addr targetAddr(Addr base, int64_t index, int shift);
+
+    /**
+     * The frontier rule: queue the targets A[B[j]] of the index positions
+     * after the PT entry's frontier, up to `distance` elements past the
+     * trigger, reading B[j] from this cache's copy of the index lines;
+     * stop at the trigger's page end or at the first line not held here.
+     * @param pt_entry the enabled entry of the trigger's PC
+     * @param pfi the trigger, an index read of a hit
+     * @param distance prefetch distance, in elements
+     * @param addresses candidates are appended here
+     * @param cache accessor of the cache this prefetcher is attached to
+     */
+    void walkFrontier(PrefetchTableEntry *pt_entry, const PrefetchInfo &pfi,
+                      unsigned distance,
+                      std::vector<AddrPriority> &addresses,
+                      const CacheAccessor &cache);
     /**
      * Update an IPD entry with a detected miss address, when the first index
      * is being tracked
@@ -200,6 +270,47 @@ class IndirectMemory : public Queued
      * @param addr address of the access
      */
     void checkAccessMatchOnActiveEntries(Addr addr);
+
+    /** IMP's own counters, printed as <prefetcher>.imp.<stat>: Base's
+     *  pfIssued and pfUseful mix every kind of candidate. */
+    struct IndirectMemoryStats : public statistics::Group
+    {
+        IndirectMemoryStats(statistics::Group *parent,
+                            const std::vector<int> &shifts);
+
+        /** PT hits whose value could be read as an index */
+        statistics::Scalar indexReads;
+        /** Index reads of an enabled entry above the threshold */
+        statistics::Scalar indexReadsEnabled;
+        /** IPD entries allocated */
+        statistics::Scalar ipdAllocs;
+        /** IPD entries released after a third index without a match */
+        statistics::Scalar ipdReleases;
+        /** IPD entries whose miss tracking another entry took over */
+        statistics::Scalar ipdStolen;
+        /** Patterns found, per element of shift_values */
+        statistics::Vector patternsEnabled;
+        /** Confidence falling to the threshold from above */
+        statistics::Scalar patternsDisabled;
+        /** PT entries with an enabled pattern replaced */
+        statistics::Scalar patternsReplaced;
+        /** Accesses matching an enabled pattern's current target */
+        statistics::Scalar confidenceHits;
+        /** Indirect target addresses handed to the queue */
+        statistics::Scalar indirectCandidates;
+        /** Frontier walks stopped at an index line not in the cache */
+        statistics::Scalar indirectAbsentIndexLine;
+        /** Frontier walks stopped at the end of the trigger's page */
+        statistics::Scalar indirectPageStop;
+        /** Frontier restarts because the index stream jumped */
+        statistics::Scalar frontierResets;
+        /** Distance in elements (j - i) of every indirect candidate */
+        statistics::Distribution indirectDistance;
+        /** Candidates of IMP's own stream part */
+        statistics::Scalar streamCandidates;
+        /** Prefetches waiting for a translation at the dump */
+        statistics::Value pendingTranslations;
+    } impStats;
 
   public:
     IndirectMemory(const IndirectMemoryPrefetcherParams &p);

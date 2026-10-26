@@ -1239,12 +1239,24 @@ class DependentAccessGen: public Extension<Request, DependentAccessGen>
         size_t dataSize;            // sizeof one data element
         Addr alias;                 // alias of the access this describes
         AddrTranslator translateFn; // VA→PA translator for this array
+        uint8_t pair;               // side-car entry
+        std::string dataName;       // access name of the data array: the
+                                    // IDR carries it, as uop1 carries its
+                                    // own (hov<pair>_data unless the core
+                                    // was told the array's name)
     };
 
   protected:
     RequestorID _requestorId;
     size_t _indexSize;
     std::vector<DepDescriptor> _descriptors;
+    /** index[i], when the core already has it: the register form of
+     *  ldind/stind supplies it, and the LSQ's load-to-load forwarding
+     *  finds it in an older uop0. Such a uop0 only delivers its
+     *  descriptor (NotifyIndIdxReq); the Sequencer pairs its latency
+     *  sample from this value. */
+    bool _hasIndexValue = false;
+    uint64_t _indexValue = 0;
 
   public:
     DependentAccessGen():
@@ -1257,6 +1269,14 @@ class DependentAccessGen: public Extension<Request, DependentAccessGen>
         _requestorId(0), _indexSize(index_size)
     {}
 
+    void setIndexValue(uint64_t value)
+    {
+        _hasIndexValue = true;
+        _indexValue = value;
+    }
+    bool hasIndexValue() const { return _hasIndexValue; }
+    uint64_t indexValue() const { return _indexValue; }
+
     virtual ~DependentAccessGen() = default;
 
     DependentAccessGen(const DependentAccessGen& other) = default;
@@ -1265,10 +1285,12 @@ class DependentAccessGen: public Extension<Request, DependentAccessGen>
 
     void addDescriptor(AccessIntent intent, Addr index_addr, Addr base,
                        size_t data_size, Addr alias,
-                       AddrTranslator fn = nullptr)
+                       AddrTranslator fn = nullptr, unsigned pair = 0,
+                       std::string data_name = "")
     {
         _descriptors.push_back(
-            {intent, index_addr, base, data_size, alias, std::move(fn)});
+            {intent, index_addr, base, data_size, alias, std::move(fn),
+             static_cast<uint8_t>(pair), std::move(data_name)});
     }
 
     size_t numDescriptors() const { return _descriptors.size(); }
@@ -1305,11 +1327,27 @@ class DependentAccessGen: public Extension<Request, DependentAccessGen>
     virtual std::vector<std::unique_ptr<DependentAccessGen>>
         unwrap() const = 0;
 
+    /** Drop the descriptors `pred(descriptor, index size)` selects (a
+     *  merged DAG keeps one index size for all of them); returns how
+     *  many were dropped. */
+    template <typename Pred>
+    size_t eraseDescriptorsIf(Pred pred) {
+        size_t before = _descriptors.size();
+        _descriptors.erase(
+            std::remove_if(_descriptors.begin(), _descriptors.end(),
+                           [&](const DepDescriptor &d) {
+                               return pred(d, _indexSize);
+                           }),
+            _descriptors.end());
+        return before - _descriptors.size();
+    }
+
     // --- Per-access methods (all assert !isMerged()) ---
 
     void setRequestorId(RequestorID rid) {
         _requestorId = rid;
     }
+    RequestorID requestorId() const { return _requestorId; }
 
     size_t indexSize() const {
         assert(!isMerged() &&
