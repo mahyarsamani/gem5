@@ -279,6 +279,13 @@ class IndirectMemoryPrefetcher(QueuedPrefetcher):
     streaming_distance = Param.Unsigned(
         4, "Number of prefetches to generate when using the stream prefetcher"
     )
+    confidence_window = Param.Unsigned(
+        1,
+        "Index values (the current one and earlier ones) an access may "
+        "match to raise a pattern's confidence; 1 is the paper's in-order "
+        "rule, larger values let an out-of-order core read later indices "
+        "before it loads the target of an earlier one",
+    )
 
 
 class SignaturePathPrefetcher(QueuedPrefetcher):

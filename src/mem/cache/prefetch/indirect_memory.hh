@@ -39,6 +39,7 @@
 #ifndef __MEM_CACHE_PREFETCH_INDIRECT_MEMORY_HH__
 #define __MEM_CACHE_PREFETCH_INDIRECT_MEMORY_HH__
 
+#include <deque>
 #include <vector>
 
 #include "base/cache/associative_cache.hh"
@@ -67,6 +68,19 @@ class IndirectMemory : public Queued
     const int streamCounterThreshold;
     /** Number of prefetches generated when using the streaming prefetcher */
     const int streamingDistance;
+    /**
+     * Index values an access may match for confidence: the current one
+     * (1, the paper's in-order rule) or also the previous ones, since an
+     * out-of-order core reads B[i+1], B[i+2], ... before it loads A[B[i]].
+     */
+    const unsigned int confidenceWindow;
+
+    /** An earlier index value of a PT entry, and whether it was matched */
+    struct IndexSlot
+    {
+        int64_t value;
+        bool matched;
+    };
 
     /** Prefetch Table Entry */
     struct PrefetchTableEntry : public TaggedEntry
@@ -100,6 +114,13 @@ class IndirectMemory : public Queued
          */
         bool increasedIndirectCounter;
         /**
+         * The index values before the current one, newest first, at most
+         * confidence_window - 1 of them; one that leaves the window
+         * unmatched decrements the confidence (as the current one does when
+         * the window is 1).
+         */
+        std::deque<IndexSlot> olderIndices;
+        /**
          * Virtual address of the last index element whose target has been
          * queued (the frontier rule): the next trigger continues after it.
          */
@@ -130,6 +151,7 @@ class IndirectMemory : public Queued
             shift = 0;
             indirectCounter.reset();
             increasedIndirectCounter = false;
+            olderIndices.clear();
             frontier = 0;
             frontierValid = false;
         }

@@ -49,6 +49,7 @@ IndirectMemory::IndirectMemory(const IndirectMemoryPrefetcherParams &p)
     shiftValues(p.shift_values), prefetchThreshold(p.prefetch_threshold),
     streamCounterThreshold(p.stream_counter_threshold),
     streamingDistance(p.streaming_distance),
+    confidenceWindow(std::max(1u, (unsigned)p.confidence_window)),
     prefetchTable((name() + ".PrefetchTable").c_str(),
                   p.pt_table_entries,
                   p.pt_table_assoc,
@@ -193,18 +194,35 @@ IndirectMemory::calculatePrefetch(const PrefetchInfo &pfi,
                         // start tracking misses
                         allocateOrUpdateIPDEntry(pt_entry, index);
                     } else if (read_index) {
-                        // Enabled entry, update the index
+                        // Enabled entry, update the index. The value that
+                        // leaves the confidence window unmatched (the
+                        // current one, with a window of 1) costs a point.
+                        bool unmatched_leaves;
+                        if (confidenceWindow == 1) {
+                            unmatched_leaves =
+                                !pt_entry->increasedIndirectCounter;
+                        } else {
+                            pt_entry->olderIndices.push_front(
+                                {pt_entry->index,
+                                 pt_entry->increasedIndirectCounter});
+                            unmatched_leaves = false;
+                            if (pt_entry->olderIndices.size() >=
+                                confidenceWindow) {
+                                unmatched_leaves =
+                                    !pt_entry->olderIndices.back().matched;
+                                pt_entry->olderIndices.pop_back();
+                            }
+                        }
                         pt_entry->index = index;
-                        if (!pt_entry->increasedIndirectCounter) {
+                        // Set this to false, to see if the new index has
+                        // any match
+                        pt_entry->increasedIndirectCounter = false;
+                        if (unmatched_leaves) {
                             if (pt_entry->indirectCounter ==
                                 prefetchThreshold + 1) {
                                 impStats.patternsDisabled++;
                             }
                             pt_entry->indirectCounter--;
-                        } else {
-                            // Set this to false, to see if the new index
-                            // has any match
-                            pt_entry->increasedIndirectCounter = false;
                         }
 
                         // If the counter is high enough, start prefetching
@@ -446,6 +464,7 @@ IndirectMemory::trackMissIndex2(Addr miss_addr)
                 pt_entry->enabled = true;
                 pt_entry->indirectCounter.reset();
                 pt_entry->frontierValid = false;
+                pt_entry->olderIndices.clear();
                 impStats.patternsEnabled[idx]++;
                 // Release the current IPD Entry
                 ipd.invalidate(entry);
@@ -468,6 +487,17 @@ IndirectMemory::checkAccessMatchOnActiveEntries(Addr addr)
                 pt_entry.indirectCounter++;
                 pt_entry.increasedIndirectCounter = true;
                 impStats.confidenceHits++;
+                continue;
+            }
+            // Earlier index values (confidence_window > 1)
+            for (auto &slot : pt_entry.olderIndices) {
+                if (addr == targetAddr(pt_entry.baseAddr, slot.value,
+                                       pt_entry.shift)) {
+                    pt_entry.indirectCounter++;
+                    slot.matched = true;
+                    impStats.confidenceHits++;
+                    break;
+                }
             }
         }
     }
