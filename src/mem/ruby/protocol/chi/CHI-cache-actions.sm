@@ -41,6 +41,11 @@
 ////////////////////////////////////////////////////////////////////////////
 
 action(AllocateTBE_Request, desc="") {
+  // MYSTUFF: under the target flow no IDR reaches the Indirect Unit as a
+  // request, so WP2's run-ahead drop at this site (hov_ra_iu_drop) has no
+  // subject; a run-ahead delivery that finds no TBE is declined instead
+  // (datInPort, hovDeliver::declined).
+  // FFUTSYM
   if (storTBEs.areNSlotsAvailable(1)) {
     // reserve a slot for this request
     storTBEs.incrementReserved();
@@ -4698,6 +4703,16 @@ action(TriageIDR,
         if (is_spec) {
             countSpecIdr(1);
         }
+    } else if (idr_drop_when_full && is_spec && hovRaPoolShort() &&
+               peekDependentDroppable(address)) {
+        // A run-ahead entry is only a fill: with the tracker short it is
+        // dropped here, where no resource is held, instead of stalling
+        // the index line's transaction in IssueIDR. Its cover bit is
+        // cleared, so the core's own DAG for the element is sent.
+        DPRINTF(IndirectAccess,
+            "Run-ahead IDR from index line %#x to %#x dropped: pool short.\n",
+            address, next_addr);
+        dropRunAheadReq(address);
     } else if (idr_coalesce && (peekDependentHasExpect(address) == false) &&
                (idrVerdict(makeLineAddress(next_addr),
                            peekDependentIsWrite(address)) != 0)) {
@@ -4912,6 +4927,11 @@ action(Extract_Extensions, desc="") {
     } else {
       countDAGCarrier(0, tbe.seqReq);
     }
+    // The stream rows read every real DAG (hovRaDemand): give them their
+    // parameters first.
+    hovRaConfigure(hov_spec_mode, hov_ra_streams, hov_ra_conf,
+                   hov_ra_seq_window, hov_ra_epoch, hov_ra_acc_low,
+                   hov_ra_pair_mask);
     // FFUTSYM
     extractExtensions(tbe.addr, tbe.seqReq, tbe.dataBlk);
 }

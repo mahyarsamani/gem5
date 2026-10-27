@@ -278,6 +278,33 @@ machine(MachineType:Cache, "Cache coherency protocol") :
   // Gather Unit decided not to send.
   bool hov_fetch_unique := "False";
   Cycles hov_expect_timeout := 10000;
+  // Run-ahead dropped when pools are full and gated per (core, pair). A
+  // run-ahead IDR is a fill and never changes what a load observes, so
+  // dropping one costs at most the early fill; real IDRs keep their path.
+  // At the Gather Unit, idr_drop_when_full drops a run-ahead entry at
+  // TriageIDR when fewer than 1 + hov_ra_gu_reserve tracker slots are
+  // free (and clears its cover bit, so the core's own DAG is sent).
+  // hov_ra_iu_drop and hov_ra_iu_reserve are accepted but inert under the
+  // target flow: the Indirect Unit receives no IDRs, and a run-ahead
+  // delivery that finds no TBE is declined (hovDeliver::declined).
+  // hov_ra_streams stream rows (0: no gate) learn per (core, pair)
+  // whether the core walks the index forward (a confidence, raised by a
+  // step of at most hov_ra_seq_window elements) and how many run-ahead
+  // IDRs it uses (per epoch of hov_ra_epoch IDRs); a leader runs ahead
+  // only with confidence at least hov_ra_conf and no back-off, which an
+  // epoch below hov_ra_acc_low percent accuracy starts.
+  // hov_ra_pair_mask declares per pair whether it may run ahead at all
+  // (bit p set: pair p may; -1: every pair), ahead of the learned gate.
+  bool idr_drop_when_full := "False";
+  int hov_ra_gu_reserve := 0;
+  bool hov_ra_iu_drop := "False";
+  int hov_ra_iu_reserve := 0;
+  int hov_ra_streams := 0;
+  int hov_ra_conf := 2;
+  int hov_ra_seq_window := 32;
+  int hov_ra_epoch := 64;
+  int hov_ra_acc_low := 40;
+  int hov_ra_pair_mask := -1;
   // FFUTSYM
 {
 
