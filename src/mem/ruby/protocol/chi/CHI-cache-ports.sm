@@ -122,10 +122,16 @@ in_port(datInPort, CHIDataMsg, datIn, rank=9,
       // MYSTUFF: the target flow. A block the Gather Unit delivered to this
       // Indirect Unit (hov_fwd) goes to the TBE that waits for it (an
       // expect's, or one allocated on arrival for an earlier chunk: the
-      // stock CompData transitions), else into a TBE allocated on arrival
-      // when the line is absent and idle, else it is declined: a TBE of
-      // the core's own request sees that request through. Never recycled:
-      // the Gather Unit's transaction waits for this cache's CompAck.
+      // stock CompData transitions), else, when the line's only occupant
+      // is this cache's own fresh load miss (its request is on its way to
+      // the Gather Unit, too late to merge; docs/plans/
+      // declined-deliveries.md scenario 3), into that miss
+      // (HovDeliverIntoMiss: the load is answered from the delivery and
+      // the miss's own CompData completes the TBE later), else into a TBE
+      // allocated on arrival when the line is absent and idle, else it is
+      // declined: a TBE of the core's own request sees that request
+      // through. Never recycled: the Gather Unit's transaction waits for
+      // this cache's CompAck.
       if (indirect_unit && in_msg.hov_fwd && in_msg.hov_merged) {
         // the delivery also answers this cache's own request, which the
         // Gather Unit merged into it: the stock response path
@@ -139,6 +145,16 @@ in_port(datInPort, CHIDataMsg, datIn, rank=9,
         } else if (is_valid(tbe) && tbe.is_req_tbe && (tbe.hov_recv != 0) &&
                    tbe.expected_req_resp.expectsData(in_msg.type)) {
           trigger(dataToEvent(in_msg.type), in_msg.addr, cache_entry, tbe);
+        } else if (is_valid(tbe) && tbe.is_req_tbe && (tbe.hov_recv == 0) &&
+                   (tbe.reqType == CHIRequestType:Load) &&
+                   (tbe.is_local_pf == false) &&
+                   tbe.expected_req_resp.expectsData(in_msg.type) &&
+                   ((tbe.hov_early_beats > 0) ||
+                    ((tbe.hov_early_done == false) &&
+                     tbe.dataBlkValid.isEmpty()))) {
+          // a later beat of a delivery being taken, or the first beat of
+          // one for a load miss that has received nothing yet
+          trigger(Event:HovDeliverIntoMiss, in_msg.addr, cache_entry, tbe);
         } else if (is_invalid(tbe) && is_invalid(cache_entry) &&
                    storTBEs.areNSlotsAvailable(1)) {
           trigger(Event:HovDeliver, in_msg.addr, cache_entry, tbe);

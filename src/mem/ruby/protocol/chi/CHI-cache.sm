@@ -675,6 +675,7 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     HovMergeReq,      desc="Gather Unit: the Indirect Unit's own request for a block an injected request is still fetching for it; merge";
     HovExpect,        in_trans="yes", desc="Indirect Unit: an expected block (3a); wait for it, unless here or busy";
     HovDeliver,       in_trans="yes", desc="Indirect Unit: a delivered block (5) with no TBE waiting for it; take it on arrival";
+    HovDeliverIntoMiss, desc="Indirect Unit: a delivered block for the line of its own fresh load miss; take it for that miss";
     HovDecline,       desc="Indirect Unit: a delivered block it cannot take; CompAck it as declined and drop it";
     HovDeclineCont,   desc="Indirect Unit: a later chunk of a declined delivery; drop it";
     HovExpectTimeout, desc="Indirect Unit: a TBE waiting for an expected block gives up";
@@ -927,6 +928,12 @@ machine(MachineType:Cache, "Cache coherency protocol") :
     bool hov_declined,             default="false", desc="Gather Unit: the Indirect Unit declined the delivery";
     bool hov_data_sent,            default="false", desc="Gather Unit: the delivery's CompData has been set up";
     bool hov_merged,               default="false", desc="Gather Unit: the Indirect Unit's own request was merged into this one";
+    // Indirect Unit: a delivery that found this TBE's own load miss on its
+    // line is taken into the miss (HovDeliverIntoMiss, 2026-10-27): the
+    // beats still to take, and whether the load was answered from it (the
+    // miss's own CompData then completes the TBE without a second callback).
+    int hov_early_beats,           default="0",     desc="Indirect Unit: beats of a delivery still to take into this miss";
+    bool hov_early_done,           default="false", desc="Indirect Unit: a delivery answered this miss's load";
     bool hov_expect_pending,       default="false", desc="The next index data message carries the expect";
     Addr hov_expect_addr,          default="0",     desc="Data line the expect names";
     bool hov_expect_unique,        default="false", desc="The expected block comes writable";

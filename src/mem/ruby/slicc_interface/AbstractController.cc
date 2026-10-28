@@ -1661,11 +1661,12 @@ ControllerStats::ControllerStats(statistics::Group *parent)
         .subname(5, "timedOut")
         .flags(statistics::nozero);
     hovDeliver
-        .init(4)
+        .init(5)
         .subname(0, "intoExpect")
         .subname(1, "onArrival")
         .subname(2, "declined")
         .subname(3, "intoCoreRequest")
+        .subname(4, "intoMiss")
         .flags(statistics::nozero);
     hovStashOrphaned
         .flags(statistics::nozero);

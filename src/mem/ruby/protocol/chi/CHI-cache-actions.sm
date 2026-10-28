@@ -4098,6 +4098,10 @@ action(Callback_Miss, desc="") {
   } else if (tbe.dataValid && tbe.is_local_pf) {
     assert(use_prefetcher);
     pfProxy.completePrefetch(tbe.addr);
+  } else if (tbe.dataValid && tbe.hov_early_done) {
+    // MYSTUFF: the load was answered from a delivery (Hov_DeliverIntoMiss);
+    // this CompData only fills the line.
+    DPRINTF(IndirectAccess, "Load to addr %#lx was answered from a delivery; no callback.\n", tbe.addr);
   } else if (tbe.dataValid && (tbe.reqType == CHIRequestType:Load)) {
         DPRINTF(RubySlicc, "Read data %s\n", tbe.dataBlk);
         sequencer.readCallback(tbe.addr, tbe.accAddr, tbe.dataBlk, true);
@@ -5157,6 +5161,47 @@ action(Hov_Decline, desc="Indirect Unit: decline a delivered block") {
 
 action(Hov_DeclineCont, desc="Indirect Unit: drop a later chunk of a declined delivery") {
   hovDeclineChunk(address);
+}
+
+// Indirect Unit: a delivered block whose line is occupied only by this
+// cache's own fresh load miss (docs/plans/declined-deliveries.md, scenario
+// 3: uop1 missed a few cycles before the delivery arrived, and its request
+// reaches the Gather Unit too late to merge). The delivery is taken into
+// the miss: its beats are copied into the TBE's block, the load is
+// answered when the block is full, and the delivery is acknowledged as
+// taken on its first beat (the Gather Unit's tracker closes as completed
+// and its directory keeps this cache as a sharer, as for a delivery on
+// arrival). The miss's own request still completes as today: its CompData
+// fills the line and the TBE retires, without a second callback
+// (hov_early_done). Never recycled: the Gather Unit waits for the CompAck.
+action(Hov_DeliverIntoMiss, desc="Indirect Unit: take a delivery for the line of its own fresh load miss") {
+  assert(is_valid(tbe));
+  assert(tbe.is_req_tbe && (tbe.hov_recv == 0));
+  assert(tbe.reqType == CHIRequestType:Load);
+  peek(datInPort, CHIDataMsg) {
+    assert(in_msg.hov_fwd);
+    if (tbe.hov_early_beats == 0) {
+      assert(tbe.hov_early_done == false);
+      enqueue(rspOutPort, CHIResponseMsg, response_latency) {
+        out_msg.addr := address;
+        out_msg.type := CHIResponseType:CompAck;
+        out_msg.responder := machineID;
+        out_msg.Destination.add(in_msg.responder);
+        out_msg.txnId := in_msg.txnId;
+      }
+      tbe.hov_early_beats := blockSize / data_channel_size;
+      countHovDeliver(4);
+      DPRINTF(IndirectAccess, "5: data block %#x delivered into this cache's own load miss.\n", address);
+    }
+    tbe.dataBlk.copyPartial(in_msg.dataBlk, in_msg.bitMask);
+    tbe.dataBlk.mergeLifetime(in_msg.dataBlk);
+    tbe.hov_early_beats := tbe.hov_early_beats - 1;
+    if (tbe.hov_early_beats == 0) {
+      tbe.hov_early_done := true;
+      DPRINTF(IndirectAccess, "Load to addr %#lx answered from the delivery.\n", tbe.addr);
+      sequencer.readCallback(tbe.addr, tbe.accAddr, tbe.dataBlk, true);
+    }
+  }
 }
 
 // Indirect Unit: a TBE waiting for an expected block gives up after
