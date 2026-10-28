@@ -5059,9 +5059,17 @@ action(Hov_MergeReq, desc="Gather Unit: merge the Indirect Unit's own request in
   }
   tbe.hov_merged := true;
   countHovFwd(5);
-  // the merged request's TBE reservation (AllocateTBE_Request: a value
-  // request, so from the value pool when there is one) goes back
-  if (valueBudget()) {
+  // the merged request's TBE reservation (AllocateTBE_Request) goes back
+  // to the pool it came from: the value pool for a value request, the
+  // regular pool otherwise (a plain read of a block that an injected
+  // request is fetching merges too, e.g. an index line that doubles as a
+  // data line in a unit test; releasing it from the value pool underflows
+  // that pool's reservation count).
+  bool merged_val := false;
+  peek(reqRdyPort, CHIRequestMsg) {
+    merged_val := isValueRequestMsg(in_msg);
+  }
+  if (merged_val) {
     storValTBEs.decrementReserved();
   } else {
     storTBEs.decrementReserved();
