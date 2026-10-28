@@ -45,8 +45,38 @@ action(AllocateTBE_Request, desc="") {
   // request, so WP2's run-ahead drop at this site (hov_ra_iu_drop) has no
   // subject; a run-ahead delivery that finds no TBE is declined instead
   // (datInPort, hovDeliver::declined).
+  // A value transaction from the Indirect Unit takes a TBE from the value
+  // pool when there is one (number_of_value_TBEs; docs/todo.md W12), and
+  // waits in that pool's retry queue when there is not.
   // FFUTSYM
-  if (storTBEs.areNSlotsAvailable(1)) {
+  bool val := false;
+  peek(reqInPort, CHIRequestMsg) {
+    val := isValueRequestMsg(in_msg);
+  }
+  if (val) {
+    if (storValTBEs.areNSlotsAvailable(1)) {
+      storValTBEs.incrementReserved();
+      peek(reqInPort, CHIRequestMsg) {
+        enqueue(reqRdyOutPort, CHIRequestMsg, allocation_latency) {
+          assert(in_msg.addr == address);
+          assert(in_msg.is_local_pf == false);
+          out_msg := in_msg;
+        }
+      }
+    } else {
+      peek(reqInPort, CHIRequestMsg) {
+        assert(in_msg.allowRetry);
+        enqueue(retryTriggerOutPort, RetryTriggerMsg, 0) {
+          out_msg.addr := in_msg.addr;
+          out_msg.usesTxnId := false;
+          out_msg.event := Event:SendRetryAck;
+          out_msg.retryDest := in_msg.requestor;
+          out_msg.txnId := in_msg.txnId;
+          valRetryQueue.emplace(in_msg.addr, false, in_msg.requestor);
+        }
+      }
+    }
+  } else if (storTBEs.areNSlotsAvailable(1)) {
     // reserve a slot for this request
     storTBEs.incrementReserved();
 
@@ -4734,10 +4764,24 @@ action(TriageIDR,
         issue := true;
     }
     if (issue) {
-        tbe.actions.pushFrontNB(Event:IssueIDR);
+        if (valueBudget()) {
+            tbe.actions.pushFrontNB(Event:IssueIDRVal);
+        } else {
+            tbe.actions.pushFrontNB(Event:IssueIDR);
+        }
     } else if (hasDependentWork(address)) {
         tbe.actions.pushFrontNB(Event:TriageIDR);
     }
+}
+
+// The TBE pool an injected request's transaction takes from: one gate
+// action per transition, so that each checks its own pool only.
+action(Gate_RegularTBE, desc="Gather Unit: a regular TBE for the injected request") {
+    check_allocate(storTBEs);
+}
+
+action(Gate_ValueTBE, desc="Gather Unit: a value-pool TBE for the injected request") {
+    check_allocate(storValTBEs);
 }
 
 // The target flow (3b): the Gather Unit injects an ordinary ReadShared
@@ -4754,10 +4798,12 @@ action(IssueIDR,
     assert(hasDependentWork(address));
     assert(tbe.dataValid);
 
-    // Resource stall while the tracker is full, or while no TBE is free
-    // for the injected request's own transaction.
+    // Resource stall while the tracker is full; the TBE for the injected
+    // request's own transaction is checked by the gate action of the
+    // transition (Gate_RegularTBE for IssueIDR, Gate_ValueTBE for
+    // IssueIDRVal): SLICC hoists every check_allocate of a transition's
+    // actions and applies them all, whatever condition surrounds them.
     check_allocate(storHovTBEs);
-    check_allocate(storTBEs);
 
     if (isInvalid(tbe.indirect_unit_id)) {
         // The DAG came by a path with no Indirect Unit on it: no target
@@ -4777,7 +4823,11 @@ action(IssueIDR,
         bool unique := (isDepReadReq(depReq) == false) || hov_fetch_unique;
 
         int hov_slot := storHovTBEs.addEntryToNewSlot();
-        storTBEs.incrementReserved();
+        if (valueBudget()) {
+            storValTBEs.incrementReserved();
+        } else {
+            storTBEs.incrementReserved();
+        }
         hovTrackerOpen(hov_slot, data_line, unique, is_spec, has_expect);
         if (is_spec) {
             countSpecIdr(0);
@@ -4985,7 +5035,12 @@ action(Hov_FwdHeld, desc="Gather Unit: drop an injected request for a block the 
     storHovTBEs.removeEntryFromSlot(in_msg.hov_slot);
     hovTrackerClose(in_msg.hov_slot, 2, idr_coalesce);
   }
-  storTBEs.decrementReserved();
+  // the injected request's TBE reservation (IssueIDR) goes back
+  if (valueBudget()) {
+    storValTBEs.decrementReserved();
+  } else {
+    storTBEs.decrementReserved();
+  }
   processRetryQueue();
 }
 
@@ -5004,7 +5059,13 @@ action(Hov_MergeReq, desc="Gather Unit: merge the Indirect Unit's own request in
   }
   tbe.hov_merged := true;
   countHovFwd(5);
-  storTBEs.decrementReserved();
+  // the merged request's TBE reservation (AllocateTBE_Request: a value
+  // request, so from the value pool when there is one) goes back
+  if (valueBudget()) {
+    storValTBEs.decrementReserved();
+  } else {
+    storTBEs.decrementReserved();
+  }
   processRetryQueue();
 }
 
@@ -5166,14 +5227,18 @@ action(Hov_DeclineCont, desc="Indirect Unit: drop a later chunk of a declined de
 // Indirect Unit: a delivered block whose line is occupied only by this
 // cache's own fresh load miss (docs/plans/declined-deliveries.md, scenario
 // 3: uop1 missed a few cycles before the delivery arrived, and its request
-// reaches the Gather Unit too late to merge). The delivery is taken into
-// the miss: its beats are copied into the TBE's block, the load is
-// answered when the block is full, and the delivery is acknowledged as
-// taken on its first beat (the Gather Unit's tracker closes as completed
-// and its directory keeps this cache as a sharer, as for a delivery on
-// arrival). The miss's own request still completes as today: its CompData
-// fills the line and the TBE retires, without a second callback
-// (hov_early_done). Never recycled: the Gather Unit waits for the CompAck.
+// reaches the Gather Unit too late to merge). The delivery's bytes answer
+// the load: its beats are copied into the TBE's block and the load is
+// called back when the block is full. The delivery itself is acknowledged
+// as declined on its first beat, as before, so that the Gather Unit's
+// directory stays as it was: this cache's copy of the line is established
+// by its own request alone, whose CompData fills the line and retires the
+// TBE without a second callback (hov_early_done). (Acknowledging it as
+// taken made the Gather Unit record this cache as the block's owner with
+// the delivery's permission while the line here ended in the state the
+// own request returned; the next Evict then tripped the directory's
+// check in Send_CompI.) Never recycled: the Gather Unit waits for the
+// CompAck.
 action(Hov_DeliverIntoMiss, desc="Indirect Unit: take a delivery for the line of its own fresh load miss") {
   assert(is_valid(tbe));
   assert(tbe.is_req_tbe && (tbe.hov_recv == 0));
@@ -5188,6 +5253,7 @@ action(Hov_DeliverIntoMiss, desc="Indirect Unit: take a delivery for the line of
         out_msg.responder := machineID;
         out_msg.Destination.add(in_msg.responder);
         out_msg.txnId := in_msg.txnId;
+        out_msg.hov_declined := true;
       }
       tbe.hov_early_beats := blockSize / data_channel_size;
       countHovDeliver(4);

@@ -145,7 +145,8 @@ in_port(datInPort, CHIDataMsg, datIn, rank=9,
         } else if (is_valid(tbe) && tbe.is_req_tbe && (tbe.hov_recv != 0) &&
                    tbe.expected_req_resp.expectsData(in_msg.type)) {
           trigger(dataToEvent(in_msg.type), in_msg.addr, cache_entry, tbe);
-        } else if (is_valid(tbe) && tbe.is_req_tbe && (tbe.hov_recv == 0) &&
+        } else if (hov_deliver_into_miss &&
+                   is_valid(tbe) && tbe.is_req_tbe && (tbe.hov_recv == 0) &&
                    (tbe.reqType == CHIRequestType:Load) &&
                    (tbe.is_local_pf == false) &&
                    tbe.expected_req_resp.expectsData(in_msg.type) &&

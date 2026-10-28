@@ -1661,6 +1661,15 @@ transition({BUSY_BLKD, BUSY_INTR}, TriageIDR) {
 
 transition({BUSY_BLKD, BUSY_INTR}, IssueIDR) {
   Pop_TriggerQueue;
+  Gate_RegularTBE;
+  IssueIDR;
+  ProcessNextState_ClearPending;
+}
+
+// The same with the TBE from the value pool (number_of_value_TBEs)
+transition({BUSY_BLKD, BUSY_INTR}, IssueIDRVal) {
+  Pop_TriggerQueue;
+  Gate_ValueTBE;
   IssueIDR;
   ProcessNextState_ClearPending;
 }

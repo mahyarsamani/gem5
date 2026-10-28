@@ -474,15 +474,41 @@ void initializeTBE(TBE tbe, Addr addr, int storSlot) {
   tbe.is_stale := false;
 }
 
+// MYSTUFF: the Gather Unit's value-transaction pool (number_of_value_TBEs,
+// docs/todo.md W12): a request is a value transaction when it is marked
+// ReadValue or WriteValue, which the Indirect Unit's own value misses and
+// the requests this cache injects on its behalf are.
+bool valueBudget() {
+  return gather_unit && (number_of_value_TBEs > 0);
+}
+
+bool isValueRequestMsg(CHIRequestMsg msg) {
+  return valueBudget() &&
+         ((msg.secondType == CHIRequestType:ReadValue) ||
+          (msg.secondType == CHIRequestType:WriteValue));
+}
+// FFUTSYM
+
 TBE allocateRequestTBE(Addr addr, CHIRequestMsg in_msg), return_by_pointer="yes" {
   // We must have reserved resources for this allocation
-  storTBEs.decrementReserved();
-  assert(storTBEs.areNSlotsAvailable(1));
+  bool val := isValueRequestMsg(in_msg);
+  if (val) {
+    storValTBEs.decrementReserved();
+    assert(storValTBEs.areNSlotsAvailable(1));
+  } else {
+    storTBEs.decrementReserved();
+    assert(storTBEs.areNSlotsAvailable(1));
+  }
 
   TBEs.allocate(addr);
   TBE tbe := TBEs[addr];
 
-  initializeTBE(tbe, addr, storTBEs.addEntryToNewSlot());
+  if (val) {
+    initializeTBE(tbe, addr, storValTBEs.addEntryToNewSlot());
+    tbe.is_val_tbe := true;
+  } else {
+    initializeTBE(tbe, addr, storTBEs.addEntryToNewSlot());
+  }
   if (fromSequencer(in_msg.type)) {
     assert(in_msg.txnId == max_outstanding_transactions);
     tbe.txnId := static_cast(Addr, "value", tbe.storSlot);
@@ -874,7 +900,9 @@ void enqueueDoRetry(TBE tbe) {
 void processRetryQueue() {
   // send credit if requestor waiting for it and we have resources
   bool has_avail := storTBEs.areNSlotsAvailable(1);
-  assert(unify_repl_TBEs || has_avail);
+  // MYSTUFF: with the value pool a release there leaves the main pool as
+  // it was, so the stock sanity check holds only without it.
+  assert(valueBudget() || unify_repl_TBEs || has_avail);
   // the slot might still be used by a replacement if unify_repl_TBEs is set
   if (retryQueue.empty() == false && has_avail) {
     storTBEs.incrementReserved();
@@ -887,6 +915,20 @@ void processRetryQueue() {
       out_msg.event := Event:SendPCrdGrant;
     }
   }
+  // MYSTUFF: a credit from the value pool for a value request waiting on it
+  if (valueBudget() && (valRetryQueue.empty() == false) &&
+      storValTBEs.areNSlotsAvailable(1)) {
+    storValTBEs.incrementReserved();
+    RetryQueueEntry v := valRetryQueue.next();
+    valRetryQueue.pop();
+    enqueue(retryTriggerOutPort, RetryTriggerMsg, 0) {
+      out_msg.addr := v.addr;
+      out_msg.usesTxnId := v.usesTxnId;
+      out_msg.retryDest := v.retryDest;
+      out_msg.event := Event:SendPCrdGrant;
+    }
+  }
+  // FFUTSYM
 }
 
 void printResources() {
@@ -904,6 +946,10 @@ void printResources() {
                   storSnpTBEs.size(), storSnpTBEs.reserved(), storSnpTBEs.capacity(),
                   storReplTBEs.size(), storReplTBEs.reserved(), storReplTBEs.capacity(),
                   storDvmTBEs.size(), storDvmTBEs.reserved(), storDvmTBEs.capacity());
+  }
+  if (valueBudget()) {
+    DPRINTF(RubySlicc, "Resources(used/rsvd/max): valTBEs=%d/%d/%d\n",
+                  storValTBEs.size(), storValTBEs.reserved(), storValTBEs.capacity());
   }
   DPRINTF(RubySlicc, "Resources(in/out size): req=%d/%d rsp=%d/%d dat=%d/%d snp=%d/%d trigger=%d\n",
                 reqIn.getSize(curTick()), reqOut.getSize(curTick()),
@@ -1280,7 +1326,11 @@ void deallocateReqTBE(TBE tbe) {
       (tbe.reqType != CHIRequestType:NotifyIndIdx)) {
     storSeqTBEs.decrementReserved();
   }
-  storTBEs.removeEntryFromSlot(tbe.storSlot);
+  if (tbe.is_val_tbe) {
+    storValTBEs.removeEntryFromSlot(tbe.storSlot);
+  } else {
+    storTBEs.removeEntryFromSlot(tbe.storSlot);
+  }
   TBEs.deallocate(tbe.addr);
 }
 
