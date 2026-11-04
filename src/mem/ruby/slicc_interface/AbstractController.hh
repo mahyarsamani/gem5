@@ -100,12 +100,16 @@ class AbstractController : public ClockedObject, public Consumer
     // how many DAGs it absorbed. `coalesced` says coalesceExtensions ran
     // on the current entries; extractExtensions clears it.
     // `spec`: made by speculateLine, not by a core's uop0.
+    // `expect`: the index data named this entry's data block to the
+    // Indirect Unit (hovMarkExpect), so the entry is always injected.
     struct DependentEntry
     {
         std::shared_ptr<DependentAccessGen> dag;
         bool write;
         unsigned absorbed = 0;
         bool spec = false;
+        bool expect = false;
+        Addr expectLine = 0;
     };
     struct DependentEntries
     {
@@ -114,19 +118,40 @@ class AbstractController : public ClockedObject, public Consumer
     };
     std::unordered_map<Addr, DependentEntries> m_cachedEntries;
 
-    // The IDRs this Gather Unit sent, by data line, for coalescing across
-    // index lines (idrVerdict): one in flight per line (a hov TBE, from
-    // IssueIDR to HovAck), parked while a RetryAck holds it here (a later
-    // write may still lift it to WriteValue), and the last idr_recent_lines
-    // sent, kept after HovAck. A dropped IDR costs only the early fill:
+    // The IDRs this Gather Unit injected, by data line, for coalescing
+    // across index lines (idrVerdict): those in flight per line (from
+    // IssueIDR to the end of the injected transaction; more than one only
+    // when the Indirect Unit expects each), and the last idr_recent_lines
+    // sent, kept after they end. A dropped IDR costs only the early fill:
     // uop1 is a real access and fetches the line itself.
     struct IdrInFlight
     {
         Addr hovId;
         bool write;
-        bool parked = false;
+        int count = 1;
     };
     std::unordered_map<Addr, IdrInFlight> m_idrInFlight;
+
+    // The target flow's tracker at the Gather Unit: one entry per injected
+    // request, by tracker slot (the vector form keys a register's lanes).
+    struct HovTrack
+    {
+        Addr dataLine;
+        bool write;
+        bool spec;
+        bool expect;
+        Cycles made;
+        int laneMask = 0;
+        Addr regId = 0;
+    };
+    std::unordered_map<int, HovTrack> m_hovTracker;
+    // Indirect Unit: lines a delivery filled with no expect waiting (the
+    // last 64), so a late expect is counted as arriving after its data;
+    // and declined deliveries with chunks still to come.
+    std::deque<Addr> m_hovDeliveredFifo;
+    std::unordered_map<Addr, int> m_hovDeclining;
+    // The index line's entry an expect names (hovMarkExpect).
+    const DependentEntry &expectEntry(Addr line_addr);
     std::deque<Addr> m_idrRecentFifo;
     std::unordered_map<Addr, bool> m_idrRecent;  // data line -> write
 
@@ -135,6 +160,8 @@ class AbstractController : public ClockedObject, public Consumer
     // bit k of `covered` is element k (`writes`: that IDR is a write).
     // A row is a hint: it lives for hov_spec_window cycles from `made`,
     // and at most hov_spec_lines index lines keep rows (FIFO).
+    // `raBits`: the covered elements whose IDR the run-ahead made (not a
+    // real entry's); a hit clears its bit, so each counts at most once.
     struct HovCover
     {
         RequestorID rid;
@@ -143,6 +170,7 @@ class AbstractController : public ClockedObject, public Consumer
         uint64_t covered = 0;
         uint64_t writes = 0;
         Cycles made;
+        uint64_t raBits = 0;
     };
     std::unordered_map<Addr, std::vector<HovCover>> m_hovCover;
     std::deque<Addr> m_hovCoverFifo;
@@ -155,6 +183,53 @@ class AbstractController : public ClockedObject, public Consumer
     // A fresh row of (rid, pair) on an index line (reusing a stale one).
     HovCover &makeCover(Addr line_addr, RequestorID rid, unsigned pair,
                         int leader_elem, Cycles now);
+
+    // Run-ahead stream rows (hov_ra_streams of them, replaced least
+    // recently used): one per (core, pair), the core's walk of the pair's
+    // index and the use of the run-ahead IDRs it caused. A leader runs
+    // ahead only while its row is confident (conf >= hov_ra_conf) and not
+    // backing off (offFor == 0). The row is the place later look-ahead
+    // state attaches to (a distance, late counts and a template DAG for a
+    // window across lines; follower links for co-iteration).
+    struct HovStream
+    {
+        RequestorID rid = 0;
+        uint8_t pair = 0;
+        Addr demand = 0;        // highest index PA of a real DAG
+        Addr frontier = 0;      // highest index PA run ahead to
+        uint8_t conf = 0;       // forward-walk confidence, 0 to 3
+        uint32_t issued = 0;    // run-ahead IDRs sent, this epoch
+        uint32_t hits = 0;      // of them, covering a real DAG
+        uint32_t offFor = 0;    // demands left in the back-off
+        uint32_t backoff = 256; // the next back-off, in demands
+        Cycles lastUse = Cycles(0);
+    };
+    std::vector<HovStream> m_hovStreams;
+    // The SLICC parameters of the rows (hovRaConfigure).
+    struct HovRaParams
+    {
+        int specMode = 0;
+        int streams = 0;
+        int conf = 2;
+        int seqWindow = 32;
+        int epoch = 64;
+        int accLow = 40;
+        // Declared per pair (hov_ra_pair_mask): bit p set, pair p may run
+        // ahead; -1, every pair.
+        int pairMask = -1;
+    };
+    HovRaParams m_hovRa;
+    // Per-pair statistics have one element per side-car pair entry.
+    static constexpr unsigned hovPairs = 32;
+    // The row of (rid, pair), or null.
+    HovStream *findStream(RequestorID rid, unsigned pair);
+    // A real DAG reached the Gather Unit: update its pair's row (forward
+    // step, late notification, or re-base) and the back-off.
+    void hovRaDemand(const DependentAccessGen &dag);
+    // Whether a leader of (rid, pair) may run ahead.
+    bool hovRaGate(RequestorID rid, unsigned pair);
+    // A run-ahead IDR of (rid, pair) is sent: count it, close the epoch.
+    void hovRaIssue(RequestorID rid, unsigned pair);
 
     // The index element a DAG reads, from the index line's data.
     uint64_t indexValue(const DependentAccessGen &dag,
@@ -215,6 +290,22 @@ class AbstractController : public ClockedObject, public Consumer
     // (coalesced across index lines).
     void countSpecIdr(int what);
 
+    // The stream rows' parameters (the SLICC hov_spec_mode and hov_ra_*),
+    // given before every extraction of DAGs.
+    void hovRaConfigure(int spec_mode, int streams, int conf,
+                        int seq_window, int epoch, int acc_low,
+                        int pair_mask);
+    // Whether the next dependent entry may be dropped as run-ahead: made
+    // by the run-ahead and standing for no real DAG (none coalesced in).
+    bool peekDependentDroppable(Addr line_addr);
+    // Drop that entry (the pool is short): clear its element in its
+    // pair's cover row, so a real DAG for it is sent, and count it.
+    void dropRunAheadReq(Addr line_addr);
+    // At the Indirect Unit: a run-ahead IDR dropped with HovAck for want
+    // of a TBE, or refused with RetryAck.
+    void countSpecIdrDroppedAtIU() { stats.hovSpecIdrsDroppedAtIU++; }
+    void countSpecIdrRetriedAtIU() { stats.hovSpecIdrsRetriedAtIU++; }
+
     // Coalesce the pending DAGs of an index line whose dependent accesses
     // fall in the same data line into one IDR each: the first in program
     // order is kept, a write among them makes it a WriteValue, and the
@@ -239,22 +330,43 @@ class AbstractController : public ClockedObject, public Consumer
     void clearExtensions(Addr line_addr);
 
     // Coalescing across index lines (see m_idrInFlight). idrVerdict says
-    // what to do with an IDR to `data_line`: IDR_SEND, IDR_DROP (one is
+    // what to do with an IDR to `data_line`: IDR_SEND, or IDR_DROP (one is
     // in flight, or was sent recently; a write dropped over a read is
-    // counted as lost intent), or IDR_UPGRADE (a read is parked in retry:
-    // the caller lifts hov TBE parkedIdrHovId to WriteValue and drops
-    // this one). note* keep the tables from IssueIDR, HovAck, RetryAck and
-    // the retry's resend.
+    // counted as lost intent). note* keep the tables from IssueIDR and the
+    // end of the injected transaction (hovTrackerClose).
     static constexpr int IDR_SEND = 0;
     static constexpr int IDR_DROP = 1;
-    static constexpr int IDR_UPGRADE = 2;
     int idrVerdict(Addr data_line, bool write);
-    Addr parkedIdrHovId(Addr data_line);
     void noteIdrSent(Addr data_line, Addr hov_id, bool write,
                      int recent_lines);
     void noteIdrAcked(Addr data_line);
-    void noteIdrParked(Addr data_line);
-    void noteIdrResent(Addr data_line);
+
+    // The target flow (docs/agents/2026-10-25-wp0/PLAN.md).
+    // Gather Unit, 3a: mark the index line's first real entry as named by
+    // an expect when it will be injected (mapped, and not coalesced away
+    // when `coalesce`); then its data line, intent and access name.
+    bool hovMarkExpect(Addr line_addr, DataBlock &index_data, bool coalesce);
+    Addr hovExpectAddr(Addr line_addr);
+    bool hovExpectWrite(Addr line_addr);
+    std::string hovExpectName(Addr line_addr);
+    // Whether the next dependent entry is named by an expect.
+    bool peekDependentHasExpect(Addr line_addr);
+    // Gather Unit, 3b: the tracker. Close outcomes: 0 completed,
+    // 1 declined, 2 skipped (the Indirect Unit held the block).
+    void hovTrackerOpen(int slot, Addr data_line, bool write, bool spec,
+                        bool expect);
+    void hovTrackerClose(int slot, int outcome, bool coalesce);
+    // Outcome counters (see ControllerStats::hovFwd, hovExpect, hovDeliver).
+    void countHovFwd(int what) { stats.hovFwd[what]++; }
+    void countHovExpect(int what) { stats.hovExpect[what]++; }
+    void countHovDeliver(int what) { stats.hovDeliver[what]++; }
+    // Indirect Unit: deliveries filled with no expect waiting, and the
+    // chunks of a declined delivery still to come.
+    void hovNoteDeliveredNoExpect(Addr line_addr);
+    bool hovTakeDeliveredNoExpect(Addr line_addr);
+    void hovDeclineBegin(Addr line_addr, int more_chunks);
+    bool hovDeclining(Addr line_addr);
+    void hovDeclineChunk(Addr line_addr);
 
     // Whether a line address maps to some downstream machine (an IDR to an
     // unmapped address is dropped instead of becoming a fatal mapping).
@@ -743,15 +855,29 @@ class AbstractController : public ClockedObject, public Consumer
         //! IDR coalescing at the Gather Unit (idr_coalesce): DAGs of one
         //! index line absorbed into another's IDR to the same data line,
         //! the sizes of those groups, IDRs dropped because one to their
-        //! data line was in flight or sent recently, writes dropped over a
-        //! read IDR (uop1's store upgrades the line), and read IDRs parked
-        //! in retry lifted to WriteValue
+        //! data line was in flight or sent recently, and writes dropped
+        //! over a read IDR (uop1's store upgrades the line)
         statistics::Scalar idrCoalescedSameLine;
         statistics::Histogram idrCoalesceGroupSize;
         statistics::Scalar idrDroppedInFlight;
         statistics::Scalar idrDroppedRecent;
         statistics::Scalar idrIntentLost;
-        statistics::Scalar idrUpgradedInRetry;
+
+        //! The target flow (docs/agents/2026-10-25-wp0/PLAN.md). Gather
+        //! Unit: requests injected on the Indirect Unit's behalf by
+        //! outcome (issued, skippedHeld, completed, declined,
+        //! droppedNoTarget; mergedCoreRequest: the Indirect Unit's own
+        //! request merged into one, also counted in completed), cycles
+        //! from injection to the CompAck, and index data that named a
+        //! block to expect. Indirect Unit: expects by outcome (allocated,
+        //! present, droppedNoTBE, afterData, busy, timedOut) and
+        //! deliveries by outcome (intoExpect, onArrival, declined,
+        //! intoCoreRequest: taken by the core's own merged request).
+        statistics::Vector hovFwd;
+        statistics::Histogram hovFwdLatency;
+        statistics::Scalar hovExpectSent;
+        statistics::Vector hovExpect;
+        statistics::Vector hovDeliver;
 
         //! Post-evict stashes whose line left without a replacement (an
         //! invalidating snoop or a back-invalidate) and became notifications
@@ -777,6 +903,27 @@ class AbstractController : public ClockedObject, public Consumer
         statistics::Scalar hovCoverReplaced;
         statistics::Scalar hovSpecWritesDemoted;
         statistics::Scalar hovSpecCoalesced;
+
+        //! Run-ahead dropped when pools are full: at the Indirect Unit,
+        //! run-ahead IDRs dropped with HovAck and refused with RetryAck
+        //! (hovSpecIdrsDropped::full counts the Gather Unit's drops)
+        statistics::Scalar hovSpecIdrsDroppedAtIU;
+        statistics::Scalar hovSpecIdrsRetriedAtIU;
+        //! Run-ahead stream rows: allocated, replaced, re-based; per side-
+        //! car pair entry: real DAGs seen, run-ahead IDRs sent, real DAGs
+        //! they covered, leaders the gate refused, epochs that backed the
+        //! pair off; per epoch the accuracy (percent), per run-ahead entry
+        //! made ahead of its leader the lead (elements)
+        statistics::Scalar hovRaRowsAllocated;
+        statistics::Scalar hovRaRowsReplaced;
+        statistics::Scalar hovRaRebases;
+        statistics::Vector hovRaDemands;
+        statistics::Vector hovRaIssued;
+        statistics::Vector hovRaHits;
+        statistics::Vector hovRaGated;
+        statistics::Vector hovRaThrottled;
+        statistics::Histogram hovRaAccuracy;
+        statistics::Histogram hovRaDistance;
     } stats;
 
 };

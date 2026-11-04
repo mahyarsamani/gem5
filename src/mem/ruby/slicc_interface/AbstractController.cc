@@ -93,6 +93,8 @@ AbstractController::init()
 {
     stats.delayHistogram.init(10);
     stats.idrCoalesceGroupSize.init(8);
+    stats.hovRaAccuracy.init(10);
+    stats.hovRaDistance.init(16);
     uint32_t size = Network::getNumberOfVirtualNetworks();
     for (uint32_t i = 0; i < size; i++) {
         stats.delayVCHistogram.push_back(new statistics::Histogram(this));
@@ -132,6 +134,14 @@ AbstractController::init()
     for (auto abs_cntrl : params().upstream_destinations) {
         upstreamDestinations.add(abs_cntrl->getMachineID());
     }
+
+    // MYSTUFF: the target flow asks the Gather Unit's own downstream path
+    // for a data block; naming other Value Units is the shared Gather
+    // Unit's extension (post-QE plan, WP13), not implemented yet.
+    fatal_if(!params().value_unit_destinations.empty(),
+             "%s: value_unit_destinations is not implemented yet (the "
+             "shared Gather Unit, WP13); leave it empty.", name());
+    // FFUTSYM
 }
 
 void
@@ -607,6 +617,10 @@ AbstractController::getDependentReq(Addr line_addr, DataBlock &index_data)
             "line_addr %#x.", line_addr);
 
     const auto& desc = dag->descriptor(0);
+    // IssueIDR sends this entry now: a run-ahead IDR counts for its pair.
+    if (entry.spec) {
+        hovRaIssue(dag->requestorId(), desc.pair);
+    }
     // The IDR's intent: a write, or the DAG's own when nothing coalesced.
     bool read = !entry.write;
     int offset;
@@ -665,6 +679,9 @@ AbstractController::extractExtensions(Addr line_addr, RequestPtr req,
 
         bool write = shared->descriptor(0).intent ==
                      DependentAccessGen::AccessIntent::Write;
+
+        // The core's position on the pair's index, covered or not.
+        hovRaDemand(*shared);
 
         // A speculated IDR already stands for this element: drop the DAG,
         // but the Gather Unit read its index element for it.
@@ -791,6 +808,178 @@ AbstractController::countSpecIdr(int what)
     }
 }
 
+void
+AbstractController::hovRaConfigure(int spec_mode, int streams, int conf,
+                                   int seq_window, int epoch, int acc_low,
+                                   int pair_mask)
+{
+    m_hovRa = HovRaParams{spec_mode, streams, conf, seq_window, epoch,
+                          acc_low, pair_mask};
+}
+
+bool
+AbstractController::peekDependentDroppable(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
+             "peekDependentDroppable: no cached entries for line_addr %#x.",
+             line_addr);
+    const auto &front = it->second.entries.front();
+    return front.spec && front.absorbed == 0;
+}
+
+void
+AbstractController::dropRunAheadReq(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
+             "dropRunAheadReq: no cached entries for line_addr %#x.",
+             line_addr);
+    auto &entries = it->second.entries;
+    const auto &front = entries.front();
+    panic_if(!front.spec || front.absorbed != 0,
+             "dropRunAheadReq: the next entry of line_addr %#x is not a "
+             "run-ahead one.", line_addr);
+    const auto &d = front.dag->descriptor(0);
+    RequestorID rid = front.dag->requestorId();
+    int elem = getOffset(d.indexAddr) / front.dag->indexSize();
+    // Uncover the element, so a real DAG for it is sent rather than
+    // dropped as covered by an IDR that never left.
+    auto cover = m_hovCover.find(line_addr);
+    if (cover != m_hovCover.end() && elem < 64) {
+        uint64_t bit = uint64_t(1) << elem;
+        for (auto &row : cover->second) {
+            if (row.rid == rid && row.pair == d.pair) {
+                row.covered &= ~bit;
+                row.writes &= ~bit;
+                row.raBits &= ~bit;
+            }
+        }
+    }
+    stats.hovSpecIdrsDropped[2]++;
+    entries.erase(entries.begin());
+}
+
+AbstractController::HovStream *
+AbstractController::findStream(RequestorID rid, unsigned pair)
+{
+    for (auto &row : m_hovStreams) {
+        if (row.rid == rid && row.pair == pair) {
+            return &row;
+        }
+    }
+    return nullptr;
+}
+
+void
+AbstractController::hovRaDemand(const DependentAccessGen &dag)
+{
+    if (m_hovRa.specMode <= 0) {
+        return;
+    }
+    const auto &d = dag.descriptor(0);
+    if (d.pair < hovPairs) {
+        stats.hovRaDemands[d.pair]++;
+    }
+    if (m_hovRa.streams <= 0) {
+        return;
+    }
+    RequestorID rid = dag.requestorId();
+    Addr q = d.indexAddr;
+    Cycles now = curCycle();
+    HovStream *row = findStream(rid, d.pair);
+    if (!row) {
+        // A new walk: the least recently used row gives way when full.
+        if ((int)m_hovStreams.size() < m_hovRa.streams) {
+            m_hovStreams.emplace_back();
+            row = &m_hovStreams.back();
+        } else {
+            row = &*std::min_element(m_hovStreams.begin(),
+                                     m_hovStreams.end(),
+                                     [](const HovStream &a,
+                                        const HovStream &b) {
+                                         return a.lastUse < b.lastUse;
+                                     });
+            stats.hovRaRowsReplaced++;
+        }
+        *row = HovStream();
+        row->rid = rid;
+        row->pair = d.pair;
+        row->demand = q;
+        row->frontier = q;
+        row->lastUse = now;
+        stats.hovRaRowsAllocated++;
+        return;
+    }
+    row->lastUse = now;
+    Addr span = (Addr)m_hovRa.seqWindow * dag.indexSize();
+    if (q > row->demand && q - row->demand <= span) {
+        // A forward step: the core walks the index.
+        if (row->conf < 3) {
+            row->conf++;
+        }
+        row->demand = q;
+    } else if (q <= row->demand && row->demand - q <= span) {
+        // A DAG of an element just behind: a merged uop0's notification
+        // arrives after the next line's index request. Nothing changes.
+    } else {
+        row->conf = 0;
+        row->demand = q;
+        row->frontier = q;
+        stats.hovRaRebases++;
+    }
+    if (row->offFor > 0) {
+        row->offFor--;
+    }
+}
+
+bool
+AbstractController::hovRaGate(RequestorID rid, unsigned pair)
+{
+    // The declared flag first (hov_ra_pair_mask): a pair whose bit is
+    // clear never runs ahead, whatever its row says.
+    if (pair < 32 && ((m_hovRa.pairMask >> pair) & 1) == 0) {
+        return false;
+    }
+    if (m_hovRa.streams <= 0) {
+        return true;
+    }
+    HovStream *row = findStream(rid, pair);
+    return row && row->conf >= m_hovRa.conf && row->offFor == 0;
+}
+
+void
+AbstractController::hovRaIssue(RequestorID rid, unsigned pair)
+{
+    if (pair < hovPairs) {
+        stats.hovRaIssued[pair]++;
+    }
+    HovStream *row = findStream(rid, pair);
+    if (!row) {
+        return;
+    }
+    row->issued++;
+    if (m_hovRa.epoch <= 0 || row->issued < (uint32_t)m_hovRa.epoch) {
+        return;
+    }
+    // The epoch ends: below hov_ra_acc_low the row backs off for
+    // `backoff` demands and the next back-off doubles (at most 4096);
+    // otherwise the back-off returns to 256.
+    uint32_t accuracy = row->hits * 100 / row->issued;
+    stats.hovRaAccuracy.sample(accuracy);
+    if (m_hovRa.accLow > 0 && accuracy < (uint32_t)m_hovRa.accLow) {
+        row->offFor = row->backoff;
+        row->backoff = std::min<uint32_t>(2 * row->backoff, 4096);
+        if (pair < hovPairs) {
+            stats.hovRaThrottled[pair]++;
+        }
+    } else {
+        row->backoff = 256;
+    }
+    row->issued = 0;
+    row->hits = 0;
+}
+
 AbstractController::HovCover *
 AbstractController::findCover(Addr line_addr, RequestorID rid,
                               unsigned pair, Cycles now)
@@ -851,7 +1040,19 @@ AbstractController::hovCovers(Addr line_addr, RequestorID rid,
         return false;
     }
     uint64_t bit = uint64_t(1) << elem;
-    return (row->covered & bit) && (!write || (row->writes & bit));
+    bool covers = (row->covered & bit) && (!write || (row->writes & bit));
+    // A real DAG covered by a run-ahead IDR: a hit for the pair, counted
+    // once per run-ahead IDR.
+    if (covers && (row->raBits & bit)) {
+        row->raBits &= ~bit;
+        if (pair < hovPairs) {
+            stats.hovRaHits[pair]++;
+        }
+        if (HovStream *stream = findStream(rid, pair)) {
+            stream->hits++;
+        }
+    }
+    return covers;
 }
 
 void
@@ -882,6 +1083,16 @@ AbstractController::speculateLine(Addr line_addr, DataBlock &index_data,
         unsigned pair = ld.pair;
         if (findCover(line_addr, rid, pair, now)) {
             continue;  // this pair is already speculated on this line
+        }
+        // The stream row's gate (hov_ra_streams): a pair that does not
+        // walk its index forward, or whose run-ahead went unused, makes
+        // neither entries nor a cover row; its next real DAG on the line
+        // is a leader again.
+        if (!hovRaGate(rid, pair)) {
+            if (pair < hovPairs) {
+                stats.hovRaGated[pair]++;
+            }
+            continue;
         }
         int index_size = leader.indexSize();
         int elems = std::min(block_size / index_size, 64);
@@ -927,10 +1138,18 @@ AbstractController::speculateLine(Addr line_addr, DataBlock &index_data,
             }
             made.push_back({std::move(spec), write, 0, true});
             row.covered |= bit;
+            row.raBits |= bit;
             if (write) {
                 row.writes |= bit;
             }
             stats.hovSpecEntries++;
+            if (k > k_leader) {
+                stats.hovRaDistance.sample(k - k_leader);
+            }
+            if (HovStream *stream = findStream(rid, pair)) {
+                stream->frontier = std::max(stream->frontier,
+                                            line_addr + k * index_size);
+            }
         }
         if (mode == 1) {
             stats.hovSpecLinesForward++;
@@ -979,11 +1198,6 @@ AbstractController::idrVerdict(Addr data_line, bool write)
     auto in_flight = m_idrInFlight.find(data_line);
     if (in_flight != m_idrInFlight.end()) {
         if (write && !in_flight->second.write) {
-            if (in_flight->second.parked) {
-                in_flight->second.write = true;
-                stats.idrUpgradedInRetry++;
-                return IDR_UPGRADE;
-            }
             stats.idrIntentLost++;
         }
         stats.idrDroppedInFlight++;
@@ -1000,23 +1214,19 @@ AbstractController::idrVerdict(Addr data_line, bool write)
     return IDR_SEND;
 }
 
-Addr
-AbstractController::parkedIdrHovId(Addr data_line)
-{
-    auto it = m_idrInFlight.find(data_line);
-    panic_if(it == m_idrInFlight.end() || !it->second.parked,
-             "parkedIdrHovId: no parked IDR to data line %#x.", data_line);
-    return it->second.hovId;
-}
-
 void
 AbstractController::noteIdrSent(Addr data_line, Addr hov_id, bool write,
                                 int recent_lines)
 {
-    auto inserted = m_idrInFlight.emplace(data_line,
-                                          IdrInFlight{hov_id, write});
-    panic_if(!inserted.second, "noteIdrSent: an IDR to data line %#x is "
-             "already in flight.", data_line);
+    // More than one in flight to a line only when the Indirect Unit
+    // expects each (an expect-named entry is never coalesced away).
+    auto in_flight = m_idrInFlight.find(data_line);
+    if (in_flight != m_idrInFlight.end()) {
+        in_flight->second.count++;
+        in_flight->second.write |= write;
+    } else {
+        m_idrInFlight.emplace(data_line, IdrInFlight{hov_id, write});
+    }
     if (recent_lines <= 0) {
         return;
     }
@@ -1034,26 +1244,177 @@ AbstractController::noteIdrSent(Addr data_line, Addr hov_id, bool write,
 void
 AbstractController::noteIdrAcked(Addr data_line)
 {
-    panic_if(m_idrInFlight.erase(data_line) == 0,
-             "noteIdrAcked: no IDR in flight to data line %#x.", data_line);
-}
-
-void
-AbstractController::noteIdrParked(Addr data_line)
-{
     auto it = m_idrInFlight.find(data_line);
     panic_if(it == m_idrInFlight.end(),
-             "noteIdrParked: no IDR in flight to data line %#x.", data_line);
-    it->second.parked = true;
+             "noteIdrAcked: no IDR in flight to data line %#x.", data_line);
+    if (--it->second.count == 0) {
+        m_idrInFlight.erase(it);
+    }
+}
+
+bool
+AbstractController::hovMarkExpect(Addr line_addr, DataBlock &index_data,
+                                  bool coalesce)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    if (it == m_cachedEntries.end()) {
+        return false;
+    }
+    for (auto &entry : it->second.entries) {
+        if (entry.spec) {
+            continue;
+        }
+        // The uop0's own entry: its data line, read without marking the
+        // index element (TriageIDR reads it when it handles the entry).
+        int offset;
+        size_t index_size;
+        uint64_t index_value =
+            indexValue(*entry.dag, index_data, offset, index_size);
+        Addr data_line = makeLineAddress(entry.dag->genAddress(index_value));
+        if (!isMappedDownstream(data_line)) {
+            return false;
+        }
+        if (coalesce && (m_idrInFlight.count(data_line) ||
+                         m_idrRecent.count(data_line))) {
+            return false;
+        }
+        entry.expect = true;
+        entry.expectLine = data_line;
+        stats.hovExpectSent++;
+        return true;
+    }
+    return false;
+}
+
+const AbstractController::DependentEntry &
+AbstractController::expectEntry(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end(),
+             "expectEntry: no entries for index line %#x.", line_addr);
+    for (const auto &entry : it->second.entries) {
+        if (entry.expect) {
+            return entry;
+        }
+    }
+    panic("expectEntry: no expect on index line %#x.", line_addr);
+}
+
+Addr
+AbstractController::hovExpectAddr(Addr line_addr)
+{
+    return expectEntry(line_addr).expectLine;
+}
+
+bool
+AbstractController::hovExpectWrite(Addr line_addr)
+{
+    return expectEntry(line_addr).write;
+}
+
+std::string
+AbstractController::hovExpectName(Addr line_addr)
+{
+    // As getDependentReq names the IDR: the array's name, else hov<p>_data
+    const auto &desc = expectEntry(line_addr).dag->descriptor(0);
+    return desc.dataName.empty() ? csprintf("hov%u_data", desc.pair)
+                                 : desc.dataName;
+}
+
+bool
+AbstractController::peekDependentHasExpect(Addr line_addr)
+{
+    auto it = m_cachedEntries.find(line_addr);
+    panic_if(it == m_cachedEntries.end() || it->second.entries.empty(),
+             "peekDependentHasExpect: no cached entries for line_addr %#x.",
+             line_addr);
+    return it->second.entries.front().expect;
 }
 
 void
-AbstractController::noteIdrResent(Addr data_line)
+AbstractController::hovTrackerOpen(int slot, Addr data_line, bool write,
+                                   bool spec, bool expect)
 {
-    auto it = m_idrInFlight.find(data_line);
-    panic_if(it == m_idrInFlight.end() || !it->second.parked,
-             "noteIdrResent: no parked IDR to data line %#x.", data_line);
-    it->second.parked = false;
+    auto inserted = m_hovTracker.emplace(
+        slot, HovTrack{data_line, write, spec, expect, curCycle()});
+    panic_if(!inserted.second, "hovTrackerOpen: tracker slot %d is in use.",
+             slot);
+    stats.hovFwd[0]++;
+}
+
+void
+AbstractController::hovTrackerClose(int slot, int outcome, bool coalesce)
+{
+    auto it = m_hovTracker.find(slot);
+    panic_if(it == m_hovTracker.end(),
+             "hovTrackerClose: tracker slot %d is free.", slot);
+    switch (outcome) {
+      case 0:
+        stats.hovFwd[2]++;
+        stats.hovFwdLatency.sample(curCycle() - it->second.made);
+        break;
+      case 1:
+        stats.hovFwd[3]++;
+        stats.hovFwdLatency.sample(curCycle() - it->second.made);
+        break;
+      case 2:
+        stats.hovFwd[1]++;
+        break;
+      default:
+        panic("hovTrackerClose: unknown outcome %d.", outcome);
+    }
+    if (coalesce) {
+        noteIdrAcked(it->second.dataLine);
+    }
+    m_hovTracker.erase(it);
+}
+
+void
+AbstractController::hovNoteDeliveredNoExpect(Addr line_addr)
+{
+    m_hovDeliveredFifo.push_back(line_addr);
+    while (m_hovDeliveredFifo.size() > 64) {
+        m_hovDeliveredFifo.pop_front();
+    }
+}
+
+bool
+AbstractController::hovTakeDeliveredNoExpect(Addr line_addr)
+{
+    auto it = std::find(m_hovDeliveredFifo.begin(), m_hovDeliveredFifo.end(),
+                        line_addr);
+    if (it == m_hovDeliveredFifo.end()) {
+        return false;
+    }
+    m_hovDeliveredFifo.erase(it);
+    return true;
+}
+
+void
+AbstractController::hovDeclineBegin(Addr line_addr, int more_chunks)
+{
+    panic_if(m_hovDeclining.count(line_addr),
+             "hovDeclineBegin: %#x is already being declined.", line_addr);
+    if (more_chunks > 0) {
+        m_hovDeclining[line_addr] = more_chunks;
+    }
+}
+
+bool
+AbstractController::hovDeclining(Addr line_addr)
+{
+    return m_hovDeclining.count(line_addr) != 0;
+}
+
+void
+AbstractController::hovDeclineChunk(Addr line_addr)
+{
+    auto it = m_hovDeclining.find(line_addr);
+    panic_if(it == m_hovDeclining.end(),
+             "hovDeclineChunk: %#x is not being declined.", line_addr);
+    if (--it->second == 0) {
+        m_hovDeclining.erase(it);
+    }
 }
 
 void
@@ -1196,9 +1557,18 @@ ControllerStats::ControllerStats(statistics::Group *parent)
       ADD_STAT(idrIntentLost,
                "write IDRs dropped over a read IDR to the same data line "
                "(uop1's store upgrades the line)"),
-      ADD_STAT(idrUpgradedInRetry,
-               "read IDRs parked in retry lifted to WriteValue by a later "
-               "write"),
+      ADD_STAT(hovFwd,
+               "Gather Unit: requests injected on the Indirect Unit's "
+               "behalf, by outcome"),
+      ADD_STAT(hovFwdLatency,
+               "Gather Unit: cycles from injecting a request to the "
+               "Indirect Unit's CompAck"),
+      ADD_STAT(hovExpectSent,
+               "Gather Unit: index data that named a data block to expect"),
+      ADD_STAT(hovExpect,
+               "Indirect Unit: expected data blocks, by outcome"),
+      ADD_STAT(hovDeliver,
+               "Indirect Unit: delivered data blocks, by outcome"),
       ADD_STAT(hovStashOrphaned,
                "post-evict stashes turned into notifications because the "
                "line left without a replacement"),
@@ -1223,7 +1593,33 @@ ControllerStats::ControllerStats(statistics::Group *parent)
                "(hov_spec_writes off)"),
       ADD_STAT(hovSpecCoalesced,
                "speculated entries absorbed into another IDR to the same "
-               "data line (one index line)")
+               "data line (one index line)"),
+      ADD_STAT(hovSpecIdrsDroppedAtIU,
+               "run-ahead IDRs the Indirect Unit dropped with HovAck for "
+               "want of a TBE (hov_ra_iu_drop)"),
+      ADD_STAT(hovSpecIdrsRetriedAtIU,
+               "run-ahead IDRs the Indirect Unit refused with RetryAck"),
+      ADD_STAT(hovRaRowsAllocated, "run-ahead stream rows allocated"),
+      ADD_STAT(hovRaRowsReplaced,
+               "run-ahead stream rows replaced (least recently used)"),
+      ADD_STAT(hovRaRebases,
+               "real DAGs off their stream row's forward walk (re-based)"),
+      ADD_STAT(hovRaDemands,
+               "real DAGs seen at the Gather Unit, per pair entry"),
+      ADD_STAT(hovRaIssued, "run-ahead IDRs sent, per pair entry"),
+      ADD_STAT(hovRaHits,
+               "real DAGs a run-ahead IDR covered, per pair entry"),
+      ADD_STAT(hovRaGated,
+               "leaders the stream rows kept from running ahead, per pair "
+               "entry"),
+      ADD_STAT(hovRaThrottled,
+               "accuracy epochs that backed a stream row off, per pair "
+               "entry"),
+      ADD_STAT(hovRaAccuracy,
+               "run-ahead accuracy per stream row epoch (percent)"),
+      ADD_STAT(hovRaDistance,
+               "lead of each run-ahead entry made ahead of its leader "
+               "(index elements)")
 {
     fullyBusyCycles
         .flags(statistics::nozero);
@@ -1241,7 +1637,36 @@ ControllerStats::ControllerStats(statistics::Group *parent)
         .flags(statistics::nozero);
     idrIntentLost
         .flags(statistics::nozero);
-    idrUpgradedInRetry
+    hovFwd
+        .init(6)
+        .subname(0, "issued")
+        .subname(1, "skippedHeld")
+        .subname(2, "completed")
+        .subname(3, "declined")
+        .subname(4, "droppedNoTarget")
+        .subname(5, "mergedCoreRequest")
+        .flags(statistics::nozero);
+    hovFwdLatency
+        .init(16)
+        .flags(statistics::nozero);
+    hovExpectSent
+        .flags(statistics::nozero);
+    hovExpect
+        .init(6)
+        .subname(0, "allocated")
+        .subname(1, "present")
+        .subname(2, "droppedNoTBE")
+        .subname(3, "afterData")
+        .subname(4, "busy")
+        .subname(5, "timedOut")
+        .flags(statistics::nozero);
+    hovDeliver
+        .init(5)
+        .subname(0, "intoExpect")
+        .subname(1, "onArrival")
+        .subname(2, "declined")
+        .subname(3, "intoCoreRequest")
+        .subname(4, "intoMiss")
         .flags(statistics::nozero);
     hovStashOrphaned
         .flags(statistics::nozero);
@@ -1256,14 +1681,26 @@ ControllerStats::ControllerStats(statistics::Group *parent)
     hovSpecLinesLine.flags(statistics::nozero);
     hovSpecIdrsSent.flags(statistics::nozero);
     hovSpecIdrsDropped
-        .init(2)
+        .init(3)
         .subname(0, "unmapped")
         .subname(1, "coalesced")
+        .subname(2, "full")
         .flags(statistics::nozero);
     hovDagsCoveredAtGU.flags(statistics::nozero);
     hovCoverReplaced.flags(statistics::nozero);
     hovSpecWritesDemoted.flags(statistics::nozero);
     hovSpecCoalesced.flags(statistics::nozero);
+    hovSpecIdrsDroppedAtIU.flags(statistics::nozero);
+    hovSpecIdrsRetriedAtIU.flags(statistics::nozero);
+    hovRaRowsAllocated.flags(statistics::nozero);
+    hovRaRowsReplaced.flags(statistics::nozero);
+    hovRaRebases.flags(statistics::nozero);
+    for (auto *per_pair : {&hovRaDemands, &hovRaIssued, &hovRaHits,
+                           &hovRaGated, &hovRaThrottled}) {
+        per_pair->init(hovPairs).flags(statistics::nozero);
+    }
+    hovRaAccuracy.flags(statistics::nozero);
+    hovRaDistance.flags(statistics::nozero);
 }
 
 } // namespace ruby

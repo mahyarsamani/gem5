@@ -127,6 +127,12 @@ class ExpectedMap
             else
                 return false;
         }
+
+        bool
+        isExpectedType(const Type &val) const
+        {
+            return expectedTypes.find(val) != expectedTypes.end();
+        }
     };
 
     ExpectedState<DataType> expectedData;
@@ -217,6 +223,17 @@ class ExpectedMap
     receivedRespType(const RespType &val) const
     {
         return expectedResp.receivedType(val);
+    }
+
+    // Would a data message of this type be taken now: the type is
+    // expected, messages are still expected, and no data message has been
+    // received in full yet (SIFT's target flow routes a delivered block to
+    // a transaction that still waits for its data).
+    bool
+    expectsData(const DataType &val) const
+    {
+        return hasExpected() && !hasReceivedData() &&
+               expectedData.isExpectedType(val);
     }
 
     void
