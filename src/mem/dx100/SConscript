@@ -10,9 +10,10 @@ Source('StreamAccess.cc')
 Source('Invalidator.cc')
 Source('ALU.cc')
 Source('RangeFuser.cc')
-Source('CpuSidePort.cc')
-Source('CacheSidePort.cc')
-Source('MemSidePort.cc')
+# DX100 port to CHI: PioPort.cc and DataPort.cc replace CpuSidePort.cc,
+# CacheSidePort.cc and MemSidePort.cc.
+Source('PioPort.cc')
+Source('DataPort.cc')
 Source('Port.cc')
 Source('MAA.cc')
 

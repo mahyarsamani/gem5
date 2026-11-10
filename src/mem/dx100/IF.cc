@@ -1,7 +1,7 @@
-#include "mem/MAA/IF.hh"
-#include "mem/MAA/MAA.hh"
+#include "mem/dx100/IF.hh"
+#include "mem/dx100/MAA.hh"
 #include "debug/MAAController.hh"
-#include "mem/MAA/SPD.hh"
+#include "mem/dx100/SPD.hh"
 #include <cassert>
 
 #ifndef TRACING_ON

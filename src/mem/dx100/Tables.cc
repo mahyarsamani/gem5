@@ -1,6 +1,6 @@
-#include "mem/MAA/Tables.hh"
+#include "mem/dx100/Tables.hh"
 #include "base/logging.hh"
-#include "mem/MAA/MAA.hh"
+#include "mem/dx100/MAA.hh"
 #include "debug/MAARequestTable.hh"
 #include "debug/MAARowTable.hh"
 #include "debug/MAAOffsetTable.hh"

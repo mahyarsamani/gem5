@@ -1,8 +1,8 @@
-#include "mem/MAA/Invalidator.hh"
+#include "mem/dx100/Invalidator.hh"
 #include "base/logging.hh"
 #include "base/trace.hh"
-#include "mem/MAA/MAA.hh"
-#include "mem/MAA/SPD.hh"
+#include "mem/dx100/MAA.hh"
+#include "mem/dx100/SPD.hh"
 #include "debug/MAAInvalidator.hh"
 #include <cassert>
 
@@ -395,10 +395,13 @@ void Invalidator::createMyPacket() {
 }
 bool Invalidator::sendOutstandingPacket() {
     DPRINTF(MAAInvalidator, "%s: trying sending %s\n", __func__, my_pkt->print());
-    if (maa->sendSnoopInvalidateCpu(my_pkt) == false) {
-        DPRINTF(MAAInvalidator, "%s: send failed, leaving send packet...\n", __func__);
-        return false;
-    }
+    // DX100 port to CHI, Sprint 1: a no-op. The fork sent an express
+    // ReadExReq snoop up the core's CpuSidePort; with no cacheable
+    // scratchpad yet, no core caches a tile line, so no line is ever
+    // ReadCached or WriteCached and this is never reached. Sprint 2
+    // replaces it with WriteUniqueFull and ReadOnce through the data port.
+    panic("%s: tile invalidation arrives with the coherent scratchpad "
+          "(Sprint 2): %s\n", __func__, my_pkt->print());
     if (my_pkt->cacheResponding() == true) {
         DPRINTF(MAAInvalidator, "INV %s: a cache in the O/M state will respond, send successfull...\n", __func__);
     } else if (my_pkt->hasSharers() == true) {

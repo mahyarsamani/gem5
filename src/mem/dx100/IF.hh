@@ -7,7 +7,7 @@
 #include <string>
 
 #include "base/types.hh"
-#include "mem/MAA/SPD.hh"
+#include "mem/dx100/SPD.hh"
 #include "sim/system.hh"
 #include "arch/generic/mmu.hh"
 

@@ -1,16 +1,21 @@
-#include "mem/MAA/ALU.hh"
-#include "mem/MAA/IF.hh"
-#include "mem/MAA/IndirectAccess.hh"
-#include "mem/MAA/Invalidator.hh"
-#include "mem/MAA/RangeFuser.hh"
-#include "mem/MAA/SPD.hh"
-#include "mem/MAA/StreamAccess.hh"
-#include "mem/MAA/MAA.hh"
+#include "mem/dx100/ALU.hh"
+#include "mem/dx100/IF.hh"
+#include "mem/dx100/IndirectAccess.hh"
+#include "mem/dx100/Invalidator.hh"
+#include "mem/dx100/RangeFuser.hh"
+#include "mem/dx100/SPD.hh"
+#include "mem/dx100/StreamAccess.hh"
+#include "mem/dx100/MAA.hh"
 
 #include "base/addr_range.hh"
+#include "base/bitfield.hh"
+#include "base/intmath.hh"
 #include "base/logging.hh"
 #include "base/trace.hh"
+#include "enums/AddrMap.hh"
+#include "mem/dram_interface.hh"
 #include "mem/packet.hh"
+#include "params/DRAMInterface.hh"
 #include "params/MAA.hh"
 #include "debug/MAA.hh"
 #include "debug/MAACpuPort.hh"
@@ -48,6 +53,10 @@ MAA::MAAResponsePort::MAAResponsePort(const std::string &_name, MAA &_maa, const
 MAA::MAA(const MAAParams &p)
     : ClockedObject(p),
       addrRanges(p.addr_ranges.begin(), p.addr_ranges.end()),
+      regionRange(p.region_range),
+      regionStarts(MAX_CMD_REGIONS, 0),
+      pioLatency(p.pio_latency),
+      dramInterface(p.dram),
       num_tiles(p.num_tiles_per_core * p.num_cores),
       num_tile_elements(p.num_tile_elements),
       num_regs(p.num_regs_per_core * p.num_cores),
@@ -111,62 +120,32 @@ MAA::MAA(const MAAParams &p)
         rangeUnitsIdle[i] = true;
     }
     invalidatorIdle = true;
-    for (int i = 0; i < p.port_mem_sides_connection_count; ++i) {
-        std::string portName = csprintf("%s.mem_side_port[%d]", p.name, i);
-        memSidePorts.push_back(new MemSidePort(portName, this, "MemSidePort"));
+    // DX100 port to CHI: one data port per DRAM channel (checked against
+    // the DRAM's channels in addDRAMInterface) and one register port that
+    // serves every range but the cacheable scratchpad, plus the region
+    // registers.
+    for (int i = 0; i < p.port_data_ports_connection_count; ++i) {
+        std::string portName = csprintf("%s.data_ports[%d]", p.name, i);
+        dataPorts.push_back(new DataPort(portName, *this, i));
     }
-    for (int i = 0; i < p.port_cache_sides_connection_count; ++i) {
-        std::string portName = csprintf("%s.cache_side_port[%d]", p.name, i);
-        cacheSidePorts.push_back(new CacheSidePort(portName, this, "CacheSidePort"));
-        cacheSidePorts[i]->allocate(i, p.max_outstanding_cache_side_packets);
-    }
-    panic_if(p.port_cpu_sides_connection_count != num_cores, "Number of CPU ports must be equal to the number of cores");
-    for (int i = 0; i < num_cores; ++i) {
-        cpuPortAddrRanges.push_back(AddrRangeList());
-    }
+    panic_if(addrRanges.size() != (int)AddressRangeType::Type::MAX,
+             "%s: expected %d address ranges, got %d\n", name(),
+             (int)AddressRangeType::Type::MAX, addrRanges.size());
     int range_id = 0;
     for (AddrRange range : addrRanges) {
-        switch (range_id) {
-        case (uint8_t)AddressRangeType::Type::SPD_DATA_NONCACHEABLE_RANGE:
-        case (uint8_t)AddressRangeType::Type::SPD_DATA_CACHEABLE_RANGE: {
-            // Addr start = range.start();
-            // Addr size_per_port = range.size() / num_cores;
-            // for (int i = 0; i < num_cores; ++i) {
-            //     DPRINTF(MAA, "Range[%s] for CPU port[%d]: %lx-%lx\n", AddressRangeType::address_range_names[range_id], i, start, start + size_per_port);
-            //     cpuPortAddrRanges[i].push_back(AddrRange(start, start + size_per_port));
-            //     start += size_per_port;
-            // }
-            Addr start = range.start();
-            Addr end = range.end();
-            std::vector<Addr> mask;
-            Addr curr_mask = 1 << 6;
-            printf("MAA: cpu masks: ");
-            for (int i = 0; i < log2(num_cores); i++) {
-                mask.push_back(curr_mask);
-                printf("%lx ", curr_mask);
-                curr_mask = curr_mask << 1;
-            }
-            printf("\n");
-            for (int i = 0; i < num_cores; ++i) {
-                AddrRange curr_range = AddrRange(start, end, mask, i);
-                printf("MAA: Range[%s] for CPU port[%d]: %s\n", AddressRangeType::address_range_names[range_id], i, curr_range.to_string().c_str());
-                cpuPortAddrRanges[i].push_back(curr_range);
-            }
-            break;
-        }
-        default: {
-            DPRINTF(MAA, "Range[%s] for CPU port[0]: %lx-%lx\n", AddressRangeType::address_range_names[range_id], range.start(), range.end());
-            cpuPortAddrRanges[0].push_back(AddrRange(range.start(), range.end()));
-            break;
-        }
+        if (range_id != (int)AddressRangeType::Type::SPD_DATA_CACHEABLE_RANGE) {
+            DPRINTF(MAA, "Range[%s] on the register port: %s\n",
+                    AddressRangeType::address_range_names[range_id],
+                    range.to_string());
+            pioAddrRanges.push_back(range);
         }
         range_id++;
     }
-    for (int i = 0; i < p.port_cpu_sides_connection_count; ++i) {
-        std::string portName = csprintf("%s.cpu_side_port[%d]", p.name, i);
-        cpuSidePorts.push_back(new CpuSidePort(portName, *this, "CpuSidePort"));
-        cpuSidePorts[i]->allocate(i, p.max_outstanding_cpu_side_packets);
-    }
+    panic_if(regionRange.size() < (MAX_CMD_REGIONS + 1) * 16,
+             "%s: region range %s is smaller than %d bytes\n", name(),
+             regionRange.to_string(), (MAX_CMD_REGIONS + 1) * 16);
+    pioAddrRanges.push_back(regionRange);
+    pioPort = new PioPort(csprintf("%s.pio_port", p.name), *this, "PioPort");
 
     my_last_idle_tick = curTick();
     my_last_reset_tick = curTick();
@@ -179,20 +158,23 @@ MAA::MAA(const MAAParams &p)
 }
 
 void MAA::init() {
-    for (auto port : cpuSidePorts) {
+    if (!pioPort->isConnected())
+        fatal("The register port of %s is not connected\n", name());
+    pioPort->sendRangeChange();
+    for (auto port : dataPorts) {
         if (!port->isConnected())
-            fatal("Cache ports on %s are not connected\n", name());
-        port->sendRangeChange();
+            fatal("Data ports on %s are not connected\n", name());
     }
+    // DX100 port to CHI: the fork called addRamulator from Python after
+    // instantiation; the DRAM interface is a parameter here.
+    fatal_if(dramInterface == nullptr, "%s needs a DRAM interface\n", name());
+    addDRAMInterface(dramInterface);
 }
 
 MAA::~MAA() {
-    for (auto port : memSidePorts)
+    for (auto port : dataPorts)
         delete port;
-    for (auto port : cacheSidePorts)
-        delete port;
-    for (auto port : cpuSidePorts)
-        delete port;
+    delete pioPort;
     delete[] my_num_outstanding_indirect_pkts;
     delete[] my_num_outstanding_stream_pkts;
 }
@@ -239,12 +221,10 @@ int MAA::getAddrRegion(Addr addr) {
 }
 
 Port &MAA::getPort(const std::string &if_name, PortID idx) {
-    if (if_name == "mem_sides" && idx < memSidePorts.size()) {
-        return *memSidePorts[idx];
-    } else if (if_name == "cpu_sides" && idx < cpuSidePorts.size()) {
-        return *cpuSidePorts[idx];
-    } else if (if_name == "cache_sides" && idx < cacheSidePorts.size()) {
-        return *cacheSidePorts[idx];
+    if (if_name == "data_ports" && idx < dataPorts.size()) {
+        return *dataPorts[idx];
+    } else if (if_name == "pio_port") {
+        return *pioPort;
     } else {
         return ClockedObject::getPort(if_name, idx);
     }
@@ -258,13 +238,50 @@ int MAA::inRange(Addr addr) const {
     }
     return r_id;
 }
-void MAA::addRamulator(memory::Ramulator2 *_ramulator2) {
-    _ramulator2->getAddrMapData(m_org,
-                                m_addr_bits,
-                                m_num_levels,
-                                m_tx_offset,
-                                m_col_bits_idx,
-                                m_row_bits_idx);
+void MAA::addDRAMInterface(memory::DRAMInterface *iface) {
+    // DX100 port to CHI: the organisation and the address map come from
+    // gem5's DRAMInterface (the fork took them from Ramulator2). map_addr
+    // repeats DRAMInterface::decodePacket for RoRaBaCoCh and RoRaBaChCo
+    // after ChanneledMemory's channel interleaving, which AddrRange's
+    // getOffset removes as the memory controller does.
+    const DRAMInterfaceParams &dp = static_cast<const DRAMInterfaceParams &>(
+        static_cast<SimObject *>(iface)->params());
+    panic_if(dp.addr_mapping != enums::RoRaBaCoCh &&
+                 dp.addr_mapping != enums::RoRaBaChCo,
+             "%s: only the RoRaBaCoCh and RoRaBaChCo DRAM address maps are "
+             "supported\n", name());
+    dramRange = iface->getAddrRange();
+    int channels = dramRange.stripes();
+    m_intlv_bits = floorLog2(channels);
+    m_intlv_low_bit = dramRange.interleaved() ?
+        floorLog2(dramRange.granularity()) : 0;
+    m_burst_size = dp.devices_per_rank * dp.burst_length *
+        dp.device_bus_width / 8;
+    uint64_t row_buffer_size = dp.devices_per_rank * dp.device_rowbuffer_size;
+    m_bursts_per_row = row_buffer_size / m_burst_size;
+    m_banks_per_rank = dp.banks_per_rank;
+    int bank_groups = dp.bank_groups_per_rank == 0 ? 1 : dp.bank_groups_per_rank;
+    panic_if(m_banks_per_rank % bank_groups != 0,
+             "%s: %d banks do not split into %d bank groups\n", name(),
+             m_banks_per_rank, bank_groups);
+    uint64_t capacity = 1ULL << ceilLog2(dramRange.size());
+    m_rows_per_bank = capacity /
+        (row_buffer_size * dp.banks_per_rank * dp.ranks_per_channel);
+    m_num_levels = ADDR_MAX_LEVEL;
+    m_org = std::vector<int>(ADDR_MAX_LEVEL, 0);
+    m_org[ADDR_CHANNEL_LEVEL] = channels;
+    m_org[ADDR_RANK_LEVEL] = dp.ranks_per_channel;
+    m_org[ADDR_BANKGROUP_LEVEL] = bank_groups;
+    m_org[ADDR_BANK_LEVEL] = m_banks_per_rank / bank_groups;
+    m_org[ADDR_ROW_LEVEL] = m_rows_per_bank;
+    m_org[ADDR_COLUMN_LEVEL] = m_bursts_per_row;
+    m_addr_bits = std::vector<int>(ADDR_MAX_LEVEL, 0);
+    for (int i = 0; i < ADDR_MAX_LEVEL; i++) {
+        m_addr_bits[i] = ceilLog2(m_org[i]);
+    }
+    m_tx_offset = floorLog2(m_burst_size);
+    m_col_bits_idx = ADDR_COLUMN_LEVEL;
+    m_row_bits_idx = ADDR_ROW_LEVEL;
     DPRINTF(MAA, "DRAM organization [n_levels: %d] -- CH: %d, RA: %d, BG: %d, BA: %d, RO: %d, CO: %d\n",
             m_num_levels,
             m_org[ADDR_CHANNEL_LEVEL],
@@ -283,18 +300,15 @@ void MAA::addRamulator(memory::Ramulator2 *_ramulator2) {
             m_tx_offset);
     assert(m_num_levels == 6);
     num_channels = m_org[ADDR_CHANNEL_LEVEL];
-    panic_if(memSidePorts.size() != num_channels, "Number of memory channels %d != number of memside ports %d\n", num_channels, memSidePorts.size());
+    panic_if(dataPorts.size() != num_channels, "Number of memory channels %d != number of data ports %d\n", num_channels, dataPorts.size());
+    panic_if(num_memory_channels != num_channels, "num_memory_channels %d != the DRAM's %d channels\n", num_memory_channels, num_channels);
     mem_channels_blocked = new bool[num_channels];
     for (int i = 0; i < num_channels; i++) {
         mem_channels_blocked[i] = false;
     }
-    panic_if(cacheSidePorts.size() != num_cores, "Number of cores %d != number of cacheside ports %d\n", num_cores, cacheSidePorts.size());
     cache_bus_blocked = new bool[num_cores];
     for (int i = 0; i < num_cores; i++) {
         cache_bus_blocked[i] = false;
-    }
-    for (int i = 0; i < memSidePorts.size(); i++) {
-        memSidePorts[i]->allocate(i);
     }
     for (int i = 0; i < num_maas; i++) {
         indirectAccessUnits[i].allocate(i, num_tile_elements, num_row_table_rows_per_slice,
@@ -317,25 +331,34 @@ void MAA::addRamulator(memory::Ramulator2 *_ramulator2) {
     my_outstanding_stream_mem_write_pkts = new std::multiset<OutstandingPacket, CompareByTick>[num_cores];
     my_outstanding_stream_mem_read_pkts = new std::multiset<OutstandingPacket, CompareByTick>[num_cores];
 }
-// RoBaRaCoCh address mapping taking from the Ramulator2
 int slice_lower_bits(uint64_t &addr, int bits) {
     int lbits = addr & ((1 << bits) - 1);
     addr >>= bits;
     return lbits;
 }
+// DX100 port to CHI: DRAMInterface::decodePacket (RoRaBaCoCh) after the
+// channel interleaving; the bank group of bank b is b % bank groups, as
+// DRAMInterface::Rank assigns them.
 std::vector<int> MAA::map_addr(Addr addr) {
     std::vector<int> addr_vec(m_num_levels, -1);
-    addr = addr >> m_tx_offset;
-    addr_vec[0] = slice_lower_bits(addr, m_addr_bits[0]);
-    addr_vec[m_addr_bits.size() - 1] = slice_lower_bits(addr, m_addr_bits[m_addr_bits.size() - 1]);
-    for (int i = 1; i <= m_row_bits_idx; i++) {
-        addr_vec[i] = slice_lower_bits(addr, m_addr_bits[i]);
-    }
+    addr_vec[ADDR_CHANNEL_LEVEL] = channel_addr(addr);
+    Addr burst = dramRange.getOffset(addr);
+    panic_if(burst == MaxAddr, "%s: 0x%lx is outside the DRAM range %s\n",
+             name(), addr, dramRange.to_string());
+    burst /= m_burst_size;
+    addr_vec[ADDR_COLUMN_LEVEL] = burst % m_bursts_per_row;
+    Addr rest = burst / m_bursts_per_row;
+    int bank = rest % m_banks_per_rank;
+    rest /= m_banks_per_rank;
+    addr_vec[ADDR_RANK_LEVEL] = rest % m_org[ADDR_RANK_LEVEL];
+    rest /= m_org[ADDR_RANK_LEVEL];
+    addr_vec[ADDR_ROW_LEVEL] = rest % m_rows_per_bank;
+    addr_vec[ADDR_BANKGROUP_LEVEL] = bank % m_org[ADDR_BANKGROUP_LEVEL];
+    addr_vec[ADDR_BANK_LEVEL] = bank / m_org[ADDR_BANKGROUP_LEVEL];
     return addr_vec;
 }
 int MAA::channel_addr(Addr addr) {
-    addr = addr >> m_tx_offset;
-    return slice_lower_bits(addr, m_addr_bits[0]);
+    return (addr >> m_intlv_low_bit) & mask(m_intlv_bits);
 }
 int MAA::core_addr(Addr addr) {
     addr = addr >> m_tx_offset;
@@ -525,7 +548,7 @@ void MAA::dispatchRegister() {
             }
             pkt->makeTimingResponse();
             pkt->headerDelay = pkt->payloadDelay = 0;
-            cpuSidePorts[0]->schedTimingResp(pkt, getClockEdge(Cycles(1)));
+            sendPioResponse(pkt);
             pkt_it = my_register_pkts.erase(pkt_it);
             register_it = my_registers.erase(register_it);
             delete reg;
@@ -580,7 +603,7 @@ void MAA::dispatchInstruction() {
                 }
                 pkt->makeTimingResponse();
                 pkt->headerDelay = pkt->payloadDelay = 0;
-                cpuSidePorts[0]->schedTimingResp(pkt, getClockEdge(Cycles(1)));
+                sendPioResponse(pkt);
                 scheduleIssueInstructionEvent(1);
                 pkt_it = my_instruction_pkts.erase(pkt_it);
                 recv_it = my_instruction_recvs.erase(recv_it);
@@ -666,7 +689,7 @@ void MAA::setTileReady(int tileID, int wordSize) {
                 DPRINTF(MAAController, "%s: responding to outstanding ready packet %s!\n", __func__, pkt->print());
                 pkt->makeTimingResponse();
                 pkt->headerDelay = pkt->payloadDelay = 0;
-                cpuSidePorts[0]->schedTimingResp(pkt, getClockEdge(Cycles(1)));
+                sendPioResponse(pkt);
                 pkt_it = my_ready_pkts.erase(pkt_it);
                 tile_id_it = my_ready_tile_ids.erase(tile_id_it);
             } else {

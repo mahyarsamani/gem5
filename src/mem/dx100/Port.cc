@@ -1,11 +1,11 @@
-#include "mem/MAA/ALU.hh"
-#include "mem/MAA/IF.hh"
-#include "mem/MAA/IndirectAccess.hh"
-#include "mem/MAA/Invalidator.hh"
-#include "mem/MAA/RangeFuser.hh"
-#include "mem/MAA/SPD.hh"
-#include "mem/MAA/StreamAccess.hh"
-#include "mem/MAA/MAA.hh"
+#include "mem/dx100/ALU.hh"
+#include "mem/dx100/IF.hh"
+#include "mem/dx100/IndirectAccess.hh"
+#include "mem/dx100/Invalidator.hh"
+#include "mem/dx100/RangeFuser.hh"
+#include "mem/dx100/SPD.hh"
+#include "mem/dx100/StreamAccess.hh"
+#include "mem/dx100/MAA.hh"
 
 #include "base/addr_range.hh"
 #include "base/logging.hh"
@@ -100,17 +100,13 @@ void MAA::sendPacket(FuncUnitType funcUnit, uint8_t maaID, PacketPtr pkt, Tick t
         }
     } else {
         my_outstanding_pkt_map[paddr] = OutstandingPacket(pkt, paddr, tick, pkt->cmd);
-        bool hit_cache = true;
-        if (force_cache_access == false && force_cache == false) {
-            RequestPtr snoop_req = std::make_shared<Request>(pkt->req->getPaddr(), pkt->req->getSize(), pkt->req->getFlags(), pkt->req->requestorId());
-            PacketPtr snoop_pkt = new Packet(snoop_req, MemCmd::SnoopReq);
-            snoop_pkt->setExpressSnoop();
-            snoop_pkt->headerDelay = snoop_pkt->payloadDelay = 0;
-            sendSnoopPacketCpu(snoop_pkt);
-            hit_cache = snoop_pkt->isBlockCached();
-            DPRINTF(MAAPort, "%s: force_cache is false, snoop request for %s determined %s\n", __func__, pkt->print(), hit_cache ? "cached" : "not cached");
-            delete snoop_pkt;
-        }
+        // DX100 port to CHI: no express snoop decides cache or memory (the
+        // fork's H bit); every line goes to the data port of its channel
+        // and the home node's directory check takes the snoop's place.
+        // `cached` now only selects the fork's queues and statistics:
+        // forced (force_cache_access, or an instruction the Indirect unit
+        // sends to the cache wholesale) or not.
+        bool hit_cache = force_cache_access || force_cache;
         my_outstanding_pkt_map[paddr].maaIDs.push_back(maaID);
         my_outstanding_pkt_map[paddr].funcUnits.push_back(funcUnit);
         int core_id = core_addr(paddr);
@@ -559,7 +555,7 @@ bool MAA::sendOutstandingCachePacket() {
     }
     return true;
 }
-void MAA::recvTimingResp(PacketPtr pkt, bool cached) {
+void MAA::recvTimingResp(PacketPtr pkt) {
     DPRINTF(MAAPort, "%s: received %s, cmd: %s, size: %d\n", __func__, pkt->print(), pkt->cmdString(), pkt->getSize());
     panic_if(pkt->cmd.toInt() != MemCmd::ReadExResp && pkt->cmd.toInt() != MemCmd::ReadResp, "%s received an unknown response: %s\n", __func__, pkt->print());
     assert(pkt->getSize() == 64);
@@ -567,7 +563,6 @@ void MAA::recvTimingResp(PacketPtr pkt, bool cached) {
     panic_if(my_outstanding_pkt_map.find(paddr) == my_outstanding_pkt_map.end(), "%s: response for packet %s not found in my_outstanding_pkt_map\n", __func__, pkt->print());
     OutstandingPacket tmp = my_outstanding_pkt_map[paddr];
     panic_if(tmp.sent == false, "%s received response %s for an unsent packet!\n", pkt->cmdString(), pkt->getSize());
-    panic_if(cached != tmp.cached, "%s: response %s cached %d does not match with outstanding packet cached %d\n", __func__, pkt->print(), cached, tmp.cached);
     my_outstanding_pkt_map.erase(paddr);
     for (int i = 0; i < tmp.maaIDs.size(); i++) {
         if (tmp.funcUnits[i] == FuncUnitType::INDIRECT) {

@@ -1,9 +1,9 @@
-#include "mem/MAA/IndirectAccess.hh"
-#include "mem/MAA/Tables.hh"
+#include "mem/dx100/IndirectAccess.hh"
+#include "mem/dx100/Tables.hh"
 #include "base/logging.hh"
-#include "mem/MAA/MAA.hh"
-#include "mem/MAA/SPD.hh"
-#include "mem/MAA/IF.hh"
+#include "mem/dx100/MAA.hh"
+#include "mem/dx100/SPD.hh"
+#include "mem/dx100/IF.hh"
 #include "base/trace.hh"
 #include "base/types.hh"
 #include "debug/MAAIndirect.hh"
@@ -823,7 +823,7 @@ bool IndirectAccessUnit::checkAndResetAllRowTablesSent() {
 void IndirectAccessUnit::createReadPacket(Addr addr, int latency) {
     /**** Packet generation ****/
     RequestPtr real_req = std::make_shared<Request>(addr, block_size, flags, maa->requestorId);
-    real_req->setRegion(my_addr_range_id);
+    // DX100 port: Request::setRegion is the fork's, for per-region cache stats.
     PacketPtr read_pkt;
     if (my_instruction->opcode == Instruction::OpcodeType::INDIR_LD) {
         read_pkt = new Packet(real_req, MemCmd::ReadReq);
@@ -1144,7 +1144,7 @@ bool IndirectAccessUnit::recvData(const Addr addr, uint8_t *dataptr, bool is_blo
     Cycles total_latency = updateLatency(num_recv_spd_read_accesses, 0, num_recv_spd_write_accesses, num_recv_rt_accesses, 0, total_num_RT_subslices);
     if (my_instruction->opcode == Instruction::OpcodeType::INDIR_ST_VECTOR || my_instruction->opcode == Instruction::OpcodeType::INDIR_ST_SCALAR || my_instruction->opcode == Instruction::OpcodeType::INDIR_RMW_VECTOR || my_instruction->opcode == Instruction::OpcodeType::INDIR_RMW_SCALAR) {
         RequestPtr real_req = std::make_shared<Request>(addr, block_size, flags, maa->requestorId);
-        real_req->setRegion(my_addr_range_id);
+        // DX100 port: Request::setRegion is the fork's, for per-region cache stats.
         PacketPtr write_pkt = new Packet(real_req, MemCmd::WritebackDirty);
         write_pkt->allocate();
         write_pkt->setData(new_data);

@@ -1,8 +1,8 @@
-#include "mem/MAA/StreamAccess.hh"
+#include "mem/dx100/StreamAccess.hh"
 #include "base/types.hh"
-#include "mem/MAA/MAA.hh"
-#include "mem/MAA/IF.hh"
-#include "mem/MAA/SPD.hh"
+#include "mem/dx100/MAA.hh"
+#include "mem/dx100/IF.hh"
+#include "mem/dx100/SPD.hh"
 #include "base/trace.hh"
 #include "debug/MAAStream.hh"
 #include "debug/MAATrace.hh"
@@ -351,7 +351,7 @@ void StreamAccessUnit::executeInstruction() {
 void StreamAccessUnit::createReadPacket(Addr addr, int latency) {
     /**** Packet generation ****/
     RequestPtr real_req = std::make_shared<Request>(addr, block_size, flags, maa->requestorId);
-    real_req->setRegion(my_addr_range_id);
+    // DX100 port: Request::setRegion is the fork's, for per-region cache stats.
     PacketPtr my_pkt;
     if (my_instruction->opcode == Instruction::OpcodeType::STREAM_LD) {
         my_pkt = new Packet(real_req, MemCmd::ReadReq);
@@ -429,7 +429,7 @@ bool StreamAccessUnit::recvData(const Addr addr, uint8_t *dataptr) {
         }
     } else {
         RequestPtr real_req = std::make_shared<Request>(addr, block_size, flags, maa->requestorId);
-        real_req->setRegion(my_addr_range_id);
+        // DX100 port: Request::setRegion is the fork's, for per-region cache stats.
         PacketPtr write_pkt = new Packet(real_req, MemCmd::WritebackDirty);
         write_pkt->allocate();
         write_pkt->setData(new_data);

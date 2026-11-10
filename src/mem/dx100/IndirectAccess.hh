@@ -14,7 +14,7 @@
 #include "mem/request.hh"
 #include "sim/system.hh"
 #include "arch/generic/mmu.hh"
-#include "mem/MAA/Tables.hh"
+#include "mem/dx100/Tables.hh"
 
 namespace gem5 {
 

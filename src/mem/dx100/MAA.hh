@@ -10,16 +10,20 @@
 
 #include "base/trace.hh"
 #include "base/types.hh"
-#include "mem/MAA/IF.hh"
+#include "mem/dx100/IF.hh"
 #include "mem/cache/tags/base.hh"
 #include "mem/packet.hh"
 #include "mem/packet_queue.hh"
 #include "mem/qport.hh"
 #include "mem/request.hh"
-#include "mem/ramulator2.hh"
 #include "sim/clocked_object.hh"
 #include "sim/system.hh"
 #include "arch/generic/mmu.hh"
+
+// DX100 port to CHI: the fork defines this in its src/mem/packet.hh.
+#ifndef MAX_CMD_REGIONS
+#define MAX_CMD_REGIONS 256
+#endif
 
 #define ADDR_CHANNEL_LEVEL   0
 #define ADDR_RANK_LEVEL      1
@@ -30,6 +34,10 @@
 #define ADDR_MAX_LEVEL       6
 
 namespace gem5 {
+
+namespace memory {
+class DRAMInterface;
+}
 
 struct MAAParams;
 class IF;
@@ -70,15 +78,15 @@ class MAA : public ClockedObject {
     };
 
     /**
-     * The CPU-side port extends the base MAA response port with access
-     * functions for functional, atomic and timing requests.
+     * DX100 port to CHI: the register port, in place of the fork's
+     * per-core CpuSidePort. One response port on the IO crossbar that the
+     * cores' data sequencers forward their uncacheable accesses to; it
+     * serves every range but the cacheable scratchpad (Sprint 2) and the
+     * region registers. Requests carry their requestor and context ids,
+     * which the decoder keys instructions and registers by.
      */
-    class CpuSidePort : public MAAResponsePort {
+    class PioPort : public MAAResponsePort {
     protected:
-        bool recvTimingSnoopResp(PacketPtr pkt) override;
-
-        bool tryTiming(PacketPtr pkt) override;
-
         bool recvTimingReq(PacketPtr pkt) override;
 
         Tick recvAtomic(PacketPtr pkt) override;
@@ -87,184 +95,40 @@ class MAA : public ClockedObject {
 
         AddrRangeList getAddrRanges() const override;
 
-    protected:
-        int outstandingCpuSidePackets;
-        int maxOutstandingCpuSidePackets;
-        bool is_blocked;
-        int core_id;
-
     public:
-        bool sendSnoopInvalidatePacket(PacketPtr pkt);
-        void allocate(int _core_id, int _maxOutstandingCpuSidePackets);
-
-    public:
-        CpuSidePort(const std::string &_name, MAA &_maa,
-                    const std::string &_label);
-    };
-
-    class MAAMemRequestPort : public QueuedRequestPort {
-    public:
-        /**
-         * Schedule a send of a request packet (from the MSHR). Note
-         * that we could already have a retry outstanding.
-         */
-        void schedSendEvent(Tick time) {
-            reqQueue.schedSendEvent(time);
-        }
-
-    protected:
-        MAAMemRequestPort(const std::string &_name,
-                          ReqPacketQueue &_reqQueue,
-                          SnoopRespPacketQueue &_snoopRespQueue)
-            : QueuedRequestPort(_name, _reqQueue, _snoopRespQueue) {}
-
-        /**
-         * Memory-side port never snoops.
-         *
-         * @return always false
-         */
-        bool isSnooping() const { return false; }
-    };
-
-    class MAACacheRequestPort : public QueuedRequestPort {
-    public:
-        /**
-         * Schedule a send of a request packet (from the MSHR). Note
-         * that we could already have a retry outstanding.
-         */
-        void schedSendEvent(Tick time) {
-            reqQueue.schedSendEvent(time);
-        }
-
-    protected:
-        MAACacheRequestPort(const std::string &_name,
-                            ReqPacketQueue &_reqQueue,
-                            SnoopRespPacketQueue &_snoopRespQueue)
-            : QueuedRequestPort(_name, _reqQueue, _snoopRespQueue) {}
-
-        /**
-         * Memory-side port always snoops.
-         *
-         * @return always false
-         */
-        bool isSnooping() const { return false; }
+        PioPort(const std::string &_name, MAA &_maa,
+                const std::string &_label);
     };
 
     /**
-     * Override the default behaviour of sendDeferredPacket to enable
-     * the memory-side cache port to also send requests based on the
-     * current MSHR status. This queue has a pointer to our specific
-     * cache implementation and is used by the MemSidePort.
+     * DX100 port to CHI: the data port, in place of the fork's
+     * CacheSidePort (one per core, into the LLC bus) and MemSidePort (one
+     * per DRAM channel, around coherence). One request port per DRAM
+     * channel, each into the sequencer of a CHI DMA requester, so the
+     * directory keeps every access coherent. Plain ReadReq and WriteReq
+     * only; nothing snoops it. A send that the sequencer refuses blocks
+     * the port until its retry.
      */
-    class MAAReqPacketQueue : public ReqPacketQueue {
-
+    class DataPort : public RequestPort {
     protected:
+        bool recvTimingResp(PacketPtr pkt) override;
+
+        void recvReqRetry() override;
+
         MAA &maa;
-        SnoopRespPacketQueue &snoopRespQueue;
-
-    public:
-        MAAReqPacketQueue(MAA &maa, RequestPort &port,
-                          SnoopRespPacketQueue &snoop_resp_queue,
-                          const std::string &label) : ReqPacketQueue(maa, port, label), maa(maa),
-                                                      snoopRespQueue(snoop_resp_queue) {}
-
-        /**
-         * Override the normal sendDeferredPacket and do not only
-         * consider the transmit list (used for responses), but also
-         * requests.
-         */
-        void sendDeferredPacket();
-    };
-
-    /**
-     * The memory-side port extends the base cache request port with
-     * access functions for functional, atomic and timing snoops.
-     */
-    class MemSidePort : public MAAMemRequestPort {
-    private:
-        /** The maa-specific queue. */
-        MAAReqPacketQueue _reqQueue;
-
-        SnoopRespPacketQueue _snoopRespQueue;
-
-        // a pointer to our specific MAA implementation
-        MAA *maa;
-
-    protected:
-        void recvTimingSnoopReq(PacketPtr pkt);
-
-        bool recvTimingResp(PacketPtr pkt);
-
-        Tick recvAtomicSnoop(PacketPtr pkt);
-
-        void recvFunctionalSnoop(PacketPtr pkt);
-
-        void recvReqRetry();
-
-    protected:
         int channel_id;
-        void setUnblocked();
+        bool blocked;
 
     public:
         bool sendPacket(PacketPtr pkt);
-        void allocate(int _channel_id);
+        bool isBlocked() const { return blocked; }
 
-    public:
-        MemSidePort(const std::string &_name, MAA *_maa,
-                    const std::string &_label);
-    };
-
-    /**
-     * The memory-side port extends the base cache request port with
-     * access functions for functional, atomic and timing snoops.
-     */
-    class CacheSidePort : public MAACacheRequestPort {
-        enum class BlockReason : uint8_t {
-            NOT_BLOCKED,
-            MAX_XBAR_PACKETS,
-            CACHE_FAILED
-        };
-
-    private:
-        /** The maa-specific queue. */
-        MAAReqPacketQueue _reqQueue;
-
-        SnoopRespPacketQueue _snoopRespQueue;
-
-        // a pointer to our specific cache implementation
-        MAA *maa;
-
-    protected:
-        void recvTimingSnoopReq(PacketPtr pkt);
-
-        bool recvTimingResp(PacketPtr pkt);
-
-        Tick recvAtomicSnoop(PacketPtr pkt);
-
-        void recvFunctionalSnoop(PacketPtr pkt);
-
-        void recvReqRetry();
-
-    protected:
-        int outstandingCacheSidePackets;
-        int maxOutstandingCacheSidePackets;
-        BlockReason blockReason;
-        void setUnblocked(BlockReason reason);
-        int core_id;
-
-    public:
-        bool sendPacket(PacketPtr pkt);
-        void allocate(int _core_id, int _maxOutstandingCacheSidePackets);
-
-    public:
-        CacheSidePort(const std::string &_name, MAA *_maa,
-                      const std::string &_label);
+        DataPort(const std::string &_name, MAA &_maa, int _channel_id);
     };
 
 protected:
-    std::vector<CpuSidePort *> cpuSidePorts;
-    std::vector<MemSidePort *> memSidePorts;
-    std::vector<CacheSidePort *> cacheSidePorts;
+    PioPort *pioPort;
+    std::vector<DataPort *> dataPorts;
 
 public:
     SPD *spd;
@@ -276,24 +140,32 @@ public:
     ALUUnit *aluUnits;
     RangeFuserUnit *rangeUnits;
 
-    // Ramulator related variables for address mapping
+    // DRAM organisation for address mapping (Ramulator2's in the fork;
+    // gem5's DRAMInterface here, see addDRAMInterface).
     std::vector<int> m_org;
     std::vector<int> m_addr_bits; // How many address bits for each level in the hierarchy?
     int m_num_levels;             // How many levels in the hierarchy?
     int m_tx_offset;
     int m_col_bits_idx;
     int m_row_bits_idx;
+    // DX100 port to CHI: what decodePacket of the DRAMInterface needs.
+    int m_intlv_low_bit;     // lowest channel-interleaving bit
+    int m_intlv_bits;        // log2(channels)
+    int m_burst_size;        // bytes per DRAM burst
+    int m_bursts_per_row;    // bursts per row buffer
+    int m_banks_per_rank;    // banks per rank, all bank groups
+    Addr m_rows_per_bank;
+    AddrRange dramRange;     // channel 0's range: getOffset decodes any
 
 public:
     std::vector<int> map_addr(Addr addr);
     int channel_addr(Addr addr);
     int core_addr(Addr addr);
     Addr calc_Grow_addr(std::vector<int> addr_vec);
-    void addRamulator(memory::Ramulator2 *_ramulator2);
+    void addDRAMInterface(memory::DRAMInterface *iface);
     bool sendPacketMem(PacketPtr pkt);
     bool sendPacketCache(PacketPtr pkt);
-    void sendSnoopPacketCpu(PacketPtr pkt);
-    bool sendSnoopInvalidateCpu(PacketPtr pkt);
+    void dataPortRetry(int channel_id);
 
 protected:
     /**
@@ -306,52 +178,19 @@ protected:
      * Handles a response from the bus.
      * @param pkt The response packet
      */
-    void recvTimingResp(PacketPtr pkt, bool cached);
+    void recvTimingResp(PacketPtr pkt);
 
     /**
-     * Handle a snoop response.
-     * @param pkt Snoop response packet
+     * Serves a write to the region registers (DX100 port to CHI: they
+     * replace the fork's add_mem_region pseudo-op).
      */
-    void recvTimingSnoopResp(PacketPtr pkt);
+    void recvRegionWrite(PacketPtr pkt);
 
     /**
-     * Performs the access specified by the request.
-     * @param pkt The request to perform.
-     * @return The number of ticks required for the access.
+     * Schedules the response to a register-port request (DX100 port to
+     * CHI): one cycle after `cycles` of the accelerator plus pio_latency.
      */
-    Tick recvAtomic(PacketPtr pkt);
-
-    /**
-     * Snoop for the provided request in the cache and return the estimated
-     * time taken.
-     * @param pkt The memory request to snoop
-     * @return The number of ticks required for the snoop.
-     */
-    Tick recvMemAtomicSnoop(PacketPtr pkt);
-
-    /**
-     * Snoop for the provided request in the cache and return the estimated
-     * time taken.
-     * @param pkt The memory request to snoop
-     * @return The number of ticks required for the snoop.
-     */
-    Tick recvCacheAtomicSnoop(PacketPtr pkt);
-
-    /**
-     * Performs the access specified by the request.
-     *
-     * @param pkt The request to perform.
-     * @param fromCpuSide from the CPU side port or the memory side port
-     */
-    void memFunctionalAccess(PacketPtr pkt, bool from_cpu_side);
-
-    /**
-     * Performs the access specified by the request.
-     *
-     * @param pkt The request to perform.
-     * @param fromCpuSide from the CPU side port or the memory side port
-     */
-    void cacheFunctionalAccess(PacketPtr pkt, bool from_cpu_side);
+    void sendPioResponse(PacketPtr pkt, Cycles cycles = Cycles(1));
 
     /**
      * Determine if an address is in the ranges covered by this
@@ -364,22 +203,17 @@ protected:
     int inRange(Addr addr) const;
 
     /**
-     * Snoops bus transactions to maintain coherence.
-     * @param pkt The current bus transaction.
-     */
-    void recvMemTimingSnoopReq(PacketPtr pkt);
-
-    /**
-     * Snoops bus transactions to maintain coherence.
-     * @param pkt The current bus transaction.
-     */
-    void recvCacheTimingSnoopReq(PacketPtr pkt);
-
-    /**
      * The address range to which the cache responds on the CPU side.
      * Normally this is all possible memory addresses. */
     const AddrRangeList addrRanges;
-    std::vector<AddrRangeList> cpuPortAddrRanges;
+    // DX100 port to CHI: the ranges the register port serves, and the
+    // region registers (start, end of region i at 16 i, 16 i + 8; any
+    // write at MAX_CMD_REGIONS * 16 clears every region).
+    AddrRangeList pioAddrRanges;
+    const AddrRange regionRange;
+    std::vector<Addr> regionStarts;
+    const Tick pioLatency;
+    memory::DRAMInterface *dramInterface;
 
 public:
     unsigned int num_tiles;
@@ -429,7 +263,7 @@ public:
     Port &getPort(const std::string &if_name,
                   PortID idx = InvalidPortID) override;
 
-    const AddrRangeList &getAddrRanges(int core_id) const { return cpuPortAddrRanges[core_id]; }
+    const AddrRangeList &getPioAddrRanges() const { return pioAddrRanges; }
     void setTileReady(int tileID, int wordSize);
     void finishInstructionCompute(InstructionPtr instruction);
     void finishInstructionInvalidate(InstructionPtr instruction, int tileID);

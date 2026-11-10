@@ -1,11 +1,11 @@
-#include "mem/MAA/ALU.hh"
-#include "mem/MAA/IF.hh"
-#include "mem/MAA/IndirectAccess.hh"
-#include "mem/MAA/Invalidator.hh"
-#include "mem/MAA/RangeFuser.hh"
-#include "mem/MAA/SPD.hh"
-#include "mem/MAA/StreamAccess.hh"
-#include "mem/MAA/MAA.hh"
+#include "mem/dx100/ALU.hh"
+#include "mem/dx100/IF.hh"
+#include "mem/dx100/IndirectAccess.hh"
+#include "mem/dx100/Invalidator.hh"
+#include "mem/dx100/RangeFuser.hh"
+#include "mem/dx100/SPD.hh"
+#include "mem/dx100/StreamAccess.hh"
+#include "mem/dx100/MAA.hh"
 
 #include "base/addr_range.hh"
 #include "base/logging.hh"
@@ -21,51 +21,53 @@
 #define TRACING_ON 1
 #endif
 
+/*
+ * DX100 port to CHI: the register port. It replaces the fork's per-core
+ * CpuSidePort (a response port on the memory bus per core, which also
+ * snooped the cores' caches for the Invalidator). The cores' uncacheable
+ * accesses to the accelerator's ranges leave their data sequencers through
+ * Ruby's IO path (RubyPort::MemResponsePort::recvTimingReq sends a
+ * non-memory address out of mem_request_port) onto an IOXBar, and reach
+ * this one port; the request keeps the core's requestor and context ids,
+ * which the decoder below keys instructions and registers by, as the fork
+ * did. The decoder is the fork's, with three changes marked "DX100 port":
+ * responses leave by this one port after pio_latency, the core reads tile
+ * data uncached from the non-cacheable range (Sprint 1's scaffold; the
+ * coherent scratchpad is Sprint 2), and the region registers replace the
+ * fork's add_mem_region pseudo-op.
+ */
+
 namespace gem5 {
 
-void MAA::recvTimingSnoopResp(PacketPtr pkt) {
-    /// print the packet
-    DPRINTF(MAACpuPort, "%s: received %s\n", __func__, pkt->print());
-    switch (pkt->cmd.toInt()) {
-    case MemCmd::ReadExResp: {
-        assert(pkt->getSize() == 64);
-        for (int i = 0; i < 64; i += 4) {
-            panic_if(pkt->req->getByteEnable()[i] == false, "Byte enable [%d] is not set for the read response\n", i);
-        }
-        AddressRangeType address_range = AddressRangeType(pkt->getAddr(), addrRanges);
-        panic_if(address_range.isValid() == false, "Invalid address range: %s\n", address_range.print());
-        assert(address_range.getType() == AddressRangeType::Type::SPD_DATA_CACHEABLE_RANGE);
-        Addr offset = address_range.getOffset();
-        int tile_id = offset / (num_tile_elements * sizeof(uint32_t));
-        int element_id = offset % (num_tile_elements * sizeof(uint32_t));
-        assert(element_id % sizeof(uint32_t) == 0);
-        element_id /= sizeof(uint32_t);
-        invalidator->recvData(tile_id, element_id, pkt->getPtr<uint8_t>());
-        break;
-    }
-    default:
-        assert(false);
-    }
-}
-bool MAA::CpuSidePort::recvTimingSnoopResp(PacketPtr pkt) {
-    assert(pkt->isResponse());
-    /// print the packet
-    DPRINTF(MAACpuPort, "%s: received %s\n", __func__, pkt->print());
-    maa.recvTimingSnoopResp(pkt);
-    outstandingCpuSidePackets--;
-    if (is_blocked) {
-        is_blocked = false;
-        maa.invalidator->scheduleExecuteInstructionEvent();
-    }
-    pkt->deleteData();
-    delete pkt;
-    return true;
+void MAA::sendPioResponse(PacketPtr pkt, Cycles cycles) {
+    pioPort->schedTimingResp(pkt, getClockEdge(cycles) + pioLatency);
 }
 
-bool MAA::CpuSidePort::tryTiming(PacketPtr pkt) {
-    /// print the packet
-    DPRINTF(MAACpuPort, "%s: received %s\n", __func__, pkt->print());
-    return true;
+void MAA::recvRegionWrite(PacketPtr pkt) {
+    // DX100 port: region i's start at 16 i and end at 16 i + 8; writing the
+    // end registers [start, end) as region i (the fork's add_mem_region
+    // pseudo-op, MAA_gem5.hpp); any write at MAX_CMD_REGIONS * 16 clears
+    // every region (the fork's clear_mem_region).
+    panic_if(pkt->cmd != MemCmd::WriteReq, "%s: region registers are write-only: %s\n", __func__, pkt->print());
+    panic_if(pkt->getSize() != sizeof(uint64_t), "%s: region registers take 8-byte writes: %s\n", __func__, pkt->print());
+    Addr offset = pkt->getAddr() - regionRange.start();
+    panic_if(offset % sizeof(uint64_t) != 0, "%s: unaligned region register write: %s\n", __func__, pkt->print());
+    uint64_t data = pkt->getRaw<uint64_t>();
+    if (offset == MAX_CMD_REGIONS * 16) {
+        clearAddrRegion();
+    } else {
+        int region_id = offset / 16;
+        panic_if(region_id >= MAX_CMD_REGIONS, "%s: region %d out of range: %s\n", __func__, region_id, pkt->print());
+        if (offset % 16 == 0) {
+            regionStarts[region_id] = data;
+        } else {
+            addAddrRegion(regionStarts[region_id], data, region_id);
+        }
+    }
+    pkt->makeTimingResponse();
+    Tick old_header_delay = pkt->headerDelay;
+    pkt->headerDelay = pkt->payloadDelay = 0;
+    pioPort->schedTimingResp(pkt, getClockEdge(Cycles(1)) + old_header_delay + pioLatency);
 }
 
 void MAA::recvTimingReq(PacketPtr pkt, int core_id) {
@@ -76,11 +78,17 @@ void MAA::recvTimingReq(PacketPtr pkt, int core_id) {
             pkt->cmdString(),
             pkt->isMaskedWrite(),
             pkt->getSize());
+    // DX100 port: an access without a byte-enable mask enables every byte.
+    const std::vector<bool> &byte_enable = pkt->req->getByteEnable();
+    for (int i = 0; i < byte_enable.size(); i++) {
+        panic_if(byte_enable[i] == false, "Byte enable [%d] is not set for the request\n", i);
+    }
+    if (regionRange.contains(pkt->getAddr())) {
+        recvRegionWrite(pkt);
+        return;
+    }
     AddressRangeType address_range = AddressRangeType(pkt->getAddr(), addrRanges);
     DPRINTF(MAACpuPort, "%s: address range type: %s\n", __func__, address_range.print());
-    for (int i = 0; i < pkt->getSize(); i++) {
-        panic_if(pkt->req->getByteEnable()[i] == false, "Byte enable [%d] is not set for the request\n", i);
-    }
     switch (pkt->cmd.toInt()) {
     case MemCmd::WritebackDirty: {
         assert(pkt->isMaskedWrite() == false);
@@ -236,8 +244,11 @@ void MAA::recvTimingReq(PacketPtr pkt, int core_id) {
                 panic_if(instruction_id == -1, "Received new instruction[2] before insturction[0]!\n");
                 current_instruction->baseAddr = data;
                 current_instruction->state = Instruction::Status::Idle;
+                // DX100 port: the context id comes from the request, which
+                // keeps it through the sequencer's IO path and the IOXBar.
+                panic_if(!pkt->req->hasContextId(), "%s: instruction store without a context id: %s\n", __func__, pkt->print());
                 current_instruction->CID = pkt->req->contextId();
-                current_instruction->PC = pkt->req->getPC();
+                current_instruction->PC = pkt->req->hasPC() ? pkt->req->getPC() : 0;
                 if (current_instruction->accessType != Instruction::AccessType::COMPUTE) {
                     current_instruction->addrRangeID = getAddrRegion(current_instruction->baseAddr);
                     current_instruction->minAddr = addrRegions[current_instruction->addrRangeID].first;
@@ -258,7 +269,7 @@ void MAA::recvTimingReq(PacketPtr pkt, int core_id) {
                 // Here we reset the timing of the packet.
                 Tick old_header_delay = pkt->headerDelay;
                 pkt->headerDelay = pkt->payloadDelay = 0;
-                cpuSidePorts[core_id]->schedTimingResp(pkt, getClockEdge(Cycles(1)) + old_header_delay);
+                pioPort->schedTimingResp(pkt, getClockEdge(Cycles(1)) + old_header_delay + pioLatency);
             }
             break;
         }
@@ -275,6 +286,24 @@ void MAA::recvTimingReq(PacketPtr pkt, int core_id) {
         // all read responses have a data payload
         assert(pkt->hasRespData());
         switch (address_range.getType()) {
+        case AddressRangeType::Type::SPD_DATA_NONCACHEABLE_RANGE: {
+            // DX100 port: Sprint 1 reads tiles uncached, one 4-byte element
+            // per load, from the non-cacheable range (the fork reads them
+            // through the cacheable range only; Sprint 2 restores that).
+            panic_if(pkt->getSize() != sizeof(uint32_t), "%s: Error: Invalid size for SPD data: %d, packet: %s\n", __func__, pkt->getSize(), pkt->print());
+            Addr offset = address_range.getOffset();
+            assert(offset % sizeof(uint32_t) == 0);
+            int tile_id = offset / (num_tile_elements * sizeof(uint32_t));
+            int element_id = (offset % (num_tile_elements * sizeof(uint32_t))) / sizeof(uint32_t);
+            pkt->setData(spd->getDataPtr(tile_id, element_id));
+            DPRINTF(MAACpuPort, "%s: TILE[%d][%d] = %u read uncached\n", __func__, tile_id, element_id, spd->getData<uint32_t>(tile_id, element_id));
+            assert(pkt->needsResponse());
+            pkt->makeTimingResponse();
+            Tick old_header_delay = pkt->headerDelay;
+            pkt->headerDelay = pkt->payloadDelay = 0;
+            pioPort->schedTimingResp(pkt, getClockEdge(Cycles(1)) + old_header_delay + pioLatency);
+            break;
+        }
         case AddressRangeType::Type::SPD_SIZE_RANGE: {
             panic_if(core_id != 0, "Size range is only for the core 0\n");
             panic_if(pkt->getSize() != sizeof(uint16_t), "%s: Error: Invalid size for SPD size: %d, packet: %s\n", __func__, pkt->getSize(), pkt->print());
@@ -289,7 +318,7 @@ void MAA::recvTimingReq(PacketPtr pkt, int core_id) {
             // Here we reset the timing of the packet.
             Tick old_header_delay = pkt->headerDelay;
             pkt->headerDelay = pkt->payloadDelay = 0;
-            cpuSidePorts[core_id]->schedTimingResp(pkt, getClockEdge(Cycles(1)) + old_header_delay);
+            pioPort->schedTimingResp(pkt, getClockEdge(Cycles(1)) + old_header_delay + pioLatency);
             break;
         }
         case AddressRangeType::Type::SPD_READY_RANGE: {
@@ -306,7 +335,7 @@ void MAA::recvTimingReq(PacketPtr pkt, int core_id) {
                 // Here we reset the timing of the packet.
                 Tick old_header_delay = pkt->headerDelay;
                 pkt->headerDelay = pkt->payloadDelay = 0;
-                cpuSidePorts[core_id]->schedTimingResp(pkt, getClockEdge(Cycles(1)) + old_header_delay);
+                pioPort->schedTimingResp(pkt, getClockEdge(Cycles(1)) + old_header_delay + pioLatency);
             } else {
                 // We need to respond to this packet later
                 my_ready_pkts.push_back(pkt);
@@ -328,7 +357,7 @@ void MAA::recvTimingReq(PacketPtr pkt, int core_id) {
             // Here we reset the timing of the packet.
             Tick old_header_delay = pkt->headerDelay;
             pkt->headerDelay = pkt->payloadDelay = 0;
-            cpuSidePorts[core_id]->schedTimingResp(pkt, getClockEdge(Cycles(1)) + old_header_delay);
+            pioPort->schedTimingResp(pkt, getClockEdge(Cycles(1)) + old_header_delay + pioLatency);
             break;
         }
         default: {
@@ -364,7 +393,7 @@ void MAA::recvTimingReq(PacketPtr pkt, int core_id) {
             // Here we reset the timing of the packet.
             Tick old_header_delay = pkt->headerDelay;
             pkt->headerDelay = pkt->payloadDelay = 0;
-            cpuSidePorts[core_id]->schedTimingResp(pkt, getClockEdge(Cycles(1)) + old_header_delay);
+            pioPort->schedTimingResp(pkt, getClockEdge(Cycles(1)) + old_header_delay + pioLatency);
             break;
         }
         default:
@@ -377,76 +406,31 @@ void MAA::recvTimingReq(PacketPtr pkt, int core_id) {
         assert(false);
     }
 }
-bool MAA::CpuSidePort::recvTimingReq(PacketPtr pkt) {
+bool MAA::PioPort::recvTimingReq(PacketPtr pkt) {
     assert(pkt->isRequest());
     /// print the packet
     DPRINTF(MAACpuPort, "%s: received %s\n", __func__, pkt->print());
-
-    if (tryTiming(pkt)) {
-        maa.recvTimingReq(pkt, core_id);
-        return true;
-    }
-    return false;
-}
-void MAA::CpuSidePort::recvFunctional(PacketPtr pkt) {
-    assert(false);
-}
-Tick MAA::recvAtomic(PacketPtr pkt) {
-    /// print the packet
-    DPRINTF(MAACpuPort, "%s: received %s\n", __func__, pkt->print());
-    assert(false);
-    return 0;
-}
-Tick MAA::CpuSidePort::recvAtomic(PacketPtr pkt) {
-    /// print the packet
-    DPRINTF(MAACpuPort, "%s: received %s\n", __func__, pkt->print());
-    assert(false);
-    return maa.recvAtomic(pkt);
-}
-
-AddrRangeList MAA::CpuSidePort::getAddrRanges() const {
-    return maa.getAddrRanges(core_id);
-}
-
-bool MAA::CpuSidePort::sendSnoopInvalidatePacket(PacketPtr pkt) {
-    /// print the packet
-    DPRINTF(MAACpuPort, "%s: sending invalidation %s\n", __func__, pkt->print());
-    int pkt_core_id = maa.core_addr(pkt->getAddr());
-    panic_if(pkt_core_id != core_id, "%s: packet is for core %d\n", __func__, pkt_core_id);
-    panic_if(is_blocked, "%s: port is blocked\n", __func__);
-    if (outstandingCpuSidePackets == maxOutstandingCpuSidePackets) {
-        // XBAR is full
-        DPRINTF(MAACpuPort, "%s Send failed because XBAR is full...\n", __func__);
-        is_blocked = true;
-        return false;
-    }
-    sendTimingSnoopReq(pkt);
-    DPRINTF(MAACpuPort, "%s Send is successfull...\n", __func__);
-    if (pkt->cacheResponding())
-        outstandingCpuSidePackets++;
+    // DX100 port: one register port for every core; the decoder tells the
+    // cores apart by requestor id, so core_id is always 0.
+    maa.recvTimingReq(pkt, 0);
     return true;
 }
-bool MAA::sendSnoopInvalidateCpu(PacketPtr pkt) {
-    panic_if(pkt->isExpressSnoop() == false, "Packet is not an express snoop packet\n");
-    int pkt_core_id = core_addr(pkt->getAddr());
-    return cpuSidePorts[pkt_core_id]->sendSnoopInvalidatePacket(pkt);
+void MAA::PioPort::recvFunctional(PacketPtr pkt) {
+    panic("%s: functional access %s to the accelerator's registers is not "
+          "supported\n", name(), pkt->print());
+}
+Tick MAA::PioPort::recvAtomic(PacketPtr pkt) {
+    panic("%s: atomic access %s to the accelerator's registers is not "
+          "supported (timing CPUs only)\n", name(), pkt->print());
+    return 0;
 }
 
-void MAA::sendSnoopPacketCpu(PacketPtr pkt) {
-    panic_if(pkt->isExpressSnoop() == false, "Packet is not an express snoop packet\n");
-    int pkt_core_id = core_addr(pkt->getAddr());
-    cpuSidePorts[pkt_core_id]->sendTimingSnoopReq(pkt);
+AddrRangeList MAA::PioPort::getAddrRanges() const {
+    return maa.getPioAddrRanges();
 }
 
-void MAA::CpuSidePort::allocate(int _core_id, int _maxOutstandingCpuSidePackets) {
-    outstandingCpuSidePackets = 0;
-    core_id = _core_id;
-    maxOutstandingCpuSidePackets = _maxOutstandingCpuSidePackets - 16;
-    is_blocked = false;
-}
-
-MAA::CpuSidePort::CpuSidePort(const std::string &_name, MAA &_maa,
-                              const std::string &_label)
+MAA::PioPort::PioPort(const std::string &_name, MAA &_maa,
+                      const std::string &_label)
     : MAAResponsePort(_name, _maa, _label) {
 }
 } // namespace gem5
