@@ -375,8 +375,11 @@ MMU::translateSe(const RequestPtr &req, ThreadContext *tc, Mode mode,
     } else {
         req->setPaddr(pte->paddr + p->pTable->pageOffset(vaddr));
 
+        // DX100 port: an uncacheable SE page is device memory, strictly
+        // ordered as x86's SE TLB makes it (O3 executes such a load at the
+        // head of the ROB); only Process.map makes such pages.
         if (pte->flags & EmulationPageTable::Uncacheable)
-            req->setFlags(Request::UNCACHEABLE);
+            req->setFlags(Request::UNCACHEABLE | Request::STRICT_ORDER);
 
         return finalizePhysical(req, tc, mode);
     }

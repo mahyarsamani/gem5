@@ -95,7 +95,10 @@ RubyPort::init()
     m_mandatory_q_ptr = m_controller->getMandatoryQueue();
     for (const auto &response_port : response_ports)
         response_port->sendRangeChange();
-    if (gotAddrRanges == 0 && FullSystem) {
+    // DX100 port: an SE board with an IO bus (the dx100 mod) connects the
+    // pio response port too, and its crossbar waits for every port's ranges.
+    if (gotAddrRanges == 0 &&
+        (FullSystem || pioResponsePort.isConnected())) {
         pioResponsePort.sendRangeChange();
     }
 }
@@ -735,7 +738,8 @@ RubyPort::PioRequestPort::recvRangeChange()
 {
     RubyPort &r = static_cast<RubyPort &>(owner);
     r.gotAddrRanges--;
-    if (r.gotAddrRanges == 0 && FullSystem) {
+    if (r.gotAddrRanges == 0 &&
+        (FullSystem || r.pioResponsePort.isConnected())) {
         r.pioResponsePort.sendRangeChange();
     }
 }
